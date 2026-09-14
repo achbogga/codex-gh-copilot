@@ -1,8 +1,14 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { once } from "node:events";
 import { createServer } from "node:http";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { promisify } from "node:util";
 import test from "node:test";
 import { listModels, startBridge } from "./bridge.mjs";
+import { codexInvocation, tokenSource } from "./run.mjs";
 
 const localToken = "local-test-secret";
 const localHeaders = {
@@ -206,3 +212,167 @@ test("catalog requires explicit policy and compatible capabilities", async () =>
     [enabled],
   );
 });
+
+test("credential source is explicit, and Codex receives only the local credential", async () => {
+  assert.throws(
+    () => tokenSource({ environment: { GH_TOKEN: "not-opted-in" } }),
+    /Supply either/,
+  );
+  await assert.rejects(
+    tokenSource({ command: process.execPath, environment: {} }),
+    /Credential helper failed/,
+  );
+  const { env, args } = codexInvocation({
+    model,
+    url: "http://127.0.0.1:1234/v1",
+    localToken,
+    stateDir: "/pilot",
+    args: ["exec", "synthetic"],
+    environment: {
+      PATH: "bin",
+      COPILOT_PILOT_TOKEN: "upstream",
+      GH_TOKEN: "github",
+      OPENAI_API_KEY: "openai",
+    },
+  });
+  assert.deepEqual(env, {
+    PATH: "bin",
+    CODEX_HOME: "/pilot",
+    COPILOT_PILOT_LOCAL_TOKEN: localToken,
+  });
+  assert.equal(args.join(" ").includes("upstream"), false);
+});
+
+test("YOLO overrides the launcher's default approval flag", () => {
+  const options = {
+    model,
+    url: "http://127.0.0.1:1234/v1",
+    localToken,
+    stateDir: "/pilot",
+    environment: {},
+  };
+  const defaults = codexInvocation({ ...options, args: [] }).args;
+  for (const flag of ["--yolo", "--dangerously-bypass-approvals-and-sandbox"]) {
+    assert.deepEqual(codexInvocation({ ...options, args: [flag] }).args, [
+      ...defaults.slice(0, -2),
+      flag,
+    ]);
+  }
+});
+
+test(
+  "real Codex exchanges custom/function tools and resumes",
+  { skip: !process.env.COPILOT_PILOT_CODEX_BIN, timeout: 60000 },
+  async (t) => {
+    const directory = await mkdtemp(join(tmpdir(), "copilot-smoke-"));
+    t.after(() => rm(directory, { recursive: true, force: true }));
+    await writeFile(join(directory, "value.txt"), "before");
+    await mkdir(join(directory, "state"));
+    const captured = [];
+    const bridge = await fixture(t, async (req, res) => {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      captured.push(JSON.parse(Buffer.concat(chunks)));
+      const item =
+        captured.length === 1
+          ? {
+              type: "custom_tool_call",
+              call_id: "pilot-patch",
+              name: "apply_patch",
+              input:
+                "*** Begin Patch\n*** Update File: value.txt\n@@\n-before\n+after\n*** End Patch",
+            }
+          : captured.length === 2
+            ? {
+                type: "function_call",
+                call_id: "pilot-call",
+                name: "exec_command",
+                arguments: JSON.stringify({
+                  cmd: "node -e \"if(require('node:fs').readFileSync('value.txt','utf8').trim()!=='after')process.exit(1);console.log('pilot-test-passed')\"",
+                  max_output_tokens: 1000,
+                }),
+              }
+            : {
+                type: "message",
+                role: "assistant",
+                id: "msg-1",
+                content: [{ type: "output_text", text: "pilot complete" }],
+              };
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.end(
+        sse([
+          { type: "response.created", response: { id: "resp-1" } },
+          { type: "response.output_item.done", item },
+          completed,
+        ]),
+      );
+    });
+    for (const args of [
+      ["exec", "--skip-git-repo-check", "Run the synthetic pilot."],
+      [
+        "exec",
+        "resume",
+        "--last",
+        "--skip-git-repo-check",
+        "Confirm the earlier pilot.",
+      ],
+    ]) {
+      const invocation = codexInvocation({
+        model,
+        url: bridge.url,
+        localToken,
+        stateDir: join(directory, "state"),
+        args,
+      });
+      const pending = promisify(execFile)(
+        process.env.COPILOT_PILOT_CODEX_BIN,
+        invocation.args,
+        {
+          env: invocation.env,
+          cwd: directory,
+          timeout: 25000,
+          maxBuffer: 1024 * 1024,
+        },
+      );
+      pending.child.stdin.end();
+      await pending;
+    }
+    assert.equal(captured.length, 4);
+    assert.ok(
+      captured[1].input.some(
+        (item) =>
+          item.type === "custom_tool_call_output" &&
+          item.call_id === "pilot-patch",
+      ),
+    );
+    const output = captured[2].input.find(
+      (item) =>
+        item.type === "function_call_output" && item.call_id === "pilot-call",
+    );
+    assert.ok(output);
+    assert.ok(
+      captured[3].input.some(
+        (item) =>
+          item.type === "function_call_output" && item.call_id === "pilot-call",
+      ),
+    );
+    const blocked = output.output.includes(
+      "bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted",
+    );
+    await t.test(
+      "file edit and shell test execution",
+      {
+        skip: blocked
+          ? "Host denies nested sandbox loopback setup; no sandbox bypass attempted."
+          : false,
+      },
+      async () => {
+        assert.equal(
+          (await readFile(join(directory, "value.txt"), "utf8")).trim(),
+          "after",
+        );
+        assert.match(output.output, /pilot-test-passed/);
+      },
+    );
+  },
+);
