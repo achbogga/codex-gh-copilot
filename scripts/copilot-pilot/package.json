@@ -1,0 +1,11 @@
+{
+  "name": "codex-copilot-pilot",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@github/copilot-sdk": "1.0.13"
+  }
+}
