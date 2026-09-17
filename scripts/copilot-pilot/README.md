@@ -4,7 +4,7 @@ This fork's experimental adapter runs **real Codex**, including Code Mode, its n
 
 ## Run on Linux
 
-Requires Node.js 22+, an authenticated `copilot` CLI (tested with 1.0.83), and the installed Codex executable bundle (tested with 0.154.0). Docker is needed only for the optional container launcher.
+Requires Node.js 22+, an authenticated `copilot` CLI (tested with 1.0.85), and the installed Codex executable bundle (tested with 0.154.0). Docker is needed only for the optional container launcher.
 
 ```bash
 npm ci --prefix scripts/copilot-pilot --ignore-scripts
@@ -39,7 +39,7 @@ In Docker mode, GitHub credentials remain outside the container. A private Unix 
 - ChatGPT-hosted features are not conferred by a Copilot seat. Copilot-specific governance controls are not automatically equivalent to Codex's controls; enterprise approval of this custom client and its data handling remains an organizational question.
 - Access denials and unsupported models fail closed. Inference requests are not retried automatically, upstream HTTP error bodies are suppressed, requests are bounded to 8 MiB, and a disconnected caller cancels inference. TLS verification stays enabled.
 
-The SDK transport hook is experimental and pinned to SDK 1.0.13. Its internal completion acknowledgement preserves the real usage/accounting while preventing the runtime from executing Codex tool calls; only the unmodified upstream output reaches Codex.
+The SDK transport hook is experimental and pinned to SDK 1.0.14. Its internal completion acknowledgement preserves the real usage/accounting while preventing the runtime from executing Codex tool calls; only the unmodified upstream output reaches Codex.
 
 ## Installation and upstream checks on the configured machine
 
@@ -48,20 +48,23 @@ The SDK transport hook is experimental and pinned to SDK 1.0.13. Its internal co
 The `codex-copilot-updates.timer` user service checks daily between 10:00 and 10:30 UTC and catches up after downtime. It fetches the official `upstream/main` reference and compares installed Codex, Copilot CLI and SDK versions with their latest stable GitHub releases. Prereleases are excluded. Fetching does not merge source changes or install packages; upgrades need compatibility checks before adopting them.
 
 ```bash
-codex-copilot-updates        # Fetch upstream and check now
-codex-copilot-updates --show # Read the cached report
+cxf update         # Fetch and merge upstream source into this fork, then check runtime releases
+cxf update --check # Fetch and check only; no merge or package installation
+cxf update --show  # Read the cached report
 systemctl --user list-timers codex-copilot-updates.timer
 ```
 
 Release reminders appear when launching `codex-copilot`, `cx`, or `cxf` in a terminal. Failed checks and reports older than three days also produce a notice. These are local terminal reminders; they do not send email or chat messages. Configuration and results live in `~/.codex-copilot-pilot/update-config.json` and `update-report.json`. The monitor uses public GitHub metadata and does not read Copilot credentials.
+
+`cxf update` always targets the configured harness checkout, regardless of your current project. It requires a clean `main` branch, preserves fork commits through a normal merge, and stops on conflicts without resetting or stashing work. It runs without a model request or Copilot login. Runtime package upgrades remain separate compatibility-tested changes; merging source does not replace the installed Codex binary. The existing `codex-copilot-updates` command remains a check-only alias.
 
 Stop scheduled checks with `systemctl --user disable --now codex-copilot-updates.timer`. To adopt upstream source, first review `git log HEAD..upstream/main`; fetching alone does not update the installed Codex binary.
 
 ## Validation
 
 ```bash
-node --test scripts/copilot-pilot/pilot.test.mjs scripts/copilot-pilot/sdk-transport.test.mjs scripts/copilot-pilot/host-run.test.mjs
-python3 -m unittest discover -s scripts/copilot-pilot -p 'update_check_test.py'
+node --test scripts/copilot-pilot/pilot.test.mjs scripts/copilot-pilot/sdk-transport.test.mjs scripts/copilot-pilot/host-run.test.mjs scripts/copilot-pilot/update-command.test.mjs
+python3 -m unittest discover -s scripts/copilot-pilot -p 'update*_test.py'
 ```
 
 Live checks on this machine covered real Codex inference, Code Mode file reads, a native apply_patch edit, shell execution, three independently checked tests, and session resume. Automated checks cover byte-preserving forwarding, authentication boundaries, policy/quota errors, cancellation, prevention of a second SDK inference/tool loop, and host launch behavior including environment inheritance and access outside the launch directory. This is a compatibility pilot, not a proof of parity for every Codex feature.

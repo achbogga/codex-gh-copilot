@@ -8,6 +8,7 @@ import { parseArgs } from "node:util";
 import { listModels, startBridge } from "./bridge.mjs";
 import { codexInvocation } from "./run.mjs";
 import { createSdkTransport } from "./sdk-transport.mjs";
+import { runUpdate, updateArguments } from "./update-command.mjs";
 
 // Host mode deliberately gives Codex the invoking user's filesystem and exported
 // environment, including credentials. It does not add a container or sandbox.
@@ -125,12 +126,25 @@ async function main() {
       // Accept the former cxf alias's flags while existing shells reload aliases.
       "network": { type: "string" },
       "allow-git-write": { type: "boolean" },
+      "check": { type: "boolean" },
+      "show": { type: "boolean" },
       "help": { type: "boolean", short: "h" },
     },
   });
+  const forwarded = separator < 0 ? [] : process.argv.slice(separator + 1);
+  const update = updateArguments([...positionals, ...forwarded]);
+  if (update !== null) {
+    process.exitCode = await runUpdate([
+      ...update,
+      ...(values.check ? ["--check"] : []),
+      ...(values.show ? ["--show"] : []),
+      ...(values.help ? ["--help"] : []),
+    ]);
+    return;
+  }
   if (values.help) {
     console.log(
-      "Usage: codex-copilot [-C DIRECTORY] [--model ID] [--reasoning max] [--state-dir PATH] [--codex-bin BINARY] [--copilot-bin BINARY] [-- CODEX_ARGS]\nRuns Codex directly on the host as your user, with YOLO, full exported environment, home and PATH access. Default: Sol/max and existing Copilot session history. For container isolation use codex-copilot-docker.",
+      "Usage: codex-copilot [-C DIRECTORY] [--model ID] [--reasoning max] [--state-dir PATH] [--codex-bin BINARY] [--copilot-bin BINARY] [-- CODEX_ARGS]\n       cxf update [--check | --show]\nRuns Codex directly on the host as your user, with YOLO, full exported environment, home and PATH access. Default: Sol/max and existing Copilot session history. For container isolation use codex-copilot-docker.",
     );
     return;
   }
@@ -147,7 +161,7 @@ async function main() {
     codexBin: values["codex-bin"],
     copilotBin: values["copilot-bin"],
     stateDir: values["state-dir"],
-    args: separator < 0 ? [] : process.argv.slice(separator + 1),
+    args: forwarded,
   });
 }
 

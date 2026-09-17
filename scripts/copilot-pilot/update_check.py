@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fetch upstream source and report stable runtime releases without installing them."""
+"""Check runtime releases and optionally merge official upstream source."""
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor
@@ -25,6 +25,25 @@ def command(args, **kwargs):
     return subprocess.check_output(
         args, text=True, stderr=subprocess.PIPE, timeout=180, **kwargs
     ).strip()
+
+
+def sync_upstream(repo):
+    git = ["git", "-C", str(repo)]
+    if command([*git, "status", "--porcelain"]):
+        raise ValueError("Commit or stash local changes before running cxf update.")
+    if command([*git, "branch", "--show-current"]) != "main":
+        raise ValueError(
+            "Switch the harness checkout to main before running cxf update."
+        )
+    before = command([*git, "rev-parse", "HEAD"])
+    try:
+        command([*git, "merge", "--no-edit", "--no-stat", "upstream/main"])
+    except subprocess.CalledProcessError as error:
+        raise ValueError(
+            "Upstream merge failed; inspect git status in the harness checkout. "
+            "No local changes were discarded."
+        ) from error
+    return command([*git, "rev-parse", "HEAD"]) != before
 
 
 def release_status(name, repository, installed):
@@ -66,11 +85,11 @@ def display(report, *, notice):
         ]
         if updates:
             print("[codex-copilot] Stable updates available: " + "; ".join(updates))
-            print("Review: codex-copilot-updates --show")
+            print("Review: cxf update --show")
         checked = datetime.fromisoformat(report["checked_at"])
         if report["errors"] or (datetime.now(timezone.utc) - checked).days >= 3:
             print(
-                "[codex-copilot] Update checks need attention: run codex-copilot-updates"
+                "[codex-copilot] Update checks need attention: run cxf update --check"
             )
         return
     print(f"Checked: {report['checked_at']}")
@@ -88,15 +107,39 @@ def display(report, *, notice):
             print(f"  {item['url']}")
     for error in report["errors"]:
         print(f"Check failed: {error}")
-    print(
-        "Source fetch only; working files, installed binaries and dependency pins are unchanged."
-    )
+    if "source_updated" in report:
+        print(
+            "Upstream source synchronized."
+            if report["source_updated"]
+            else "Upstream source already current."
+        )
+        print(
+            "Installed runtime versions are reported above; source sync does not install runtime releases."
+        )
+    elif report.get("source_sync_requested"):
+        print(
+            "Source sync did not complete. Resolve the reported errors before retrying."
+        )
+    else:
+        print(
+            "Source fetch only; working files, installed binaries and dependency pins are unchanged."
+        )
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True)
     mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--sync",
+        action="store_true",
+        help="merge upstream/main into a clean main checkout",
+    )
+    mode.add_argument(
+        "--check",
+        action="store_true",
+        help="fetch and check releases without merging or installing",
+    )
     mode.add_argument(
         "--show",
         action="store_true",
@@ -124,6 +167,7 @@ def main():
             return 0
         report = {
             "checked_at": datetime.now(timezone.utc).isoformat(),
+            "source_sync_requested": args.sync,
             "releases": [],
             "errors": [],
         }
@@ -147,6 +191,8 @@ def main():
                 ],
                 env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
             )
+            if args.sync:
+                report["source_updated"] = sync_upstream(repo)
             report["upstream"] = {
                 "commit": command([*git, "rev-parse", "upstream/main"]),
                 "commits_not_in_head": int(
@@ -155,7 +201,9 @@ def main():
             }
         except (OSError, ValueError, subprocess.SubprocessError) as error:
             report["errors"].append(
-                f"upstream fetch ({type(error).__name__}); inspect git remote -v and retry"
+                str(error)
+                if isinstance(error, ValueError)
+                else f"upstream fetch/sync ({type(error).__name__}); inspect git status and git remote -v"
             )
 
         specifications = [

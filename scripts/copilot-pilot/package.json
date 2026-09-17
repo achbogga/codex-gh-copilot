@@ -6,6 +6,6 @@
     "node": ">=22"
   },
   "dependencies": {
-    "@github/copilot-sdk": "1.0.13"
+    "@github/copilot-sdk": "1.0.14"
   }
 }

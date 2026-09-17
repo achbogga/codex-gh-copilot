@@ -68,8 +68,8 @@ class UpdateCheckTests(unittest.TestCase):
         self.assertEqual(
             output.getvalue(),
             "[codex-copilot] Stable updates available: Codex 0.153.0 -> 0.154.0\n"
-            "Review: codex-copilot-updates --show\n"
-            "[codex-copilot] Update checks need attention: run codex-copilot-updates\n",
+            "Review: cxf update --show\n"
+            "[codex-copilot] Update checks need attention: run cxf update --check\n",
         )
 
 
