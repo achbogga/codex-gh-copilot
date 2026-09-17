@@ -10,7 +10,9 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::Weak;
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
@@ -54,6 +56,7 @@ use crate::elicitation::ElicitationRequestRouter;
 use crate::elicitation::ElicitationReviewerHandle;
 use crate::event_stream::McpEventStreamOpener;
 use crate::mcp::CODEX_APPS_MCP_SERVER_NAME;
+use crate::resource_client::McpResourceServerCacheKey;
 use crate::resource_origin::ResourceOrigins;
 use crate::server::EffectiveMcpServer;
 use crate::tool_catalog_cache::McpToolCatalogCache;
@@ -68,7 +71,7 @@ pub enum McpStartupPolicy {
     LazyWhenCached,
 }
 
-/// Everything needed to materialize one exact MCP configuration.
+/// Configuration and owning-thread state needed to materialize an MCP runtime.
 pub struct McpRuntimeInput {
     pub startup_policy: McpStartupPolicy,
     pub config: Arc<McpConfig>,
@@ -85,6 +88,8 @@ pub struct McpRuntimeInput {
     pub client_mcp_extensions: ClientMcpExtensions,
     pub auth: Option<CodexAuth>,
     pub auth_manager: Option<Arc<AuthManager>>,
+    /// Whether the owning thread may prompt the user; automatic decisions remain available.
+    pub allow_user_interaction: bool,
     pub elicitation_reviewer: Option<ElicitationReviewerHandle>,
     pub elicitation_lifecycle: Option<ElicitationLifecycle>,
 }
@@ -97,6 +102,7 @@ pub struct McpRuntime {
     current: ArcSwap<PublishedMcpRuntime>,
     event_stream_cancellation: Mutex<EventStreamCancellation>,
     reconnect_pending: AtomicBool,
+    resource_cache_generation: AtomicU64,
     elicitation_router: ElicitationRequestRouter,
     resource_origins: Mutex<ResourceOrigins>,
 }
@@ -139,7 +145,8 @@ fn ensure_host_owned_apps_registration(
 
 struct CachedMcpBinding {
     catalog_revisions: HashMap<String, BindingCatalogRevision>,
-    binding: Arc<McpBinding>,
+    // Reuse a frozen binding while a model step or caller still needs it.
+    binding: Weak<McpBinding>,
 }
 
 struct McpReconnectGuard<'a> {
@@ -213,6 +220,7 @@ impl McpRuntime {
                 retained_subscription_cancellation: None,
             }),
             reconnect_pending: AtomicBool::new(false),
+            resource_cache_generation: AtomicU64::new(0),
             elicitation_router: ElicitationRequestRouter::default(),
             resource_origins: Mutex::default(),
         }
@@ -355,6 +363,18 @@ impl McpRuntime {
         self.reconnect_pending.store(true, Ordering::Release);
     }
 
+    /// Invalidates resource catalogs and contents even when connections can be reused.
+    pub fn invalidate_resource_caches(&self) {
+        self.resource_cache_generation
+            .fetch_add(1, Ordering::AcqRel);
+    }
+
+    pub(crate) fn resource_cache_key(&self, server: &str) -> Option<McpResourceServerCacheKey> {
+        let generation = self.resource_cache_generation.load(Ordering::Acquire);
+        self.latest_connections()
+            .resource_cache_key(server, generation)
+    }
+
     /// Captures the latest published configuration and live client handles.
     pub async fn current_binding(&self) -> Option<Arc<McpBinding>> {
         self.current_binding_with_requirements(&[], &HashSet::new())
@@ -393,8 +413,9 @@ impl McpRuntime {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some(cached) = cached.as_ref()
                 && &cached.catalog_revisions == catalog_revisions
+                && let Some(binding) = cached.binding.upgrade()
             {
-                return Some(Arc::clone(&cached.binding));
+                return Some(binding);
             }
         }
 
@@ -423,12 +444,13 @@ impl McpRuntime {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some(cached) = cached.as_ref()
                 && cached.catalog_revisions == catalog_revisions
+                && let Some(binding) = cached.binding.upgrade()
             {
-                return Some(Arc::clone(&cached.binding));
+                return Some(binding);
             }
             *cached = Some(CachedMcpBinding {
                 catalog_revisions,
-                binding: Arc::clone(&binding),
+                binding: Arc::downgrade(&binding),
             });
         }
         Some(binding)
@@ -995,13 +1017,20 @@ mod tests {
                 .contains("reached refreshed call preparation")
         );
         let repeated = McpRuntime::binding_from_published_runtime(
-            published,
+            Arc::clone(&published),
             /*required_servers*/ &[],
             /*required_plugins*/ &HashSet::new(),
         )
         .await
         .expect("cached refreshed binding");
         assert!(Arc::ptr_eq(&refreshed, &repeated));
+        let released = Arc::downgrade(&refreshed);
+        drop(refreshed);
+        drop(repeated);
+        assert!(
+            released.upgrade().is_none(),
+            "the runtime cache must not pin an unused binding"
+        );
         Ok(())
     }
 

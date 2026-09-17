@@ -35,6 +35,7 @@ use crate::responses_retry::ResponsesStreamRetryState;
 use crate::responses_retry::handle_retryable_response_stream_error;
 use crate::session::PreviousTurnSettings;
 use crate::session::TurnInput;
+use crate::session::daemon_recovery::RecordedTurnInput;
 use crate::session::session::Session;
 use crate::session::step_context::StepContext;
 use crate::session::turn_context::TurnContext;
@@ -93,7 +94,6 @@ use codex_protocol::models::ContentItem;
 use codex_protocol::models::MessagePhase;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelInfo;
-use codex_protocol::openai_models::ModelMessages;
 use codex_protocol::protocol::AgentMessageContentDeltaEvent;
 use codex_protocol::protocol::AgentReasoningSectionBreakEvent;
 use codex_protocol::protocol::CodexErrorInfo;
@@ -438,13 +438,15 @@ pub(crate) async fn run_turn(
             &turn_context,
             &turn_context.capture_current_model_info(),
             &pending_input,
-            PersistContext::Standard,
+            PersistContext::SteeredUserInput,
         )
         .await
         {
             break;
         }
 
+        // Input and turn-start injections are recorded before recovery can continue this turn.
+        turn_context.extension_data.insert(RecordedTurnInput);
         let window_id = sess.current_window_id().await;
         super::rollout_budget::maybe_record_reminder(
             sess.as_ref(),
@@ -503,7 +505,7 @@ pub(crate) async fn run_turn(
                 .record_step_world_state_if_changed(&world_state, step_context.as_ref())
                 .await?;
 
-            // Keep the override after accepted input so ordinary turn rollback removes it too.
+            // Keep the override after accepted input so history truncation removes them together.
             sess.record_reasoning_effort_override(step_context.as_ref())
                 .await;
 
@@ -517,7 +519,7 @@ pub(crate) async fn run_turn(
             .await;
 
             let responses_metadata = sess
-                .responses_metadata(turn_context.as_ref(), CodexResponsesRequestKind::Turn)
+                .responses_metadata(step_context.as_ref(), CodexResponsesRequestKind::Turn)
                 .await;
             run_sampling_request(
                 Arc::clone(&sess),
@@ -834,13 +836,21 @@ pub(crate) async fn run_hooks_and_record_inputs(
             if matches!(input_item, TurnInput::UserInput { content, .. } if !content.is_empty()) {
                 accepted_user_input = true;
             }
+            // Tool outputs retain their durability barrier, including in mixed input batches.
+            let input_persist_context = if persist_context == PersistContext::SteeredUserInput
+                && matches!(input_item, TurnInput::FunctionCallOutput(_))
+            {
+                PersistContext::Standard
+            } else {
+                persist_context
+            };
             record_pending_input(
                 sess,
                 turn_context,
                 model_info,
                 input_item.clone(),
                 hook_outcome.additional_contexts,
-                persist_context,
+                input_persist_context,
             )
             .await;
         }
@@ -1310,6 +1320,12 @@ async fn maybe_run_previous_model_inline_compact(
         turn_context.model_info().comp_hash.as_deref(),
     );
     let previous_model = previous_turn_settings.model;
+    if crate::guardian::is_basic_session_source(&turn_context.session_source)
+        && !should_compact_for_comp_hash_change
+        && previous_model == turn_context.model_info().slug
+    {
+        return Ok(());
+    }
     let previous_model_turn_context = Arc::new(
         turn_context
             .with_model(previous_model.clone(), &sess.services.models_manager)
@@ -1564,10 +1580,8 @@ async fn run_sampling_request(
     let mut original_input = None;
     let mut executed_tool_calls_by_output = HashMap::new();
     loop {
-        // A retry must not attribute the next tool call to the previous response.
-        turn_context
-            .extension_data
-            .remove::<codex_api::ResponseId>();
+        // Running code-mode cells can request review while this response is in flight.
+        // Keep the latest received ID until response.created replaces it.
         let prompt_input = if let Some(input) = initial_input.take() {
             input
         } else {
@@ -1705,7 +1719,6 @@ pub(crate) async fn built_tools(
     sess: &Session,
     turn_context: &TurnContext,
     model_info: &codex_protocol::openai_models::ModelInfo,
-    model_messages: Option<&ModelMessages>,
     environments: &TurnEnvironmentSnapshot,
     mcp: &Arc<codex_mcp::McpBinding>,
     step_store: &ExtensionData,
@@ -1775,7 +1788,6 @@ pub(crate) async fn built_tools(
         sess,
         turn_context,
         model_info,
-        model_messages,
         environments,
         mcp,
         apps_enabled,

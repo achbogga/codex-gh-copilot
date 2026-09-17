@@ -13,6 +13,7 @@ fn thread_settings_for_test(
     codex_app_server_protocol::ThreadSettingsUpdatedNotification {
         thread_id: thread_id.to_string(),
         thread_settings: codex_app_server_protocol::ThreadSettings {
+            disabled_plugin_ids: Vec::new(),
             cwd: test_path_buf("/tmp/thread-settings").abs(),
             approval_policy: AskForApproval::OnRequest,
             approvals_reviewer: codex_app_server_protocol::ApprovalsReviewer::AutoReview,
@@ -43,6 +44,7 @@ fn thread_settings_for_test(
 
 fn configured_thread_session(thread_id: ThreadId) -> crate::session_state::ThreadSessionState {
     crate::session_state::ThreadSessionState {
+        windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
         thread_id,
         forked_from_id: None,
         fork_parent_title: None,
@@ -824,11 +826,11 @@ async fn live_app_server_turn_completed_clears_working_status_after_answer_item(
         /*replay_kind*/ None,
     );
 
-    let completion_cells = drain_insert_history(&mut rx)
+    let completion_cells = drain_insert_history_normalized(&mut rx)
         .iter()
-        .map(|lines| normalize_completion_timestamps(lines_to_single_string(lines).trim()))
+        .map(|lines| lines_to_single_string(lines).trim().to_string())
         .collect::<Vec<_>>();
-    assert_eq!(completion_cells, vec!["done [completion time]"]);
+    assert_eq!(completion_cells, vec!["[completion time]"]);
     assert!(!chat.bottom_pane.is_task_running());
     assert!(chat.bottom_pane.status_widget().is_none());
     assert_eq!(
@@ -1079,6 +1081,7 @@ async fn live_app_server_command_execution_strips_shell_wrapper() {
             turn_id: "turn-1".to_string(),
             started_at_ms: 0,
             item: AppServerThreadItem::CommandExecution {
+                model_context: None,
                 id: "cmd-1".to_string(),
                 command: command.clone(),
                 cwd: test_path_buf("/tmp").abs().into(),
@@ -1103,6 +1106,7 @@ async fn live_app_server_command_execution_strips_shell_wrapper() {
             turn_id: "turn-1".to_string(),
             completed_at_ms: 0,
             item: AppServerThreadItem::CommandExecution {
+                model_context: None,
                 id: "cmd-1".to_string(),
                 command,
                 cwd: test_path_buf("/tmp").abs().into(),
@@ -1584,13 +1588,11 @@ async fn live_app_server_stream_recovery_restores_previous_status_header() {
         /*replay_kind*/ None,
     );
 
-    let status = chat
-        .bottom_pane
-        .status_widget()
-        .expect("status indicator should be visible");
-    assert_eq!(status.header(), "Working");
-    assert_eq!(status.details(), None);
+    assert_eq!(chat.status_state.current_status.header, "Working");
+    assert_eq!(chat.status_state.current_status.details, None);
     assert!(chat.status_state.retry_status_header.is_none());
+    assert!(chat.bottom_pane.status_widget().is_none());
+    assert!(chat.active_cell_is_stream_tail());
 }
 
 #[tokio::test]

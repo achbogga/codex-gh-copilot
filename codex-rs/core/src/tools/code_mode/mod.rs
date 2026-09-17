@@ -1,6 +1,7 @@
 mod delegate;
 mod execute_handler;
 pub(crate) mod execute_spec;
+mod output;
 mod response_adapter;
 mod telemetry;
 mod wait_handler;
@@ -47,9 +48,11 @@ use codex_utils_output_truncation::TruncationPolicy;
 use codex_utils_output_truncation::formatted_truncate_text_content_items_with_policy;
 use codex_utils_output_truncation::truncate_function_output_items_with_policy;
 
+use delegate::CodeModeCellDelegate;
 use delegate::CodeModeDispatchBroker;
 use delegate::CodeModeDispatchWorker;
 pub(crate) use execute_handler::CodeModeExecuteHandler;
+use output::CodeModeToolOutput;
 use response_adapter::into_function_call_output_content_items;
 pub(crate) use wait_handler::CodeModeWaitHandler;
 
@@ -125,11 +128,16 @@ impl CodeModeService {
     pub(crate) async fn execute(
         &self,
         mut request: codex_code_mode::ExecuteRequest,
+        step_context: Arc<StepContext>,
     ) -> Result<codex_code_mode::StartedCell, String> {
         request
             .yield_time_ms
             .get_or_insert(self.default_exec_yield_time_ms);
-        self.session().await?.execute(request).await
+        let delegate = Arc::new(CodeModeCellDelegate {
+            broker: Arc::clone(&self.dispatch_broker),
+            step_context,
+        });
+        self.session().await?.execute(request, delegate).await
     }
 
     pub(crate) async fn wait(
@@ -183,17 +191,17 @@ impl CodeModeService {
     pub(crate) fn mark_cell_ready_for_dispatch(
         &self,
         cell_id: &codex_code_mode::CellId,
-        originating_item_id: Option<codex_protocol::ResponseItemId>,
+        originating_call: Option<crate::tools::context::ToolCallOrigin>,
     ) {
         self.dispatch_broker
-            .mark_cell_ready_for_dispatch(cell_id, originating_item_id);
+            .mark_cell_ready_for_dispatch(cell_id, originating_call);
     }
 
-    pub(crate) fn cell_originating_item_id(
+    pub(crate) fn cell_originating_call(
         &self,
         cell_id: &codex_code_mode::CellId,
-    ) -> Option<codex_protocol::ResponseItemId> {
-        self.dispatch_broker.cell_originating_item_id(cell_id)
+    ) -> Option<crate::tools::context::ToolCallOrigin> {
+        self.dispatch_broker.cell_originating_call(cell_id)
     }
 
     pub(crate) fn finish_cell_dispatch(&self, cell_id: &CellId) {
@@ -206,18 +214,13 @@ impl CodeModeService {
         step_context: Arc<StepContext>,
         tracker: SharedTurnDiffTracker,
     ) -> Option<CodeModeDispatchWorker> {
-        let turn = &step_context.turn;
         if !step_context.tool_router.requires_code_mode_worker() {
             return None;
         }
 
-        let exec = ExecContext {
-            session: Arc::clone(session),
-            turn: Arc::clone(turn),
-        };
         Some(
             self.dispatch_broker
-                .start_turn_worker(exec, step_context, tracker),
+                .start_turn_worker(Arc::clone(session), step_context, tracker),
         )
     }
 
@@ -237,7 +240,7 @@ impl CodeModeService {
                     }
                     session = self
                         .session_provider
-                        .create_session(self.dispatch_broker.clone()) => session?,
+                        .create_session() => session?,
                 };
                 if self.shutdown_token.is_cancelled() {
                     let _ = session.shutdown().await;
@@ -250,51 +253,43 @@ impl CodeModeService {
     }
 }
 
-pub(super) async fn handle_runtime_response(
+fn handle_runtime_response(
     model_info: &codex_protocol::openai_models::ModelInfo,
     response: RuntimeResponse,
     max_output_tokens: Option<usize>,
     wall_time: Duration,
-) -> Result<FunctionToolOutput, String> {
+    experimental_show_cell_overhead: bool,
+) -> CodeModeToolOutput {
     let script_status = format_script_status(&response);
     let supports_original = can_request_original_image_detail(model_info);
+    let host_duration = response
+        .code_mode_host_duration()
+        .filter(|_| experimental_show_cell_overhead);
 
-    match response {
-        RuntimeResponse::Yielded { content_items, .. } => {
-            let mut content_items = into_function_call_output_content_items(content_items);
-            sanitize_image_detail_items(supports_original, &mut content_items);
-            content_items = truncate_code_mode_result(content_items, max_output_tokens);
-            prepend_script_status(&mut content_items, &script_status, wall_time);
-            Ok(FunctionToolOutput::from_content(content_items, Some(true)))
-        }
-        RuntimeResponse::Terminated { content_items, .. } => {
-            let mut content_items = into_function_call_output_content_items(content_items);
-            sanitize_image_detail_items(supports_original, &mut content_items);
-            content_items = truncate_code_mode_result(content_items, max_output_tokens);
-            prepend_script_status(&mut content_items, &script_status, wall_time);
-            Ok(FunctionToolOutput::from_content(content_items, Some(true)))
-        }
+    let (content_items, error_text) = match response {
+        RuntimeResponse::Yielded { content_items, .. }
+        | RuntimeResponse::Terminated { content_items, .. } => (content_items, None),
         RuntimeResponse::Result {
             content_items,
             error_text,
             ..
-        } => {
-            let mut content_items = into_function_call_output_content_items(content_items);
-            sanitize_image_detail_items(supports_original, &mut content_items);
-            let success = error_text.is_none();
-            if let Some(error_text) = error_text {
-                content_items.push(FunctionCallOutputContentItem::InputText {
-                    text: format!("Script error:\n{error_text}"),
-                });
-            }
-            content_items = truncate_code_mode_result(content_items, max_output_tokens);
-            prepend_script_status(&mut content_items, &script_status, wall_time);
-            Ok(FunctionToolOutput::from_content(
-                content_items,
-                Some(success),
-            ))
-        }
+        } => (content_items, error_text),
+    };
+    let mut content_items = into_function_call_output_content_items(content_items);
+    sanitize_image_detail_items(supports_original, &mut content_items);
+    let success = error_text.is_none();
+    if let Some(error_text) = error_text {
+        content_items.push(FunctionCallOutputContentItem::InputText {
+            text: format!("Script error:\n{error_text}"),
+        });
     }
+    content_items = truncate_code_mode_result(content_items, max_output_tokens);
+    CodeModeToolOutput::new(
+        FunctionToolOutput::from_content(content_items, Some(success)),
+        script_status,
+        wall_time,
+        host_duration,
+    )
 }
 
 fn format_script_status(response: &RuntimeResponse) -> String {
@@ -311,16 +306,6 @@ fn format_script_status(response: &RuntimeResponse) -> String {
             }
         }
     }
-}
-
-fn prepend_script_status(
-    content_items: &mut Vec<FunctionCallOutputContentItem>,
-    status: &str,
-    wall_time: Duration,
-) {
-    let wall_time_seconds = ((wall_time.as_secs_f32()) * 10.0).round() / 10.0;
-    let header = format!("{status}\nWall time {wall_time_seconds:.1} seconds\nOutput:\n");
-    content_items.insert(0, FunctionCallOutputContentItem::InputText { text: header });
 }
 
 fn truncate_code_mode_result(
@@ -343,7 +328,8 @@ fn truncate_code_mode_result(
 
 // Submit synchronously so the recorder sees the call before the cell's dispatch gate closes.
 fn submit_nested_tool(
-    exec: ExecContext,
+    session: Arc<Session>,
+    step_context: Arc<StepContext>,
     tool_runtime: ToolCallRuntime,
     invocation: CodeModeNestedToolCall,
     call_id: String,
@@ -359,8 +345,8 @@ fn submit_nested_tool(
         tool_kind,
         input,
     } = invocation;
-    let thread_id = exec.session.thread_id;
-    let turn_id = exec.turn.sub_id.clone();
+    let thread_id = session.thread_id;
+    let turn_id = step_context.turn.sub_id.clone();
     let tool_name = tool_name.with_default_namespace();
     // A cell can outlive a turn; the broker records arrival before a dispatching turn is known.
     tracing::event!(
@@ -399,16 +385,17 @@ fn submit_nested_tool(
         payload,
         encrypted_function_args: None,
     };
-    exec.session
+    session
         .services
         .analytics_events_client
         .track_code_mode_tool_call(codex_analytics::CodeModeToolCallFact::ChildStarted {
-            thread_id: exec.session.thread_id.to_string(),
-            turn_id: exec.turn.sub_id.clone(),
+            thread_id: session.thread_id.to_string(),
+            turn_id: step_context.turn.sub_id.clone(),
             call_id: call.call_id.clone(),
             cell_id: cell_id.to_string(),
         });
     let result = tool_runtime.handle_tool_call_with_source(
+        step_context,
         call,
         ToolCallSource::CodeMode {
             cell_id: cell_id.to_string(),

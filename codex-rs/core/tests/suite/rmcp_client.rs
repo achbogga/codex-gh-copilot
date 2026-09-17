@@ -52,6 +52,7 @@ use codex_protocol::mcp_policy::McpServerRequirement;
 use codex_protocol::mcp_policy::PluginMcpRequirements;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ImageDetail;
+use codex_protocol::models::ImageReference;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::PermissionProfileSnapshot;
 use codex_protocol::models::ResponseItem;
@@ -827,6 +828,7 @@ async fn environment_mcp_policy_filters_runtime_config_and_model_tools(
                 ),
                 shell_environment_policy: Default::default(),
                 windows_sandbox_level: WindowsSandboxLevel::from_config(&fixture.config),
+                windows_sandbox_type: fixture.config.permissions.windows_sandbox_type,
                 windows_sandbox_private_desktop: fixture
                     .config
                     .permissions
@@ -1487,7 +1489,9 @@ async fn interrupt_during_mcp_startup_preserves_user_input_in_history(
         unreachable!("read_only_user_turn creates user input");
     };
     content.push(UserInput::Image {
-        image_url: OPENAI_PNG.to_string(),
+        image: ImageReference::Inline {
+            image_url: OPENAI_PNG.to_string(),
+        },
         detail: Some(ImageDetail::High),
     });
     fixture.codex.start_or_steer_turn(input).await?;
@@ -1549,7 +1553,9 @@ async fn interrupt_during_mcp_startup_preserves_user_input_in_history(
     };
     assert!(
         content.contains(&ContentItem::InputImage {
-            image_url: OPENAI_PNG.to_string(),
+            image: ImageReference::Inline {
+                image_url: OPENAI_PNG.to_string()
+            },
             detail: Some(ImageDetail::Original),
         }),
         "interrupted input must use the current model's unified image budget"
@@ -1885,6 +1891,7 @@ async fn stdio_mcp_tool_call_includes_sandbox_state_meta(
                     ),
                     shell_environment_policy: Default::default(),
                     windows_sandbox_level: WindowsSandboxLevel::from_config(&fixture.config),
+                    windows_sandbox_type: fixture.config.permissions.windows_sandbox_type,
                     windows_sandbox_private_desktop: fixture
                         .config
                         .permissions
@@ -2498,6 +2505,12 @@ async fn stdio_image_responses_round_trip() -> anyhow::Result<()> {
         .start_or_steer_turn(read_only_user_turn(&fixture, "call the rmcp image tool"))
         .await?;
 
+    let turn_id = core_test_support::wait_for_event_match(&fixture.codex, |event| match event {
+        EventMsg::TurnStarted(started) => Some(started.turn_id.clone()),
+        _ => None,
+    })
+    .await;
+
     // Wait for tool begin/end and final completion.
     let begin_event = wait_for_event(&fixture.codex, |ev| {
         matches!(ev, EventMsg::McpToolCallBegin(_))
@@ -2509,6 +2522,7 @@ async fn stdio_image_responses_round_trip() -> anyhow::Result<()> {
     assert_eq!(
         begin,
         McpToolCallBeginEvent {
+            turn_id: turn_id.clone(),
             call_id: call_id.to_string(),
             invocation: McpInvocation {
                 server: server_name.to_string(),
@@ -2517,6 +2531,7 @@ async fn stdio_image_responses_round_trip() -> anyhow::Result<()> {
             },
             connector_id: None,
             mcp_app_resource_uri: None,
+            mcp_app_ui: None,
             link_id: None,
             app_name: None,
             action_name: None,
@@ -2532,6 +2547,7 @@ async fn stdio_image_responses_round_trip() -> anyhow::Result<()> {
     let EventMsg::McpToolCallEnd(end) = end_event else {
         unreachable!("end");
     };
+    assert_eq!(end.turn_id, turn_id);
     assert_eq!(end.call_id, call_id);
     assert_eq!(
         end.invocation,
@@ -2807,6 +2823,7 @@ async fn stdio_image_responses_are_sanitized_for_text_only_model() -> anyhow::Re
                 additional_speed_tiers: Vec::new(),
                 service_tiers: Vec::new(),
                 default_service_tier: None,
+                available_access_programs: None,
                 upgrade: None,
                 model_messages: None,
                 include_skills_usage_instructions: false,

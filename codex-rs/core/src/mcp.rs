@@ -6,7 +6,6 @@ use crate::environment_selection::ThreadEnvironments;
 use codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID;
 use codex_config::McpServerConfig;
 use codex_connectors::ConnectorRuntimeManager;
-use codex_connectors::ConnectorSnapshot;
 use codex_connectors::PluginConnectorSource;
 use codex_core_plugins::PluginsManager;
 use codex_exec_server::ExecutorCapabilityDiscoverySnapshot;
@@ -198,14 +197,19 @@ impl McpManager {
                             .with_protocol_mode(protocol_mode),
                         )));
                     }
-                    McpServerContribution::HostedApps { config } => {
-                        overlays.push(OrderedMcpOverlay::Set(Box::new(
-                            McpServerRegistration::from_hosted_apps(
-                                contributor.id(),
-                                contribution_order,
-                                *config,
-                            ),
-                        )));
+                    McpServerContribution::HostedApps {
+                        config,
+                        protocol_mode,
+                    } => {
+                        let mut registration = McpServerRegistration::from_hosted_apps(
+                            contributor.id(),
+                            contribution_order,
+                            *config,
+                        );
+                        if let Some(protocol_mode) = protocol_mode {
+                            registration = registration.with_protocol_mode(protocol_mode);
+                        }
+                        overlays.push(OrderedMcpOverlay::Set(Box::new(registration)));
                     }
                     McpServerContribution::SelectedPlugin { ref plugin_id, .. }
                         if disabled_plugin_ids.contains(plugin_id) => {}
@@ -273,10 +277,14 @@ impl McpManager {
             .capability_summaries()
             .iter()
             .map(PluginConnectorSource::from);
-        let connector_snapshot = ConnectorSnapshot::from_plugin_sources(
-            host_plugin_connector_sources.chain(selected_plugin_connector_sources),
-            disabled_plugin_ids,
-        );
+        let connector_snapshot = if config.features.enabled(Feature::Plugins) {
+            self.plugins_manager.connector_snapshot(
+                host_plugin_connector_sources.chain(selected_plugin_connector_sources),
+                disabled_plugin_ids,
+            )
+        } else {
+            Default::default()
+        };
         let loaded_plugins = loaded_plugins.without_plugins(disabled_plugin_ids);
         let plugins_available =
             selected_plugin_available || !loaded_plugins.capability_summaries().is_empty();
