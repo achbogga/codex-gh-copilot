@@ -2,6 +2,7 @@ import { timingSafeEqual } from "node:crypto";
 import { createServer } from "node:http";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
+import { usesMessages } from "./anthropic-request.mjs";
 
 const upstream = "https://api.githubcopilot.com";
 const maxBody = 8 * 1024 * 1024;
@@ -34,7 +35,11 @@ async function readBounded(stream) {
 }
 
 // The injected transport is for local tests. Production has one fixed TLS origin.
-export async function listModels(getToken, transport = fetch) {
+export async function listModels(
+  getToken,
+  transport = fetch,
+  { messages = false } = {},
+) {
   const response = await transport(`${upstream}/models`, {
     headers: headers(await getToken()),
     redirect: "error",
@@ -55,7 +60,8 @@ export async function listModels(getToken, transport = fetch) {
       typeof model?.id === "string" &&
       model.model_picker_enabled === true &&
       model.policy?.state === "enabled" &&
-      model.supported_endpoints?.includes("/responses") &&
+      (model.supported_endpoints?.includes("/responses") ||
+        (messages && usesMessages(model))) &&
       model.capabilities?.supports?.tool_calls === true &&
       model.capabilities?.supports?.streaming === true,
   );
