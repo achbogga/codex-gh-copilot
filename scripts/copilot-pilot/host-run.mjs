@@ -14,7 +14,7 @@ import { runUpdate, updateArguments } from "./update-command.mjs";
 // environment, including credentials. It does not add a container or sandbox.
 export async function runHost({
   directory = process.cwd(),
-  model = "gpt-5.6-sol",
+  model = "gpt-6.1-sol",
   reasoning = "max",
   codexBin = "codex",
   copilotBin = "copilot",
@@ -144,7 +144,7 @@ async function main() {
   }
   if (values.help) {
     console.log(
-      "Usage: codex-copilot [-C DIRECTORY] [--model ID] [--reasoning max] [--state-dir PATH] [--codex-bin BINARY] [--copilot-bin BINARY] [-- CODEX_ARGS]\n       cxf update [--check | --show]\nRuns Codex directly on the host as your user, with YOLO, full exported environment, home and PATH access. Default: Sol/max and existing Copilot session history. For container isolation use codex-copilot-docker.",
+      "Usage: codex-copilot [-C DIRECTORY] [--model ID] [--reasoning max] [--state-dir PATH] [--codex-bin BINARY] [--copilot-bin BINARY] [-- CODEX_ARGS]\n       cxf update [--check | --show]\nRuns Codex directly on the host as your user, with YOLO, full exported environment, home and PATH access. Default: GPT-6.1 Sol/max, full advertised context, and existing Copilot session history. For container isolation use codex-copilot-docker.",
     );
     return;
   }

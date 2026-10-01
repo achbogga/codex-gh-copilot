@@ -4,7 +4,7 @@ This fork's experimental adapter runs **real Codex**, including Code Mode, its n
 
 ## Run on Linux
 
-Requires Node.js 22+, an authenticated `copilot` CLI (tested with 1.0.85), and the installed Codex executable bundle (tested with 0.154.0). Docker is needed only for the optional container launcher.
+Requires Node.js 22+, an authenticated `copilot` CLI (tested with 1.0.91), and the installed Codex executable bundle (tested with 0.160.0). Docker is needed only for the optional container launcher.
 
 ```bash
 npm ci --prefix scripts/copilot-pilot --ignore-scripts
@@ -13,7 +13,7 @@ node scripts/copilot-pilot/host-run.mjs -C /path/to/project
 node scripts/copilot-pilot/host-run.mjs -C /path/to/project -- resume --last
 ```
 
-The configured machine has `codex-copilot` and Bash aliases `cx` and `cxf`, all using the host launcher. Defaults are GPT-5.6 Sol, max reasoning, and the advertised context limit, with compaction headroom below the provider's prompt limit. `--model`, `--reasoning`, `--state-dir`, `--copilot-bin`, and `--codex-bin` override these choices. The Codex binary must retain its companion executables, including `codex-code-mode-host`. Changes to Rust are unnecessary for this transport integration.
+The configured machine has `codex-copilot` and Bash aliases `cx` and `cxf`, all using the host launcher. Both launchers default to GPT-6.1 Sol (`gpt-6.1-sol`), max reasoning, and the full advertised context limit. The enabled Copilot catalog currently advertises 1,050,000 total context tokens, with a 922,000-token input limit and 128,000-token output limit. Auto-compaction retains headroom at 95% of the input limit (875,900 tokens). Limits are read from the provider catalog at launch. `--model`, `--reasoning`, `--state-dir`, `--copilot-bin`, and `--codex-bin` override these choices. The Codex binary must retain its companion executables, including `codex-code-mode-host`. Changes to Rust are unnecessary for this transport integration.
 
 ## Host shell access
 
@@ -39,7 +39,7 @@ In Docker mode, GitHub credentials remain outside the container. A private Unix 
 - ChatGPT-hosted features are not conferred by a Copilot seat. Copilot-specific governance controls are not automatically equivalent to Codex's controls; enterprise approval of this custom client and its data handling remains an organizational question.
 - Access denials and unsupported models fail closed. Inference requests are not retried automatically, upstream HTTP error bodies are suppressed, requests are bounded to 8 MiB, and a disconnected caller cancels inference. TLS verification stays enabled.
 
-The SDK transport hook is experimental and pinned to SDK 1.0.14. Its internal completion acknowledgement preserves the real usage/accounting while preventing the runtime from executing Codex tool calls; only the unmodified upstream output reaches Codex.
+The SDK transport hook is experimental and pinned to SDK 1.0.16. Its internal completion acknowledgement preserves the real usage/accounting while preventing the runtime from executing Codex tool calls; only the unmodified upstream output reaches Codex.
 
 ## Installation and upstream checks on the configured machine
 
@@ -70,5 +70,7 @@ python3 -m unittest discover -s scripts/copilot-pilot -p 'update*_test.py'
 Live checks on this machine covered real Codex inference, Code Mode file reads, a native apply_patch edit, shell execution, three independently checked tests, and session resume. Automated checks cover byte-preserving forwarding, authentication boundaries, policy/quota errors, cancellation, prevention of a second SDK inference/tool loop, and host launch behavior including environment inheritance and access outside the launch directory. This is a compatibility pilot, not a proof of parity for every Codex feature.
 
 The live host-access check additionally verified the real HOME, reading and writing outside the launch directory, changing to that directory, host Node and Cargo availability, and inheritance of synthetic TOKEN and KEY environment variables without printing real credentials.
+
+The GPT-6.1 Sol default was verified with Codex 0.160.0, Copilot CLI 1.0.91 and SDK 1.0.16: native file reads, apply_patch, and four passing shell-run tests. The running process used max reasoning, a 1,050,000-token context window, and the 875,900-token compaction threshold.
 
 The earlier direct-token experiment remains in `run.mjs`. Its generic endpoint did not expose the needed models for this account; use the SDK launcher above.

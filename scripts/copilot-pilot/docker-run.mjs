@@ -18,7 +18,7 @@ const { values, positionals } = parseArgs({
     process.argv.indexOf("--") < 0 ? undefined : process.argv.indexOf("--"),
   ),
   options: {
-    "model": { type: "string", default: "gpt-5.6-sol" },
+    "model": { type: "string", default: "gpt-6.1-sol" },
     "reasoning": { type: "string", default: "max" },
     "directory": { type: "string", short: "C", default: process.cwd() },
     "codex-bin": { type: "string" },
@@ -44,7 +44,7 @@ async function executable(name) {
 async function main() {
   if (values.help) {
     console.log(
-      "Usage: codex-copilot [-C PROJECT] [--model ID] [--reasoning max] [--network none|bridge] [--allow-git-write] [--codex-bin NATIVE_BINARY] [-- CODEX_ARGS]\nRuns real Codex in Docker using your official Copilot CLI login. Default: Sol/max; no tool network; Git and agent metadata read-only. GitHub credentials stay on the host.",
+      "Usage: codex-copilot [-C PROJECT] [--model ID] [--reasoning max] [--network none|bridge] [--allow-git-write] [--codex-bin NATIVE_BINARY] [-- CODEX_ARGS]\nRuns real Codex in Docker using your official Copilot CLI login. Default: GPT-6.1 Sol/max with full advertised context; no tool network; Git and agent metadata read-only. GitHub credentials stay on the host.",
     );
     return;
   }
