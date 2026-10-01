@@ -8,6 +8,7 @@ import { parseArgs } from "node:util";
 import { listModels, startBridge } from "./bridge.mjs";
 import { codexInvocation } from "./run.mjs";
 import { createSdkTransport } from "./sdk-transport.mjs";
+import { modelArguments } from "./model-config.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const { values, positionals } = parseArgs({
@@ -91,11 +92,13 @@ async function main() {
   try {
     sdk = await createSdkTransport({ cliPath, directory: transportDir });
     const model = (
-      await listModels(async () => "sdk-owned", sdk.transport)
+      await listModels(async () => "sdk-owned", sdk.transport, {
+        messages: true,
+      })
     ).find((m) => m.id === values.model);
     if (!model)
       throw new Error(
-        "The selected Copilot model is not enabled for streaming Responses tools.",
+        "The selected Copilot model is not enabled for a supported streaming tool protocol.",
       );
     if (
       !model.capabilities.supports.reasoning_effort?.includes(values.reasoning)
@@ -117,12 +120,12 @@ async function main() {
       localToken: token,
       stateDir: "/codex-home",
       args: [
-        "-c",
-        `model_reasoning_effort=${JSON.stringify(values.reasoning)}`,
-        "-c",
-        `model_context_window=${model.capabilities.limits.max_context_window_tokens}`,
-        "-c",
-        `model_auto_compact_token_limit=${Math.floor(model.capabilities.limits.max_prompt_tokens * 0.95)}`,
+        ...(await modelArguments(
+          model,
+          values.reasoning,
+          join(transportDir, "models.json"),
+          "/transport/models.json",
+        )),
         ...(separator < 0 ? [] : process.argv.slice(separator + 1)),
       ],
     });

@@ -2,11 +2,19 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createSdkTransport } from "./sdk-transport.mjs";
 
-async function fixture(t, upstream, replay = false) {
+async function fixture(t, upstream, replay = false, messages = false) {
   const requests = [],
     acknowledgements = [];
   const catalog = {
-    data: [{ id: "test-model", policy: { state: "enabled" } }],
+    data: [
+      messages
+        ? {
+            id: "claude-opus-5.5",
+            supported_endpoints: ["/v1/messages"],
+            capabilities: { limits: { max_output_tokens: 128000 } },
+          }
+        : { id: "test-model", policy: { state: "enabled" } },
+    ],
   };
   class Client {
     constructor(options) {
@@ -30,7 +38,7 @@ async function fixture(t, upstream, replay = false) {
           const send = () =>
             this.handler.sendRequest(
               new Request(
-                "https://api.enterprise.githubcopilot.com/responses",
+                `https://api.enterprise.githubcopilot.com/${messages ? "v1/messages" : "responses"}`,
                 {
                   method: "POST",
                   body: "original SDK payload",
@@ -157,32 +165,117 @@ test("SDK surfaces denied access without an inference retry", async (t) => {
   assert.equal(sdk.requests.length, 1);
 });
 
-test("cancelling Codex aborts an in-flight SDK upstream", async (t) => {
-  let cancelled = false;
+for (const messages of [false, true])
+  test(`cancelling Codex aborts an in-flight SDK ${messages ? "Messages" : "Responses"} upstream`, async (t) => {
+    let cancelled = false;
+    const sdk = await fixture(
+      t,
+      (request) =>
+        new Promise((resolve, reject) => {
+          request.signal.addEventListener(
+            "abort",
+            () => {
+              cancelled = true;
+              reject(new Error("aborted"));
+            },
+            { once: true },
+          );
+        }),
+      false,
+      messages,
+    );
+    const controller = new AbortController();
+    const response = sdk.transport(
+      "https://api.githubcopilot.com/responses",
+      messages
+        ? {
+            ...init(controller.signal),
+            body: JSON.stringify({ model: "claude-opus-5.5", input: "Hello" }),
+          }
+        : init(controller.signal),
+    );
+    const rejected = assert.rejects(response, /cancelled|failed/);
+    while (!sdk.requests.length)
+      await new Promise((resolve) => setImmediate(resolve));
+    controller.abort();
+    await rejected;
+    await sdk.close();
+    assert.equal(cancelled, true);
+  });
+
+test("SDK translates Opus with runtime authentication and real accounting, without executing tools or retrying denial", async (t) => {
+  const request = {
+    ...init(new AbortController().signal),
+    body: JSON.stringify({
+      model: "claude-opus-5.5",
+      input: "Hello",
+      reasoning: { effort: "max" },
+    }),
+  };
+  const message = {
+    id: "msg_sdk",
+    type: "message",
+    role: "assistant",
+    model: "claude-opus-5.5",
+    content: [],
+    usage: { input_tokens: 12, output_tokens: 3 },
+  };
+  const bytes = [
+    { type: "message_start", message },
+    {
+      type: "content_block_start",
+      index: 0,
+      content_block: { type: "text", text: "Hi" },
+    },
+    { type: "content_block_stop", index: 0 },
+    {
+      type: "message_delta",
+      delta: { stop_reason: "end_turn" },
+      usage: { output_tokens: 3 },
+      copilot_usage: { total_nano_aiu: 55 },
+    },
+    { type: "message_stop" },
+  ]
+    .map((value) => `data: ${JSON.stringify(value)}\n\n`)
+    .join("");
   const sdk = await fixture(
     t,
-    (request) =>
-      new Promise((resolve, reject) => {
-        request.signal.addEventListener(
-          "abort",
-          () => {
-            cancelled = true;
-            reject(new Error("aborted"));
-          },
-          { once: true },
-        );
-      }),
+    () =>
+      new Response(bytes, { headers: { "content-type": "text/event-stream" } }),
+    true,
+    true,
   );
-  const controller = new AbortController();
-  const response = sdk.transport(
-    "https://api.githubcopilot.com/responses",
-    init(controller.signal),
+  assert.match(
+    await (
+      await sdk.transport("https://api.githubcopilot.com/responses", request)
+    ).text(),
+    /response.completed/,
   );
-  const rejected = assert.rejects(response, /cancelled|failed/);
-  while (!sdk.requests.length)
-    await new Promise((resolve) => setImmediate(resolve));
-  controller.abort();
-  await rejected;
   await sdk.close();
-  assert.equal(cancelled, true);
+  assert.equal(sdk.requests.length, 1);
+  const sent = sdk.requests[0];
+  assert.equal(sent.authorization, "Bearer runtime-owned-token");
+  assert.equal(sent.initiator, "agent");
+  assert.deepEqual(JSON.parse(sent.body).output_config, { effort: "max" });
+  assert.deepEqual(sdk.acknowledgements, [
+    {
+      ...message,
+      content: [{ type: "text", text: "Forwarded to Codex." }],
+      stop_reason: "end_turn",
+      copilot_usage: { total_nano_aiu: 55 },
+    },
+  ]);
+  const denied = await fixture(
+    t,
+    () => new Response("private denial", { status: 403 }),
+    false,
+    true,
+  );
+  assert.equal(
+    (await denied.transport("https://api.githubcopilot.com/responses", request))
+      .status,
+    403,
+  );
+  await denied.close();
+  assert.equal(denied.requests.length, 1);
 });

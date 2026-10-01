@@ -1,6 +1,6 @@
 # Codex with a GitHub Copilot seat
 
-This fork's experimental adapter runs **real Codex**, including Code Mode, its native tool loop, apply_patch, shell commands and session history. The official GitHub Copilot SDK handles the existing CLI login, account routing and model catalog. Its [request handler](https://github.com/github/copilot-sdk/blob/main/nodejs/src/copilotRequestHandler.ts) forwards the original Codex Responses request and streams the original response back to Codex. It does not translate tool schemas or run a second coding agent.
+This fork's experimental adapter runs **real Codex**, including Code Mode, its native tool loop, apply_patch, shell commands and session history. The official GitHub Copilot SDK handles the existing CLI login, account routing and model catalog. Its [request handler](https://github.com/github/copilot-sdk/blob/main/nodejs/src/copilotRequestHandler.ts) forwards GPT Responses requests unchanged. For Opus 5.5 it translates Codex's Responses protocol to Anthropic Messages. Only Codex runs the tools; the SDK does not run a second coding agent.
 
 ## Run on Linux
 
@@ -14,6 +14,19 @@ node scripts/copilot-pilot/host-run.mjs -C /path/to/project -- resume --last
 ```
 
 The configured machine has `codex-copilot` and Bash aliases `cx` and `cxf`, all using the host launcher. Both launchers default to GPT-6.1 Sol (`gpt-6.1-sol`), max reasoning, and the full advertised context limit. The enabled Copilot catalog currently advertises 1,050,000 total context tokens, with a 922,000-token input limit and 128,000-token output limit. Auto-compaction retains headroom at 95% of the input limit (875,900 tokens). Limits are read from the provider catalog at launch. `--model`, `--reasoning`, `--state-dir`, `--copilot-bin`, and `--codex-bin` override these choices. The Codex binary must retain its companion executables, including `codex-code-mode-host`. Changes to Rust are unnecessary for this transport integration.
+
+### Opus 5.5 option
+
+```bash
+source ~/.bash_aliases
+cxo  # Claude Opus 5.5, max reasoning, full context, host YOLO mode
+# Equivalent explicit launcher:
+codex-copilot --model claude-opus-5.5 --reasoning max
+```
+
+`cxf` still defaults to GPT-6.1 Sol. Opus uses the seat's enabled `claude-opus-5.5` model with a 1,000,000-token window and up to 128,000 output tokens. Compaction starts at 828,400 tokens, retaining output space and 5% input headroom. A temporary Codex model catalog sets the actual context cap, so Codex's bundled or unknown-model limits cannot silently reduce the selected model's window. Known GPT metadata retains its bundled instructions and tools with the Copilot catalog's context limits.
+
+The Opus translation supports text, images, function tools, namespaced tools, custom tools (including Code Mode and apply_patch), and tool results. Signed thinking blocks are stored as opaque serialized state in Codex rollouts and replayed unchanged; prompt caching is enabled. Start a fresh session when switching model families. Resume an existing Opus session with `cxo resume SESSION_ID`. Unsupported history items, hosted tools, forced tool choice, and structured output modes fail closed. Custom tools use a JSON string wrapper; their Responses grammar is not enforced by Anthropic. Enterprise model policy, authentication and usage accounting still come from the official Copilot runtime.
 
 ## Host shell access
 
@@ -63,7 +76,7 @@ Stop scheduled checks with `systemctl --user disable --now codex-copilot-updates
 ## Validation
 
 ```bash
-node --test scripts/copilot-pilot/pilot.test.mjs scripts/copilot-pilot/sdk-transport.test.mjs scripts/copilot-pilot/host-run.test.mjs scripts/copilot-pilot/update-command.test.mjs
+node --test scripts/copilot-pilot/*.test.mjs
 python3 -m unittest discover -s scripts/copilot-pilot -p 'update*_test.py'
 ```
 
@@ -71,6 +84,8 @@ Live checks on this machine covered real Codex inference, Code Mode file reads, 
 
 The live host-access check additionally verified the real HOME, reading and writing outside the launch directory, changing to that directory, host Node and Cargo availability, and inheritance of synthetic TOKEN and KEY environment variables without printing real credentials.
 
-The GPT-6.1 Sol default was verified with Codex 0.160.0, Copilot CLI 1.0.91 and SDK 1.0.16: native file reads, apply_patch, and four passing shell-run tests. The running process used max reasoning, a 1,050,000-token context window, and the 875,900-token compaction threshold.
+The GPT-6.1 Sol default was verified with Codex 0.160.0, Copilot CLI 1.0.91 and SDK 1.0.16: native file reads, apply_patch, and four passing shell-run tests. After correcting Codex's bundled context cap, a further live Code Mode check confirmed 997,500 usable tokens (95% of the configured 1,050,000-token window), max reasoning, and the 875,900-token compaction threshold.
+
+Opus 5.5 was verified with the same runtime versions: Code Mode file reads, an apply_patch edit, three passing shell-run tests, and a resumed session that remembered the fix and reran the tests. Codex's token events confirmed 950,000 usable tokens (95% of the configured 1,000,000-token window), and the provider reported cache hits on the resumed tool loop.
 
 The earlier direct-token experiment remains in `run.mjs`. Its generic endpoint did not expose the needed models for this account; use the SDK launcher above.

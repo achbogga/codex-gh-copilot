@@ -9,6 +9,7 @@ import { listModels, startBridge } from "./bridge.mjs";
 import { codexInvocation } from "./run.mjs";
 import { createSdkTransport } from "./sdk-transport.mjs";
 import { runUpdate, updateArguments } from "./update-command.mjs";
+import { modelArguments } from "./model-config.mjs";
 
 // Host mode deliberately gives Codex the invoking user's filesystem and exported
 // environment, including credentials. It does not add a container or sandbox.
@@ -37,11 +38,13 @@ export async function runHost({
       environment,
     });
     const selected = (
-      await listModels(async () => "sdk-owned", sdk.transport)
+      await listModels(async () => "sdk-owned", sdk.transport, {
+        messages: true,
+      })
     ).find((entry) => entry.id === model);
     if (!selected)
       throw new Error(
-        "The selected Copilot model is not enabled for streaming Responses tools.",
+        "The selected Copilot model is not enabled for a supported streaming tool protocol.",
       );
     if (!selected.capabilities.supports.reasoning_effort?.includes(reasoning))
       throw new Error("Unsupported reasoning effort for this model.");
@@ -66,12 +69,11 @@ export async function runHost({
         )
           ? []
           : ["--yolo"]),
-        "-c",
-        `model_reasoning_effort=${JSON.stringify(reasoning)}`,
-        "-c",
-        `model_context_window=${selected.capabilities.limits.max_context_window_tokens}`,
-        "-c",
-        `model_auto_compact_token_limit=${Math.floor(selected.capabilities.limits.max_prompt_tokens * 0.95)}`,
+        ...(await modelArguments(
+          selected,
+          reasoning,
+          join(transportDir, "models.json"),
+        )),
         "-c",
         'shell_environment_policy={inherit="all",ignore_default_excludes=true}',
         ...args,

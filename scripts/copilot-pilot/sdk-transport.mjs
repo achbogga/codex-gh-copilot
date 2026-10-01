@@ -3,10 +3,12 @@ import {
   CopilotRequestHandler,
   RuntimeConnection,
 } from "@github/copilot-sdk";
+import { messagesRequest, usesMessages } from "./anthropic-request.mjs";
+import { messagesResponse } from "./anthropic-stream.mjs";
 
 // The official runtime supplies authentication, account routing and model policy.
-// Its documented request handler carries Codex's native Responses payload instead
-// of starting a second tool loop. Only Codex receives the real model output.
+// Its request handler carries native Responses or translated Messages payloads
+// without starting a second tool loop. Only Codex receives the real model output.
 export async function createSdkTransport({
   cliPath = "copilot",
   directory,
@@ -49,7 +51,11 @@ export async function createSdkTransport({
         return response;
       }
       const job = pending.get(context.sessionId);
-      if (url.pathname !== "/responses" || !job || job.started)
+      if (
+        !job ||
+        url.pathname !== (job.messages ? "/v1/messages" : "/responses") ||
+        job.started
+      )
         throw new Error("Unexpected additional runtime inference request.");
       job.started = true;
       const headers = new Headers(request.headers);
@@ -60,11 +66,29 @@ export async function createSdkTransport({
         new Request(url, {
           method: "POST",
           headers,
-          body: job.init.body,
+          body: job.messages
+            ? JSON.stringify(job.messages.body)
+            : job.init.body,
           signal,
           redirect: "error",
         }),
       );
+      if (job.messages) {
+        if (!response.ok) {
+          job.resolve(response);
+          throw new Error("Copilot Anthropic request denied.");
+        }
+        if (
+          !response.headers.get("content-type")?.startsWith("text/event-stream")
+        )
+          throw new Error("Expected an Anthropic event stream.");
+        const translated = messagesResponse(response, job.messages);
+        job.resolve(translated.response);
+        const acknowledgement = await translated.completion;
+        if (!acknowledgement)
+          throw new Error("Anthropic stream did not complete.");
+        return Response.json(acknowledgement);
+      }
       let completed;
       if (!response.ok) job.resolve(response);
       else {
@@ -157,6 +181,10 @@ export async function createSdkTransport({
     transport: async (url, init) => {
       if (new URL(url).pathname === "/models") return Response.json(catalog);
       const payload = JSON.parse(init.body);
+      const model = catalog.data.find((entry) => entry.id === payload.model);
+      const messages = usesMessages(model)
+        ? messagesRequest(payload, model)
+        : undefined;
       const session = await client.createSession({
         model: payload.model,
         availableTools: [],
@@ -170,7 +198,12 @@ export async function createSdkTransport({
           content: "The request handler forwards inference to Codex.",
         },
       });
-      const job = { ...Promise.withResolvers(), init, started: false };
+      const job = {
+        ...Promise.withResolvers(),
+        init,
+        messages,
+        started: false,
+      };
       pending.set(session.sessionId, job);
       const abort = () => {
         job.reject(new Error("Codex request cancelled."));
