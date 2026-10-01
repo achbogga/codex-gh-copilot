@@ -134,7 +134,11 @@ impl ChatWidget {
             .send(AppEvent::RawOutputModeChanged { enabled });
     }
 
-    fn slash_command_blocked_by_active_task(&self, cmd: SlashCommand) -> bool {
+    fn slash_command_blocked_by_active_task(
+        &self,
+        cmd: SlashCommand,
+        source: SlashCommandDispatchSource,
+    ) -> bool {
         (!cmd.available_during_task()
             && (self.turn_lifecycle.agent_turn_running
                 || self.review.is_review_mode
@@ -145,9 +149,21 @@ impl ChatWidget {
                 && (self.input_queue.user_turn_pending_start
                     || self.turn_lifecycle.agent_turn_running))
             || (cmd == SlashCommand::Export && self.input_queue.suppress_queue_autosend)
+            || (cmd == SlashCommand::Review
+                && source == SlashCommandDispatchSource::Live
+                && (self.is_user_turn_pending_or_running()
+                    || self.input_queue.has_queued_follow_up_messages()))
     }
 
     pub(super) fn dispatch_command(&mut self, cmd: SlashCommand) {
+        self.dispatch_command_from_source(cmd, SlashCommandDispatchSource::Live);
+    }
+
+    fn dispatch_command_from_source(
+        &mut self,
+        cmd: SlashCommand,
+        source: SlashCommandDispatchSource,
+    ) {
         if cmd != SlashCommand::Copy {
             self.transcript.last_status_copy_targets = None;
         }
@@ -157,18 +173,51 @@ impl ChatWidget {
         if !self.ensure_side_command_allowed_outside_review(cmd) {
             return;
         }
-        if self.slash_command_blocked_by_active_task(cmd) {
+        if self.slash_command_blocked_by_active_task(cmd, source) {
             let message = format!(
                 "'/{}' is disabled while a task is in progress.",
                 cmd.command()
             );
             self.add_to_history(history_cell::new_error_event(message));
-            self.bottom_pane.drain_pending_submission_state();
+            // Retain attachments when the composer has deferred consuming the draft.
+            if self.bottom_pane.composer_text().is_empty() {
+                self.bottom_pane.drain_pending_submission_state();
+            }
             self.request_redraw();
             return;
         }
 
         match cmd {
+            SlashCommand::Daybreak => {
+                if !self.daybreak_enabled {
+                    if !self.has_chatgpt_account || self.config.model_provider_id != "openai" {
+                        self.add_error_message("Daybreak requires a signed-in ChatGPT account and the OpenAI provider.".into());
+                        return;
+                    }
+                    if !crate::daybreak::available(&self.model_catalog.models) {
+                        if crate::daybreak::availability(&self.model_catalog.models) == Some(false)
+                        {
+                            self.add_info_message(
+                                "Daybreak is not available for this account. Apply at https://openai.com/form/enterprise-trusted-access-for-cyber/. Learn more at https://help.openai.com/en/articles/20001326.".into(),
+                                /*hint*/ None,
+                            );
+                        } else {
+                            self.add_error_message("Daybreak availability could not be determined from the connected host's model catalog.".into());
+                        }
+                        return;
+                    }
+                }
+                let Some(thread_id) = self.thread_id else {
+                    self.add_error_message(
+                        "Daybreak is unavailable until the thread starts.".into(),
+                    );
+                    return;
+                };
+                self.app_event_tx.send(AppEvent::PersistDaybreakSelection {
+                    thread_id,
+                    enabled: !self.daybreak_enabled,
+                });
+            }
             SlashCommand::Feedback => {
                 if !self.config.feedback_enabled {
                     let params = crate::bottom_pane::feedback_disabled_params();
@@ -209,7 +258,7 @@ impl ChatWidget {
                             ..Default::default()
                         },
                     ],
-                    ..Default::default()
+                    ..SelectionViewParams::picker()
                 });
                 self.request_redraw();
             }
@@ -242,7 +291,7 @@ impl ChatWidget {
                             ..Default::default()
                         },
                     ],
-                    ..Default::default()
+                    ..SelectionViewParams::picker()
                 });
                 self.request_redraw();
             }
@@ -302,6 +351,11 @@ impl ChatWidget {
                     .send(AppEvent::GenerateRecap { thread_id });
             }
             SlashCommand::Review => {
+                if source == SlashCommandDispatchSource::Live {
+                    self.bottom_pane
+                        .set_composer_text(String::new(), Vec::new(), Vec::new());
+                    self.bottom_pane.drain_pending_submission_state();
+                }
                 self.open_review_popup();
                 if self.mcp_startup_status.is_some() {
                     self.defer_input_until_settings_applied();
@@ -335,7 +389,10 @@ impl ChatWidget {
                 }
             }
             SlashCommand::Voice => {
-                self.toggle_realtime_conversation();
+                self.app_event_tx.send(AppEvent::VoiceControl {
+                    thread_id: self.thread_id(),
+                    control: crate::app_event::VoiceControl::Toggle,
+                });
             }
             SlashCommand::Side | SlashCommand::Btw => {
                 self.request_empty_side_conversation(cmd);
@@ -437,6 +494,7 @@ impl ChatWidget {
                 let enabled = self.toggle_raw_output_mode_and_notify();
                 self.emit_raw_output_mode_changed(enabled);
             }
+            SlashCommand::Tui => self.show_tui_mode_picker(),
             SlashCommand::Diff => {
                 self.add_diff_in_progress();
                 let tx = self.app_event_tx.clone();
@@ -477,6 +535,7 @@ impl ChatWidget {
                 self.add_hooks_output();
             }
             SlashCommand::Daemon => self.app_event_tx.send(AppEvent::OpenDaemonMenu),
+            SlashCommand::Warnings => self.app_event_tx.send(AppEvent::OpenWarnings),
             SlashCommand::Status => {
                 if self.should_prefetch_rate_limits() {
                     let request_id = self.next_status_refresh_request_id;
@@ -616,7 +675,7 @@ impl ChatWidget {
             self.dispatch_command(cmd);
             return;
         }
-        if self.slash_command_blocked_by_active_task(cmd) {
+        if self.slash_command_blocked_by_active_task(cmd, SlashCommandDispatchSource::Live) {
             let message = format!(
                 "'/{}' is disabled while a task is in progress.",
                 cmd.command()
@@ -761,17 +820,40 @@ impl ChatWidget {
             }
             SlashCommand::Voice => match trimmed.to_ascii_lowercase().as_str() {
                 "settings" => self.app_event_tx.send(AppEvent::OpenRealtimeSettings),
-                "mute" => self.toggle_realtime_microphone(),
-                "stop" => self.stop_realtime_conversation(),
+                "mute" => self.app_event_tx.send(AppEvent::VoiceControl {
+                    thread_id: self.thread_id(),
+                    control: crate::app_event::VoiceControl::Mute,
+                }),
+                "stop" => self.app_event_tx.send(AppEvent::VoiceControl {
+                    thread_id: self.thread_id(),
+                    control: crate::app_event::VoiceControl::Stop,
+                }),
                 _ => self.add_error_message("Usage: /voice [settings|mute|stop]".to_string()),
             },
             SlashCommand::Ide => {
                 self.handle_ide_command_args(trimmed);
             }
-            SlashCommand::Mcp => match trimmed.to_ascii_lowercase().as_str() {
-                "verbose" => self.add_mcp_output(McpServerStatusDetail::Full),
-                _ => self.add_error_message("Usage: /mcp [verbose]".to_string()),
-            },
+            SlashCommand::Mcp => {
+                if trimmed.eq_ignore_ascii_case("verbose") {
+                    self.add_mcp_output(McpServerStatusDetail::Full);
+                } else if let Some((command, name)) = trimmed.split_once(' ')
+                    && command.eq_ignore_ascii_case("login")
+                    && !name.trim().is_empty()
+                {
+                    if let Some(thread_id) = self.thread_id {
+                        self.app_event_tx.send(AppEvent::StartMcpLogin {
+                            name: name.trim().to_string(),
+                            thread_id,
+                        });
+                    } else {
+                        self.add_error_message(
+                            "MCP sign-in requires an active session.".to_string(),
+                        );
+                    }
+                } else {
+                    self.add_error_message("Usage: /mcp [verbose | login <name>]".to_string());
+                }
+            }
             SlashCommand::Keymap => match trimmed.to_ascii_lowercase().as_str() {
                 "" => self.open_keymap_picker(),
                 "debug" => {
@@ -1016,7 +1098,7 @@ impl ChatWidget {
             SlashCommand::Pets if !trimmed.is_empty() => {
                 self.select_pet_by_id(args);
             }
-            _ => self.dispatch_command(cmd),
+            _ => self.dispatch_command_from_source(cmd, source),
         }
         if source == SlashCommandDispatchSource::Live && cmd != SlashCommand::Goal {
             self.bottom_pane.drain_pending_submission_state();
@@ -1077,7 +1159,7 @@ impl ChatWidget {
         if rest.is_empty() {
             return match command {
                 SlashCommandItem::Builtin(cmd) => {
-                    self.dispatch_command(cmd);
+                    self.dispatch_command_from_source(cmd, SlashCommandDispatchSource::Queued);
                     self.queued_command_drain_result(cmd)
                 }
                 SlashCommandItem::ServiceTier(command) => {
@@ -1152,6 +1234,7 @@ impl ChatWidget {
             token_activity_command_enabled: self.has_codex_backend_auth,
             goal_command_enabled: self.config.features.enabled(Feature::Goals),
             service_tier_commands_enabled: self.fast_mode_enabled(),
+            daybreak_command_description: self.daybreak_command_description(),
             voice_command_enabled: self.realtime_conversation_available_for_thread,
             worktrees_enabled: self.config.features.enabled(Feature::Worktrees)
                 && self.local_worktree_operations,
@@ -1190,6 +1273,7 @@ impl ChatWidget {
             | SlashCommand::Copy
             | SlashCommand::Raw
             | SlashCommand::Vim
+            | SlashCommand::Daybreak
             | SlashCommand::Diff
             | SlashCommand::App
             | SlashCommand::Rename
@@ -1208,6 +1292,7 @@ impl ChatWidget {
                 }
             }
             SlashCommand::Feedback
+            | SlashCommand::Warnings
             | SlashCommand::Export
             | SlashCommand::New
             | SlashCommand::Archive
@@ -1241,6 +1326,7 @@ impl ChatWidget {
             | SlashCommand::Title
             | SlashCommand::Statusline
             | SlashCommand::Theme
+            | SlashCommand::Tui
             | SlashCommand::Pets => QueueDrain::Stop,
         }
     }

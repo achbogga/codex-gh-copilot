@@ -102,9 +102,6 @@ impl Session {
                             environment.config().windows_sandbox_level,
                             environment.cwd(),
                         ),
-                        windows_sandbox_private_desktop: environment
-                            .config()
-                            .windows_sandbox_private_desktop,
                         windows_sandbox_proxy_settings_mode: Some(
                             session.windows_sandbox_proxy_settings_mode,
                         ),
@@ -182,15 +179,12 @@ pub(super) fn shell_snapshot_request(
         || !request.turn_environment.shell_snapshot_v2_supported
         || request.turn_environment.selection.cwd != *cwd
         || !matches!(request.shell_mode, UnifiedExecShellMode::Direct)
-        || !matches!(
-            request.shell_type,
-            ShellType::Bash | ShellType::Zsh | ShellType::Sh
-        )
-        || request.command.get(1).is_none_or(|flag| flag != "-lc")
+        || !request.shell.is_posix_login()
     {
         return None;
     }
 
+    let shell = &request.shell.shell;
     Some(ShellSnapshotRequest {
         scope_id: format!(
             "{}:{}",
@@ -198,8 +192,8 @@ pub(super) fn shell_snapshot_request(
             request.turn_environment.selection.environment_id
         ),
         shell: ShellInfo {
-            name: request.shell_type.name().to_string(),
-            path: request.command.first()?.clone(),
+            name: shell.name().to_string(),
+            path: shell.shell_path.to_string_lossy().into_owned(),
         },
     })
 }

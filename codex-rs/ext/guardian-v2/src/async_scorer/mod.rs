@@ -3,11 +3,16 @@ mod approval;
 mod authorization;
 mod classification;
 mod config;
+mod conversation;
 mod coverage;
+// Compile the transport in tests until the next stack stage wires its runtime caller.
+#[cfg(test)]
+mod decisions;
 mod extension;
 mod metrics;
 mod observation;
 mod parent_compaction;
+mod request;
 mod sampler;
 mod score;
 mod startup;

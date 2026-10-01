@@ -2,7 +2,6 @@
 
 use codex_app_server_client::AppServerRequestHandle;
 use codex_app_server_client::TypedRequestError;
-use codex_app_server_protocol::AskForApproval;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::ConfigReadParams;
 use codex_app_server_protocol::ConfigReadResponse;
@@ -22,6 +21,7 @@ use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStartResponse;
 use codex_app_server_protocol::TurnStatus;
 use codex_app_server_protocol::UserInput;
+use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_READ_ONLY;
 use codex_protocol::openai_models::ReasoningEffort;
 use color_eyre::eyre::eyre;
 use serde_json::Value;
@@ -35,6 +35,7 @@ const STRUCTURED_RESPONSE_MAX_BYTES: usize = 8 * 1024;
 
 /// Preserve the visible thread's provider, permissions, and external-tool isolation.
 pub(crate) struct TemporaryStructuredThreadOptions {
+    pub(crate) thread_source: ThreadSource,
     pub(crate) model: String,
     pub(crate) model_provider: String,
     pub(crate) cwd: String,
@@ -46,11 +47,13 @@ pub(crate) struct TemporaryStructuredThreadOptions {
 ///
 /// Structured prompts can contain untrusted transcript text, so the effective app-server config is
 /// read first and every MCP server is explicitly disabled alongside built-in and extension tools.
+/// Approval policy is inherited from the server; the TUI rejects unexpected interaction requests.
 pub(crate) async fn start_temporary_thread(
     request_handle: &AppServerRequestHandle,
     options: TemporaryStructuredThreadOptions,
 ) -> color_eyre::Result<ThreadStartResponse> {
     let TemporaryStructuredThreadOptions {
+        thread_source,
         model,
         model_provider,
         cwd,
@@ -85,7 +88,7 @@ pub(crate) async fn start_temporary_thread(
         ("features.tool_suggest".to_string(), false.into()),
         ("features.unified_exec".to_string(), false.into()),
         ("features.view_image".to_string(), false.into()),
-        ("orchestrator.skills.enabled".to_string(), false.into()),
+        ("cloud.skills.enabled".to_string(), false.into()),
         ("skills.include_instructions".to_string(), false.into()),
         (
             "tools.experimental_request_user_input.enabled".to_string(),
@@ -94,6 +97,13 @@ pub(crate) async fn start_temporary_thread(
         ("tools.update_plan.enabled".to_string(), false.into()),
         ("web_search".to_string(), "disabled".into()),
     ]);
+    if custom_permission_profile.is_none() {
+        // Managed profiles take precedence over the legacy sandbox override below.
+        config.insert(
+            "default_permissions".to_string(),
+            BUILT_IN_PERMISSION_PROFILE_READ_ONLY.into(),
+        );
+    }
     let response: ThreadStartResponse = tokio::time::timeout(STRUCTURED_TURN_TIMEOUT, async {
         // Fail closed if the remote-effective MCP configuration cannot be read.
         let effective_config: ConfigReadResponse = request_handle
@@ -133,14 +143,13 @@ pub(crate) async fn start_temporary_thread(
                     model: Some(model),
                     model_provider: Some(model_provider),
                     cwd: Some(cwd),
-                    approval_policy: Some(AskForApproval::Never),
                     sandbox: custom_permission_profile
                         .is_none()
                         .then_some(SandboxMode::ReadOnly),
                     permissions: custom_permission_profile.clone(),
                     runtime_workspace_roots: Some(Vec::new()),
                     ephemeral: Some(true),
-                    thread_source: Some(ThreadSource::Feature("system".to_string())),
+                    thread_source: Some(thread_source),
                     environments: Some(Vec::new()),
                     dynamic_tools: Some(Vec::new()),
                     selected_capability_roots: Some(Vec::new()),

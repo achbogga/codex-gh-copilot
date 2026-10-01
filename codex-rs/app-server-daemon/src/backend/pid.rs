@@ -3,6 +3,9 @@
 #[path = "pid_identity.rs"]
 mod identity;
 
+#[cfg(any(unix, windows))]
+use std::borrow::Cow;
+use std::collections::BTreeMap;
 use std::io::SeekFrom;
 use std::path::Path;
 use std::path::PathBuf;
@@ -33,6 +36,7 @@ const STDERR_LOG_TAIL_BYTES: u64 = 4096;
 #[derive(Debug)]
 #[cfg_attr(not(any(unix, windows)), allow(dead_code))]
 pub(crate) struct PidBackend {
+    pub(super) feature_overrides: BTreeMap<String, bool>,
     codex_bin: PathBuf,
     pid_file: PathBuf,
     lock_file: PathBuf,
@@ -98,6 +102,7 @@ impl PidBackend {
     pub(crate) fn new(codex_bin: PathBuf, pid_file: PathBuf, remote_control_enabled: bool) -> Self {
         let lock_file = pid_file.with_extension("pid.lock");
         Self {
+            feature_overrides: BTreeMap::new(),
             codex_bin,
             pid_file,
             lock_file,
@@ -114,6 +119,7 @@ impl PidBackend {
     ) -> Self {
         let lock_file = pid_file.with_extension("pid.lock");
         Self {
+            feature_overrides: BTreeMap::new(),
             codex_bin,
             pid_file,
             lock_file,
@@ -166,6 +172,7 @@ impl PidBackend {
             }
 
             let pid = record.pid;
+            crate::diagnostics::event("shutdown_requested", serde_json::json!({ "pid": pid }));
             let started_at = tokio::time::Instant::now();
             let force_after = Duration::from_secs(grace_seconds.into());
             let deadline = started_at + force_after + STOP_FORCE_TIMEOUT;
@@ -221,6 +228,7 @@ impl PidBackend {
                     break;
                 }
                 if !forced && started_at.elapsed() >= force_after {
+                    crate::diagnostics::event("shutdown_forced", serde_json::json!({ "pid": pid }));
                     #[cfg(unix)]
                     self.force_terminate_process(pid)?;
                     #[cfg(windows)]
@@ -347,37 +355,64 @@ impl PidBackend {
     #[cfg(any(unix, windows))]
     async fn open_stderr_log(&self) -> Result<fs::File> {
         let stderr_log_file = stderr_log_file_for_pid_file(&self.pid_file);
-        fs::OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .open(&stderr_log_file)
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to open stderr log for pid-managed app server {}",
-                    stderr_log_file.display()
-                )
-            })
+        super::stderr_log::preserve(&stderr_log_file).await;
+        let result = async {
+            fs::OpenOptions::new()
+                .create(true)
+                .truncate(true)
+                .write(true)
+                .open(&stderr_log_file)
+                .await?;
+            // The updater predecessor can still write after a Windows handoff
+            // truncates this file. Append handles prevent stale offsets and gaps.
+            fs::OpenOptions::new()
+                .append(true)
+                .open(&stderr_log_file)
+                .await
+        }
+        .await;
+        result.with_context(|| {
+            format!(
+                "failed to open stderr log for pid-managed app server {}",
+                stderr_log_file.display()
+            )
+        })
     }
 
     #[cfg(any(unix, windows))]
-    fn command_args(&self) -> Vec<&str> {
-        match &self.command_kind {
+    fn command_args(&self) -> Vec<Cow<'_, str>> {
+        let mut args = match &self.command_kind {
             PidCommandKind::AppServer {
                 remote_control_enabled: true,
-            } => vec!["app-server", "--remote-control", "--listen", "unix://"],
+            } => vec![
+                "app-server".into(),
+                "--remote-control".into(),
+                "--listen".into(),
+                "unix://".into(),
+            ],
             PidCommandKind::AppServer {
                 remote_control_enabled: false,
-            } => vec!["app-server", "--listen", "unix://"],
+            } => vec!["app-server".into(), "--listen".into(), "unix://".into()],
             PidCommandKind::UpdateLoop { restore_release } => {
-                let mut args = vec!["app-server", "daemon", "pid-update-loop"];
+                let mut args = vec![
+                    "app-server".into(),
+                    "daemon".into(),
+                    "pid-update-loop".into(),
+                ];
                 if let Some(release) = restore_release {
-                    args.extend(["--restore-release", release.as_str()]);
+                    args.extend(["--restore-release".into(), release.as_str().into()]);
                 }
                 args
             }
+        };
+        if matches!(self.command_kind, PidCommandKind::AppServer { .. }) {
+            // Match first-party clients' default while preserving explicit analytics opt-outs.
+            args.push("--analytics-default-enabled".into());
+            for (name, enabled) in &self.feature_overrides {
+                args.extend(["-c".into(), format!("features.{name}={enabled}").into()]);
+            }
         }
+        args
     }
 
     #[cfg(any(unix, windows))]

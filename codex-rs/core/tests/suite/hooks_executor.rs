@@ -7,7 +7,7 @@ use codex_core::StartThreadOptions;
 use codex_core::TurnInputRequest;
 use codex_core::windows_sandbox::WindowsSandboxLevelExt;
 use codex_exec_server::CreateDirectoryOptions;
-use codex_exec_server::ExecServerRuntimePaths;
+use codex_exec_server::ExecServerRuntimeOptions;
 use codex_features::Feature;
 use codex_protocol::capabilities::CapabilityRootLocation;
 use codex_protocol::capabilities::SelectedCapabilityRoot;
@@ -309,7 +309,7 @@ async fn executor_stop_hook_rejects_mismatched_environment() -> Result<()> {
             let executor_address = listener.local_addr()?;
             let executor_url = format!("ws://{executor_address}");
             drop(listener);
-            let runtime_paths = ExecServerRuntimePaths::new(
+            let runtime_paths = ExecServerRuntimeOptions::new(
                 std::env::current_exe()?,
                 /*codex_linux_sandbox_exe*/ None,
             )?;
@@ -383,6 +383,7 @@ async fn executor_stop_hook_rejects_mismatched_environment() -> Result<()> {
         .await?;
     fixture.wait_for_hook_call().await?;
 
+    let current_config = fixture.test.codex.config().await;
     let mut mismatched_config = fixture.test.config.clone();
     let mut node_repl = mismatched_config
         .mcp_servers
@@ -396,10 +397,10 @@ async fn executor_stop_hook_rejects_mismatched_environment() -> Result<()> {
             .into_iter()
             .collect(),
     )?;
-    fixture
+    let _ = fixture
         .test
         .codex
-        .refresh_mcp_config(mismatched_config)
+        .refresh_mcp_config(current_config, mismatched_config)
         .await;
     fixture
         .test
@@ -866,11 +867,6 @@ impl ExecutorHookFixture {
                     shell_environment_policy: Default::default(),
                     windows_sandbox_level: WindowsSandboxLevel::from_config(&self.test.config),
                     windows_sandbox_type: self.test.config.permissions.windows_sandbox_type,
-                    windows_sandbox_private_desktop: self
-                        .test
-                        .config
-                        .permissions
-                        .windows_sandbox_private_desktop,
                     use_legacy_landlock: self.test.config.features.use_legacy_landlock(),
                     exec_policy: None,
                     mcp_policy: None,

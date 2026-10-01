@@ -3,6 +3,7 @@ use pretty_assertions::assert_eq;
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixListener;
 use std::os::unix::net::UnixStream;
+use std::path::PathBuf;
 
 #[tokio::test]
 async fn private_tmp_mount_preserves_daemon_socket_isolation() {
@@ -13,8 +14,12 @@ async fn private_tmp_mount_preserves_daemon_socket_isolation() {
     let private = tempfile::tempdir_in("/tmp").unwrap();
     let test_executable = std::env::current_exe().unwrap();
     // Keep both executables available after the original /tmp is hidden.
-    std::fs::copy(&test_executable, private.path().join("test")).unwrap();
-    std::fs::copy(codex_linux_sandbox_exe(), private.path().join("sandbox")).unwrap();
+    codex_utils_cargo_bin::copy_executable(&test_executable, &private.path().join("test")).unwrap();
+    codex_utils_cargo_bin::copy_executable(
+        &codex_linux_sandbox_exe(),
+        &private.path().join("sandbox"),
+    )
+    .unwrap();
     let (_, test_module) = module_path!().split_once("::").unwrap();
     let fixture_test = format!("{test_module}::private_tmp_fixture");
     // Mount setup needs capabilities, which bubblewrap only accepts as namespace root.
@@ -65,6 +70,15 @@ fn private_tmp_fixture() {
     if !mount.status.success() {
         std::process::exit(/*code*/ 77);
     }
+    // Namespace mounts have non-path roots such as `net:[inode]`. An unrelated
+    // one must not stop startup or disable the socket-isolation checks below.
+    let namespace = "/tmp/network-namespace";
+    std::fs::File::create(namespace).unwrap();
+    let mount = std::process::Command::new("mount")
+        .args(["--bind", "/proc/self/ns/net", namespace])
+        .output()
+        .unwrap();
+    assert!(mount.status.success(), "{mount:?}");
     let root = codex_uds::prepare_shared_daemon_socket_directory().unwrap();
     let endpoint = root.join("rpc.sock");
     let _daemon = UnixListener::bind(&endpoint).unwrap();
@@ -93,7 +107,54 @@ fn private_tmp_fixture() {
             "--nocapture",
             "--test-threads=1",
         ])
-        .env("CODEX_TEST_DAEMON_SOCKET", &endpoint);
+        .env("CODEX_TEST_DAEMON_SOCKET", &endpoint)
+        .env("TMPDIR", "/tmp");
+    let output = command.output().unwrap();
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stdout).contains("private-tmp-isolated"));
+
+    // Devboxes expose their temporary volume through both /tmp and /build/tmp.
+    // An ancestor alias must receive the same socket mask without hiding other files.
+    std::fs::create_dir("/tmp/build").unwrap();
+    let mount = std::process::Command::new("mount")
+        .args(["--bind", "/tmp", "/tmp/build"])
+        .output()
+        .unwrap();
+    assert!(mount.status.success(), "{mount:?}");
+    let alias_endpoint = PathBuf::from("/tmp/build")
+        .join(root.file_name().unwrap())
+        .join("rpc.sock");
+    UnixStream::connect(&alias_endpoint).expect("host can reach ancestor alias");
+    command
+        .env("CODEX_TEST_DAEMON_ALIAS_SOCKET", &alias_endpoint)
+        .env("CODEX_TEST_OTHER_ALIAS_SOCKET", "/tmp/build/other.sock");
+    let output = command.output().unwrap();
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stdout).contains("private-tmp-isolated"));
+
+    // Rebinding the synthetic-mount registry must preserve masks for aliases
+    // beneath it, even when the surrounding /tmp is writable.
+    let registry_alias = PathBuf::from(format!(
+        "/tmp/codex-bwrap-synthetic-mount-targets-{}/view",
+        unsafe { libc::geteuid() }
+    ));
+    std::fs::create_dir_all(&registry_alias).unwrap();
+    let mount = std::process::Command::new("mount")
+        .args(["--bind", "/tmp"])
+        .arg(&registry_alias)
+        .output()
+        .unwrap();
+    assert!(mount.status.success(), "{mount:?}");
+    let alias_endpoint = registry_alias
+        .join(root.file_name().unwrap())
+        .join("rpc.sock");
+    UnixStream::connect(&alias_endpoint).expect("host can reach registry alias");
+    command
+        .env("CODEX_TEST_DAEMON_ALIAS_SOCKET", &alias_endpoint)
+        .env(
+            "CODEX_TEST_OTHER_ALIAS_SOCKET",
+            registry_alias.join("other.sock"),
+        );
     let output = command.output().unwrap();
     assert_eq!(output.status.code(), Some(0), "{output:?}");
     assert!(String::from_utf8_lossy(&output.stdout).contains("private-tmp-isolated"));
@@ -124,6 +185,14 @@ fn private_tmp_client() {
     println!("private-tmp-client-started");
     assert!(UnixStream::connect(endpoint).is_err(), "daemon reachable");
     UnixStream::connect("/tmp/other.sock").expect("unrelated socket reachable");
+    if let Some(alias) = std::env::var_os("CODEX_TEST_DAEMON_ALIAS_SOCKET") {
+        assert!(
+            UnixStream::connect(alias).is_err(),
+            "daemon alias reachable"
+        );
+        UnixStream::connect(std::env::var_os("CODEX_TEST_OTHER_ALIAS_SOCKET").unwrap())
+            .expect("unrelated alias socket reachable");
+    }
     println!("private-tmp-isolated");
 }
 

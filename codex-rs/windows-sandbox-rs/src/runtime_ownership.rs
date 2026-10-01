@@ -93,7 +93,7 @@ impl RuntimeRegistration {
             && self
                 .accounts
                 .iter()
-                .all(|account| account.alias_path.is_some())
+                .all(|account| account.alias_path.is_some() && !account.cleanup_logon_pending)
     }
 }
 
@@ -119,7 +119,12 @@ impl InstallationRecord {
             "registered sandbox resources belong to a different owner or package"
         );
         ensure!(
-            self.runtime()?.retiring.is_none(),
+            self.runtime()?.retiring.is_none()
+                && self
+                    .runtime()?
+                    .accounts
+                    .iter()
+                    .all(|account| !account.cleanup_logon_pending),
             "registered sandbox cleanup must finish before provisioning"
         );
         Ok(())
@@ -128,6 +133,9 @@ impl InstallationRecord {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RuntimeAccountRegistration {
+    /// Persisted before temporarily enabling an account; cleared only after re-disabling it.
+    #[serde(default)]
+    pub cleanup_logon_pending: bool,
     pub account: SandboxRuntimeAccount,
     pub user_sid: String,
     /// OS-resolved alias written by the service, never inferred from a user name.
@@ -141,7 +149,7 @@ pub(crate) fn current_setup_user() -> Result<String> {
     use std::os::windows::io::OwnedHandle;
     use windows_sys::Win32::Security as security;
     use windows_sys::Win32::System::Threading as threading;
-    let mut token = 0;
+    let mut token = std::ptr::null_mut();
     if unsafe {
         threading::OpenProcessToken(
             threading::GetCurrentProcess(),
@@ -218,7 +226,7 @@ pub fn save_installation(record: &InstallationRecord) -> Result<()> {
 }
 
 fn flush_installation(path: &str) -> Result<()> {
-    let mut key = 0;
+    let mut key = std::ptr::null_mut();
     let status = unsafe {
         registry::RegOpenKeyExW(
             registry::HKEY_LOCAL_MACHINE,

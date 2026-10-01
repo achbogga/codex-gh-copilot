@@ -163,6 +163,7 @@ fn additional_permissions_allow_bypass_sandbox_first_attempt_when_execpolicy_ski
                 proposed_execpolicy_amendment: None,
             },
             &FileSystemSandboxPolicy::default(),
+            /*already_approved*/ false,
         ),
         SandboxOverride::BypassSandboxFirstAttempt
     );
@@ -178,13 +179,14 @@ fn guardian_bypasses_sandbox_for_explicit_escalation_on_first_attempt() {
                 proposed_execpolicy_amendment: None,
             },
             &FileSystemSandboxPolicy::default(),
+            /*already_approved*/ true,
         ),
         SandboxOverride::BypassSandboxFirstAttempt
     );
 }
 
 #[test]
-fn deny_read_blocks_explicit_escalation_and_policy_bypass() {
+fn deny_read_preserves_the_sandbox_for_explicit_escalation_and_blocks_policy_bypass() {
     let file_system_policy = FileSystemSandboxPolicy::restricted(vec![FileSystemSandboxEntry {
         path: FileSystemPath::GlobPattern {
             pattern: "**/*.env".to_string(),
@@ -201,11 +203,16 @@ fn deny_read_blocks_explicit_escalation_and_policy_bypass() {
                 proposed_execpolicy_amendment: None,
             },
             &file_system_policy,
+            /*already_approved*/ true,
         ),
-        SandboxOverride::NoOverride,
-        "explicit escalation would drop deny-read filesystem policy, so keep the first attempt sandboxed",
+        SandboxOverride::EscalatedSandboxWithRestrictions,
+        "explicit escalation must widen the first attempt without dropping the sandbox",
     );
     assert!(!unsandboxed_execution_allowed(&file_system_policy));
+    assert!(matches!(
+        SandboxOverride::EscalatedSandboxWithRestrictions.ensure_native_sandbox(SandboxType::None),
+        Err(ToolError::Rejected(reason)) if reason.contains("requires an available filesystem sandbox"),
+    ));
     assert_eq!(
         sandbox_permissions_preserving_denied_reads(
             SandboxPermissions::RequireEscalated,
@@ -235,6 +242,7 @@ fn deny_read_blocks_explicit_escalation_and_policy_bypass() {
                 proposed_execpolicy_amendment: None,
             },
             &file_system_policy,
+            /*already_approved*/ true,
         ),
         SandboxOverride::NoOverride,
         "exec-policy allow rules would drop deny-read filesystem policy, so keep the first attempt sandboxed",
@@ -296,7 +304,6 @@ fn windows_sandbox_env_preserves_denied_reads_or_rejects_unsupported_backend() {
         use_legacy_landlock: false,
         windows_sandbox_type: SandboxType::WindowsRestrictedToken,
         windows_sandbox_level: codex_protocol::config_types::WindowsSandboxLevel::Elevated,
-        windows_sandbox_private_desktop: false,
         network_denial_cancellation_token: None,
         network_proxy: None,
     };
@@ -368,7 +375,6 @@ fn exec_server_env_keeps_command_native_and_carries_sandbox_context() {
         use_legacy_landlock: false,
         windows_sandbox_type: SandboxType::None,
         windows_sandbox_level: codex_protocol::config_types::WindowsSandboxLevel::Disabled,
-        windows_sandbox_private_desktop: false,
         network_denial_cancellation_token: None,
         network_proxy: None,
     };
@@ -417,7 +423,6 @@ fn exec_server_env_keeps_command_native_and_carries_sandbox_context() {
             } else {
                 codex_file_system::WindowsSandboxSelection::Disabled
             },
-            windows_sandbox_private_desktop: false,
             windows_sandbox_proxy_settings_mode: None,
             use_legacy_landlock: false,
         })

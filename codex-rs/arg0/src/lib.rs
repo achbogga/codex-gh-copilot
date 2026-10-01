@@ -58,6 +58,8 @@ impl Arg0PathEntryGuard {
 }
 
 pub fn arg0_dispatch() -> Option<Arg0PathEntryGuard> {
+    #[cfg(target_os = "linux")]
+    codex_utils_pty::init_spawn_helper(std::env::args_os());
     // Determine if we were invoked via the special alias.
     let mut args = std::env::args_os();
     let argv0 = args.next().unwrap_or_default();
@@ -620,7 +622,7 @@ mod tests {
             .ok_or_else(|| anyhow::anyhow!("missing Windows system root"))?;
         let command_shell = PathBuf::from(system_root).join("System32").join("cmd.exe");
         let executable = executable_directory.join("cmd.exe");
-        fs::copy(&command_shell, &executable)?;
+        codex_utils_cargo_bin::copy_executable(&command_shell, &executable)?;
 
         let batch_path = alias_directory.join("apply_patch.bat");
         let executable_path = super::windows_batch_executable_path(&executable, &alias_directory);

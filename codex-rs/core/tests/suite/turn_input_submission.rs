@@ -7,12 +7,15 @@ use codex_core::TurnInput;
 use codex_core::TurnInputRequest;
 use codex_core::TurnInputSubmission;
 use codex_core::TurnStartOptions;
+use codex_core::WithTurnExtensionData;
 use codex_core::config::Constrained;
 use codex_core::context::ContextualUserFragment;
 use codex_core::context::InternalContextSource;
 use codex_core::context::InternalModelContextFragment;
+use codex_extension_api::ExtensionDataInit;
 use codex_extension_api::ExtensionRegistryBuilder;
 use codex_extension_api::TurnStartAdmission;
+use codex_features::Feature;
 use codex_protocol::AgentPath;
 use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::ModeKind;
@@ -35,6 +38,7 @@ use core_test_support::submit_thread_settings;
 use core_test_support::test_codex::local;
 use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
+use core_test_support::wait_for_event_match;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
 use std::sync::Arc;
@@ -45,6 +49,153 @@ use test_case::test_case;
 use tokio::sync::Barrier;
 use tokio::sync::oneshot;
 use tokio::time::timeout;
+
+/// Accepted steering changes future captures, while rejected input and automatic starts
+/// preserve the policy belonging to each turn.
+#[tokio::test]
+async fn turn_extension_data_is_captured_for_automatic_turns() -> anyhow::Result<()> {
+    let (release_initial, initial_gate) = oneshot::channel();
+    let (release_automatic, automatic_gate) = oneshot::channel();
+    let (server, _completions) = start_streaming_sse_server(vec![
+        vec![StreamingSseChunk {
+            gate: Some(initial_gate),
+            body: responses::sse_completed("initial"),
+        }],
+        vec![StreamingSseChunk {
+            gate: None,
+            body: responses::sse_completed("steered"),
+        }],
+        vec![StreamingSseChunk {
+            gate: Some(automatic_gate),
+            body: responses::sse_completed("automatic"),
+        }],
+    ])
+    .await;
+    let mock = responses::start_mock_server().await;
+    let test = test_codex().build_with_auto_env(&mock).await?;
+    let mut config = test.config.clone();
+    config.model_provider.base_url = Some(format!("{}/v1", server.uri()));
+    let mut initial = ExtensionDataInit::new();
+    initial.insert("original".to_owned());
+    let thread = test
+        .thread_manager
+        .start_thread(StartThreadOptions {
+            turn_extension_init: initial,
+            environments: Some(vec![test.executor_environment().selection().clone()]),
+            ..StartThreadOptions::new(config)
+        })
+        .await?
+        .thread;
+    let TurnInputSubmission::Started { turn_id } = submit_user_message(&thread, "start").await?
+    else {
+        anyhow::bail!("first input must start a turn");
+    };
+    server.wait_for_request_count(/*count*/ 1).await;
+    assert_eq!(
+        thread.current_turn_extension_data::<String>(&turn_id).await,
+        Some(Arc::new("original".to_owned()))
+    );
+    let mut next = ExtensionDataInit::new();
+    next.insert("next".to_owned());
+    assert_eq!(
+        thread
+            .start_or_steer_turn(WithTurnExtensionData::new(
+                user_message_request("steer"),
+                next
+            ))
+            .await?,
+        TurnInputSubmission::Steered {
+            turn_id: turn_id.clone()
+        }
+    );
+    let mut rejected = ExtensionDataInit::new();
+    rejected.insert("rejected".to_owned());
+    assert_eq!(
+        thread
+            .steer_turn(
+                WithTurnExtensionData::new(user_message_request("wrong turn"), rejected),
+                "another-turn".to_owned(),
+            )
+            .await?,
+        SteerSubmission::NotSubmitted {
+            reason: NotSubmittedReason::ExpectedTurnMismatch {
+                expected: "another-turn".to_owned(),
+                actual: turn_id.clone(),
+            },
+        }
+    );
+    assert_eq!(
+        thread.current_turn_extension_data::<String>(&turn_id).await,
+        Some(Arc::new("original".to_owned()))
+    );
+    assert_eq!(
+        thread
+            .config_snapshot()
+            .await
+            .turn_extension_init
+            .get::<String>(),
+        Some(Arc::new("next".to_owned()))
+    );
+    release_initial
+        .send(())
+        .expect("initial response is waiting");
+    wait_for_event(&thread, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+    thread
+        .submit(Op::InterAgentCommunication {
+            communication: InterAgentCommunication::new(
+                AgentPath::try_from("/root/worker").expect("valid sender path"),
+                AgentPath::root(),
+                Vec::new(),
+                "automatic wake".to_owned(),
+                /*trigger_turn*/ true,
+            ),
+            start_options: Default::default(),
+        })
+        .await?;
+    let automatic_id = wait_for_event_match(&thread, |event| match event {
+        EventMsg::TurnStarted(started) => Some(started.turn_id.clone()),
+        _ => None,
+    })
+    .await;
+    server.wait_for_request_count(/*count*/ 3).await;
+    let captured = thread
+        .current_turn_extension_data::<String>(&automatic_id)
+        .await;
+    assert_ne!(automatic_id, turn_id);
+    assert_eq!(captured, Some(Arc::new("next".to_owned())));
+    assert_eq!(
+        thread.current_turn_extension_data::<String>(&turn_id).await,
+        None
+    );
+    // Clearing future data must not change the automatic turn that already captured it.
+    thread
+        .update_thread_settings(WithTurnExtensionData::new(
+            ThreadSettingsOverrides::default(),
+            ExtensionDataInit::new(),
+        ))
+        .await?;
+    assert_eq!(
+        thread
+            .config_snapshot()
+            .await
+            .turn_extension_init
+            .get::<String>(),
+        None
+    );
+    assert_eq!(
+        thread
+            .current_turn_extension_data::<String>(&automatic_id)
+            .await,
+        captured
+    );
+    release_automatic
+        .send(())
+        .expect("automatic response is waiting");
+    wait_for_event(&thread, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+    assert_eq!(server.requests().await.len(), 3);
+    server.shutdown().await;
+    Ok(())
+}
 
 #[derive(Debug)]
 struct TestAdmission(AtomicBool);
@@ -268,6 +419,7 @@ async fn host_drain_closes_realtime_after_handoff_error() -> anyhow::Result<()> 
             codex_response_item_prefix: None,
             codex_response_handoff_mode:
                 codex_protocol::protocol::CodexResponseHandoffMode::Thinking,
+            backend_reasoning_status: false,
             codex_response_handoff_channel_prefixes: None,
             model: None,
             output_modality: codex_protocol::protocol::RealtimeOutputModality::Audio,
@@ -999,6 +1151,88 @@ async fn sampling_is_ready_for_daemon_recovery(
         (executor == "local").then_some(turn_id)
     );
     release.send(()).expect("sampling is waiting");
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn daemon_recovery_includes_local_environment_that_finished_starting() -> anyhow::Result<()> {
+    let (release, gate) = oneshot::channel();
+    let (server, _completions) = start_streaming_sse_server(vec![
+        vec![StreamingSseChunk {
+            gate: None,
+            body: responses::sse(vec![
+                ev_response_created("wait"),
+                responses::ev_function_call(
+                    "wait-local",
+                    "wait_for_environment",
+                    r#"{"environment_id":"local"}"#,
+                ),
+                ev_completed("wait"),
+            ]),
+        }],
+        vec![StreamingSseChunk {
+            gate: Some(gate),
+            body: responses::sse_completed("done"),
+        }],
+    ])
+    .await;
+    let test = test_codex()
+        .with_config(|config| {
+            config.features.enable(Feature::DeferredExecutor).unwrap();
+        })
+        .build_with_streaming_server(&server)
+        .await?;
+    let cwd = test.config.cwd.join("new-workspace");
+    std::fs::create_dir(&cwd)?;
+    let selection = local(cwd.clone());
+    // A different workspace starts a new attachment. On this single-threaded runtime,
+    // turn startup captures it before the spawned setup task can run.
+    let started = test
+        .codex
+        .start_turn_if_idle(
+            user_message_request("wait for the environment").with_thread_settings(
+                ThreadSettingsOverrides {
+                    environments: Some(TurnEnvironmentSelections::new(
+                        cwd,
+                        vec![selection.clone()],
+                    )),
+                    ..Default::default()
+                },
+            ),
+        )
+        .await?;
+    let StartIfIdleSubmission::Started { turn_id } = started else {
+        anyhow::bail!("turn should start");
+    };
+
+    timeout(
+        Duration::from_secs(5),
+        server.wait_for_request_count(/*count*/ 2),
+    )
+    .await?;
+    let request: Value = serde_json::from_slice(&server.requests().await[1])?;
+    let output = request["input"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["type"] == "function_call_output" && item["call_id"] == "wait-local")
+        .expect("the second request should contain the wait result");
+    assert_eq!(
+        serde_json::from_str::<Value>(output["output"].as_str().unwrap())?,
+        serde_json::json!({"environment_id": "local", "status": "ready"}),
+    );
+    assert_eq!(
+        test.codex
+            .interrupted_turn()
+            .await
+            .map(|(id, _, environment)| (id, environment)),
+        Some((turn_id, selection)),
+    );
+    release.send(()).expect("the model response is waiting");
     wait_for_event(&test.codex, |event| {
         matches!(event, EventMsg::TurnComplete(_))
     })

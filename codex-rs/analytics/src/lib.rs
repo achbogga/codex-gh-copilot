@@ -5,6 +5,7 @@ mod client;
 mod events;
 mod facts;
 mod guardian_v2;
+mod product_attribution;
 mod reducer;
 mod thread_hint;
 
@@ -78,11 +79,12 @@ pub use facts::TurnTokenUsageFact;
 pub use facts::build_track_events_context;
 pub use guardian_v2::GuardianV2Event;
 pub use guardian_v2::GuardianV2EventKind;
+pub use product_attribution::ThreadProductUpdate;
 pub use thread_hint::ThreadHintStatus;
 pub use thread_hint::ThreadHintStatusEvent;
 
 #[cfg(test)]
-mod analytics_client_tests;
+mod tests;
 
 pub fn now_unix_seconds() -> u64 {
     SystemTime::now()

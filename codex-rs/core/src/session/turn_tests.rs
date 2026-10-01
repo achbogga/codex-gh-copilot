@@ -46,16 +46,18 @@ fn post_sampling_token_estimate_is_disabled_by_always_on_sinks() {
         .with(feedback.logger_layer())
         .with(tracing_subscriber::fmt::layer().with_filter(codex_state::log_db::default_filter()));
 
-    tracing::subscriber::with_default(subscriber, || {
-        tracing::callsite::rebuild_interest_cache();
-        assert!(!tracing::event_enabled!(
-            target: POST_SAMPLING_TOKEN_ESTIMATE_TARGET,
-            tracing::Level::TRACE,
-            turn_id,
-            estimated_token_count,
-            message
-        ));
-    });
+    static METADATA: tracing::Metadata<'static> = tracing::metadata! {
+        name: "post sampling token estimate filter probe",
+        target: POST_SAMPLING_TOKEN_ESTIMATE_TARGET,
+        level: tracing::Level::TRACE,
+        fields: &["turn_id", "estimated_token_count", "message"],
+        callsite: &CALLSITE,
+        kind: tracing::metadata::Kind::EVENT.hint(),
+    };
+    static CALLSITE: tracing::callsite::DefaultCallsite =
+        tracing::callsite::DefaultCallsite::new(&METADATA);
+
+    assert!(tracing::Subscriber::register_callsite(&subscriber, &METADATA).is_never());
 }
 
 #[tokio::test]
@@ -95,6 +97,7 @@ fn realtime_user_verification_notice_excludes_request_payload() {
         server_name: "private-server-name".to_string(),
         id: codex_protocol::mcp::RequestId::String("private-request-id".to_string()),
         request: codex_protocol::approvals::ElicitationRequest::UserVerification {
+            meta: None,
             title: "private-title".to_string(),
             description: "private-description".to_string(),
             challenge: "private-challenge".to_string(),
@@ -102,7 +105,7 @@ fn realtime_user_verification_notice_excludes_request_payload() {
     });
     assert_eq!(
         realtime_text_for_event(&event),
-        Some((
+        Some(RealtimeEventText::Handoff(
             "<user_verification_notice>User verification is required. Please respond in the app.</user_verification_notice>".to_string(),
             None,
         )),

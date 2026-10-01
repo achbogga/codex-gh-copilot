@@ -1,8 +1,12 @@
 // Aggregates all former standalone integration tests as modules.
 #[cfg(unix)]
+mod daemon_compatibility;
+#[cfg(unix)]
 mod directory_trust;
 #[cfg(unix)]
 mod focus_palette;
+#[cfg(unix)]
+mod provider_defaults;
 #[cfg(unix)]
 mod reconnect;
 mod resize_reflow;

@@ -289,7 +289,6 @@ impl ExecCommandHandler {
                 )));
             }
         }
-        let process_id = manager.allocate_process_id().await;
         let resolved_command = get_command(
             &args,
             shell,
@@ -298,7 +297,6 @@ impl ExecCommandHandler {
         )
         .map_err(FunctionCallError::RespondToModel)?;
         let command = resolved_command.command;
-        let shell_type = resolved_command.shell_type;
         let ExecCommandArgs {
             mut tty,
             yield_time_ms,
@@ -327,13 +325,12 @@ impl ExecCommandHandler {
             turn_environment.sandbox_context(/*additional_permissions*/ None);
         let permission_context = file_system_sandbox_policy_context_for_cwd(&sandbox_context, &cwd);
         let effective_additional_permissions = apply_granted_turn_permissions(
-            context.session.as_ref(),
+            &context.step_context,
             turn_environment,
             &cwd,
             sandbox_permissions,
             additional_permissions,
-        )
-        .await;
+        );
         let additional_permissions_allowed = exec_permission_approvals_enabled
             || (session.features().enabled(Feature::RequestPermissionsTool)
                 && effective_additional_permissions.permissions_preapproved);
@@ -347,7 +344,6 @@ impl ExecCommandHandler {
             && !effective_additional_permissions.permissions_preapproved
             && prompt_is_rejected_by_policy(approval_policy, /*prompt_is_rule*/ false).is_some()
         {
-            manager.release_process_id(process_id).await;
             return Err(FunctionCallError::RespondToModel(format!(
                 "approval policy is {approval_policy:?}; reject command — you cannot ask for escalated permissions if the approval policy is {approval_policy:?}"
             )));
@@ -373,7 +369,6 @@ impl ExecCommandHandler {
         ) {
             Ok(normalized) => normalized,
             Err(err) => {
-                manager.release_process_id(process_id).await;
                 return Err(FunctionCallError::RespondToModel(err));
             }
         };
@@ -391,13 +386,7 @@ impl ExecCommandHandler {
             "exec_command",
         )
         .await;
-        // Keep the reservation when interception returns `Ok(None)`: the normal command below
-        // still needs this process ID.
-        if intercepted_patch.is_err() {
-            manager.release_process_id(process_id).await;
-        }
         if let Some(output) = intercepted_patch? {
-            manager.release_process_id(process_id).await;
             return Ok(boxed_tool_output(ExecCommandToolOutput {
                 event_call_id: String::new(),
                 chunk_id: String::new(),
@@ -414,9 +403,20 @@ impl ExecCommandHandler {
         }
 
         emit_unified_exec_tty_metric(&step_context.session_telemetry, tty);
+        crate::tools::lifecycle::notify_command_start(
+            context.session.as_ref(),
+            context.step_context.turn.as_ref(),
+            &context.call_id,
+            &command,
+            &cwd,
+            fs.as_ref(),
+        )
+        .await;
+        // Preparation can be cancelled. Reserve a process only once it is done.
+        let process_id = manager.allocate_process_id().await;
         let request = ExecCommandRequest {
             command,
-            shell_type,
+            shell: resolved_command.shell,
             hook_command: hook_command.clone(),
             process_id,
             yield_time_ms,

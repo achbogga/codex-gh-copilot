@@ -453,6 +453,7 @@ async fn temporary_recap_threads_disable_memories_and_remote_mcp_servers() -> Re
 
     let config = app.chat_widget.config_ref();
     let options = crate::temporary_structured_request::TemporaryStructuredThreadOptions {
+        thread_source: codex_app_server_protocol::ThreadSource::Feature("system".to_string()),
         model: app.chat_widget.current_model().to_string(),
         model_provider: config.model_provider_id.clone(),
         cwd: config.cwd.display().to_string(),
@@ -462,14 +463,37 @@ async fn temporary_recap_threads_disable_memories_and_remote_mcp_servers() -> Re
             .map(|profile| profile.id),
         mcp_server_names: Vec::new(),
     };
-    crate::temporary_structured_request::start_temporary_thread(
+    let response = crate::temporary_structured_request::start_temporary_thread(
         &app_server.request_handle(),
         options,
     )
     .await?;
+    let thread_id = ThreadId::from_string(&response.thread.id)?;
+    let (sender, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    app.temporary_structured_requests.insert(thread_id, sender);
+    // Even if a hidden thread reaches visible routing, it must not prompt.
+    app.primary_thread_id = Some(thread_id);
+    app.active_thread_id = Some(thread_id);
+    for request in [
+        exec_approval_request(thread_id, "turn", "item", /*approval_id*/ None),
+        request_user_input_request(thread_id, "turn", "item"),
+    ] {
+        app.handle_app_server_event(
+            &app_server,
+            codex_app_server_client::AppServerEvent::ServerRequest(Box::new(request.clone())),
+        )
+        .await;
+        assert!(
+            !app.pending_app_server_requests
+                .contains_server_request(&request)
+        );
+    }
 
     let starts = recorded_params(&requests, "thread/start");
     assert_eq!(starts.len(), 1);
+    assert_eq!(starts[0]["sandbox"], "read-only");
+    assert_eq!(starts[0]["permissions"], serde_json::Value::Null);
+    assert_eq!(starts[0]["config"]["default_permissions"], ":read-only");
     assert_eq!(starts[0]["config"]["features.memories"], false);
     assert_eq!(starts[0]["config"]["features.context_management"], false);
     assert!(starts[0]["config"].get("features.memory_tool").is_none());
@@ -480,6 +504,24 @@ async fn temporary_recap_threads_disable_memories_and_remote_mcp_servers() -> Re
 
     app_server.shutdown().await?;
     proxy.await??;
+    assert_eq!(
+        requests
+            .lock()
+            .expect("request recorder lock")
+            .iter()
+            .filter(|request| request.method == "server/request/error")
+            .map(|request| (request.id.clone(), request.params.clone()))
+            .collect::<Vec<_>>(),
+        [1, 2]
+            .map(|id| (
+                AppServerRequestId::Integer(id),
+                Some(serde_json::json!({
+                    "code": -32000,
+                    "message": "temporary structured threads cannot request tools or user interaction"
+                }))
+            ))
+            .to_vec()
+    );
     Ok(())
 }
 

@@ -60,6 +60,7 @@ async fn lifecycle_shortcuts_target_filtered_task_in_any_state() {
     keymap.agents.archive = Some(KeybindingsSpec::One(KeybindingSpec("f5".into())));
     keymap.agents.delete = Some(KeybindingsSpec::One(KeybindingSpec("f6".into())));
     keymap.agents.hide = Some(KeybindingsSpec::One(KeybindingSpec("f7".into())));
+    keymap.agents.fork = Some(KeybindingsSpec::One(KeybindingSpec("f8".into())));
     app.keymap = RuntimeKeymap::from_config(&keymap).unwrap();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     app.app_event_tx = AppEventSender::new(tx);
@@ -84,7 +85,7 @@ async fn lifecycle_shortcuts_target_filtered_task_in_any_state() {
             Some(target),
         );
         view.handle_key_event(KeyCode::Esc.into());
-        view.handle_key_event(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
+        view.handle_key_event(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
         for character in "Target".chars() {
             view.handle_key_event(KeyCode::Char(character).into());
         }
@@ -99,6 +100,10 @@ async fn lifecycle_shortcuts_target_filtered_task_in_any_state() {
                 "unexpected event: {event:?}"
             );
         }
+        view.handle_key_event(KeyCode::F(8).into());
+        assert!(
+            matches!(rx.try_recv(), Ok(AppEvent::ForkAgentsOverviewThread { thread_id }) if thread_id == target)
+        );
         view.handle_key_event(KeyCode::F(7).into());
         assert!(
             matches!(rx.try_recv(), Ok(AppEvent::HideAgentsOverviewThread { thread_id }) if thread_id == target)
@@ -138,6 +143,7 @@ async fn hiding_tasks_keeps_selection_adjacent_in_display_order() -> Result<()> 
             )
         })
         .collect();
+    let age = regex_lite::Regex::new(r"\d+d ago$").unwrap();
     let mut selections = Vec::new();
     for grouping in [
         AgentsOverviewGrouping::Project,
@@ -159,9 +165,10 @@ async fn hiding_tasks_keeps_selection_adjacent_in_display_order() -> Result<()> 
             app.keymap = RuntimeKeymap::from_config(&keymap).unwrap();
             let mut view =
                 app.agents_overview_view(threads.clone(), Some(ThreadId::from_u128(/*value*/ 3)));
-            view.handle_key_event(KeyCode::Esc.into());
+            // Clear retained search without dismissing the command center.
+            view.on_ctrl_c();
             if filtered {
-                view.handle_key_event(KeyCode::Char('f').into());
+                view.handle_key_event(KeyCode::Char('/').into());
                 view.handle_paste("Task".into());
                 // Search selects the first match; move back to Task 3.
                 view.handle_key_event(KeyCode::Down.into());
@@ -189,15 +196,19 @@ async fn hiding_tasks_keeps_selection_adjacent_in_display_order() -> Result<()> 
                     "{grouping:?}, filtered={filtered}"
                 );
                 let rendered = render_bottom_popup(&app.chat_widget, /*width*/ 100);
-                let selected_row = rendered.lines().find(|line| line.contains('›')).unwrap();
+                let selected_row = rendered
+                    .lines()
+                    .find(|line| line.trim_start().starts_with('›'))
+                    .expect("selected task row");
+                let selected_row = selected_row.split('│').next().unwrap().trim();
                 selections.push(format!(
                     "{grouping:?}, filtered={filtered}: {}",
-                    selected_row.split('│').next().unwrap().trim()
+                    age.replace(selected_row, "[age]")
                 ));
                 app.chat_widget.handle_key_event(hide_key.into());
                 let hide = std::iter::from_fn(|| rx.try_recv().ok())
                     .find(|event| matches!(event, AppEvent::HideAgentsOverviewThread { .. }))
-                    .expect("hide shortcut emits an event");
+                    .expect("hide action emits an event");
                 assert!(matches!(
                     &hide,
                     AppEvent::HideAgentsOverviewThread { thread_id }
@@ -263,7 +274,10 @@ async fn hiding_rename_target_does_not_transfer_draft_to_neighbor() -> Result<()
     Box::pin(app.handle_event(&mut tui, &mut app_server, hide)).await?;
     {
         let state = app.agents_overview.view_state.lock().unwrap();
-        assert_eq!((state.renaming, state.input.as_str()), (false, ""));
+        assert_eq!(
+            (state.rename_target.is_some(), state.input.as_str()),
+            (false, "")
+        );
     }
     app.chat_widget.handle_key_event(KeyCode::Enter.into());
     assert!(
@@ -292,7 +306,6 @@ async fn hidden_task_stays_hidden_through_activity_and_seed_until_explicit_resum
     let mut tui = crate::tui::test_support::make_test_tui()?;
     let view = app.agents_overview_view(vec![thread.clone()], Some(id));
     app.chat_widget.show_bottom_pane_view(Box::new(view));
-    app.chat_widget.handle_key_event(KeyCode::Esc.into());
     app.chat_widget
         .handle_key_event(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
     let hide = std::iter::from_fn(|| rx.try_recv().ok())
@@ -327,6 +340,7 @@ async fn hidden_task_stays_hidden_through_activity_and_seed_until_explicit_resum
             threads: HashMap::from([(id, Some(thread.clone()))]),
             last_messages: HashMap::new(),
             recent_seed_complete: true,
+            discovery: None,
         }),
     );
     assert_eq!(
@@ -398,7 +412,7 @@ async fn lifecycle_removes_background_and_current_tasks_without_losing_the_dashb
     ] {
         let key = match action {
             AgentsOverviewAction::Archive => KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
-            AgentsOverviewAction::Delete => KeyCode::Delete.into(),
+            AgentsOverviewAction::Delete => KeyCode::Backspace.into(),
         };
         let (mut app, mut rx, _op_rx) =
             Box::pin(crate::app::tests::make_test_app_with_channels()).await;
@@ -605,6 +619,7 @@ async fn lifecycle_removes_background_and_current_tasks_without_losing_the_dashb
                 threads: stale_threads,
                 last_messages: HashMap::new(),
                 recent_seed_complete: true,
+                discovery: None,
             }),
         );
         assert_eq!(
@@ -690,7 +705,16 @@ async fn lifecycle_removes_background_and_current_tasks_without_losing_the_dashb
             // Removal must not depend on the overview having the primary or its ancestors cached.
             app.agents_overview.threads.remove(&primary);
         }
+        crate::chatwidget::activate_voice_for_thread(&mut app.chat_widget, primary);
+        // Canceling pagination must allow automatic refill to finish after removing the last task.
+        app.agents_overview.initialized = true;
+        app.agents_overview.view_state.lock().unwrap().loading = true;
         Box::pin(app.handle_event(&mut tui, &mut app_server, confirmed)).await?;
+        if app.agents_overview.request_id.is_some() {
+            finish_overview_refresh(&mut app, &app_server, &mut rx).await;
+        }
+        assert!(!app.agents_overview.view_state.lock().unwrap().loading);
+        assert_eq!(app.voice_owner_thread_id(), None);
         assert_eq!(
             (
                 app.primary_thread_id,
@@ -736,96 +760,26 @@ async fn lifecycle_removes_background_and_current_tasks_without_losing_the_dashb
 }
 
 #[tokio::test]
-async fn disabled_footer_shortcuts_stay_bold_when_wrapped() {
-    let app = make_test_app().await;
-    let mut view = app.agents_overview_view(Vec::new(), /*selected_thread_id*/ None);
-    view.handle_key_event(KeyCode::Esc.into());
-    let area = Rect::new(
-        /*x*/ 0, /*y*/ 0, /*width*/ 84, /*height*/ 24,
-    );
-    let mut buffer = ratatui::buffer::Buffer::empty(area);
-    view.render(area, &mut buffer);
-    let delete_key = crate::key_hint::plain(KeyCode::Delete).display_label();
-    for (key, label) in [
-        ("x", "x stop"),
-        ("h", "h hide"),
-        ("a", "a archive"),
-        (delete_key.as_str(), delete_key.as_str()),
-    ] {
-        let cells = buffer
-            .content()
-            .windows(label.len())
-            .find(|cells| {
-                cells
-                    .iter()
-                    .map(ratatui::buffer::Cell::symbol)
-                    .collect::<String>()
-                    == label
-            })
-            .expect("footer shortcut");
-        assert_eq!(
-            cells[..key.len()]
-                .iter()
-                .map(|cell| cell.modifier)
-                .collect::<Vec<_>>(),
-            vec![ratatui::style::Modifier::BOLD | ratatui::style::Modifier::DIM; key.len()]
-        );
-    }
-}
-
-#[tokio::test]
-async fn lifecycle_footer_keeps_custom_chords_with_labels() {
-    let mut app = make_test_app().await;
-    app.keymap = RuntimeKeymap::from_config(
-        &serde_json::from_value(serde_json::json!({
-            "agents": { "archive": "f5 f6", "delete": "f5 f7", "hide": "f5 f8" }
-        }))
-        .unwrap(),
-    )
-    .unwrap();
+async fn fork_shortcut_respects_metadata_editing() {
+    let (app, mut rx, _) = crate::app::tests::make_test_app_with_channels().await;
+    let target = ThreadId::new();
     let mut view = app.agents_overview_view(
         vec![overview_thread(
-            ThreadId::new(),
+            target,
             /*parent_thread_id*/ None,
-            "Task",
+            "Target",
             ThreadStatus::Idle,
         )],
-        /*selected_thread_id*/ None,
+        Some(target),
     );
-    view.handle_key_event(KeyCode::Esc.into());
-    for width in [36, 48, 80] {
-        let area = Rect::new(/*x*/ 0, /*y*/ 0, width + 4, /*height*/ 24);
-        let mut buffer = ratatui::buffer::Buffer::empty(area);
-        view.render(area, &mut buffer);
-        let lines = buffer
-            .content()
-            .chunks(usize::from(area.width))
-            .map(|row| {
-                row.iter()
-                    .map(ratatui::buffer::Cell::symbol)
-                    .collect::<String>()
-                    .trim()
-                    .to_string()
-            })
-            .collect::<Vec<_>>();
-        for label in ["archive", "delete", "hide"] {
-            assert!(
-                lines
-                    .iter()
-                    .any(|line| line.contains(label) && line.contains("f5"))
-            );
-        }
-        assert!(
-            lines
-                .iter()
-                .all(|line| unicode_width::UnicodeWidthStr::width(line.as_str())
-                    <= usize::from(width))
-        );
+    for editor in ['r', '/'] {
+        view.handle_key_event(KeyCode::Char(editor).into());
+        view.handle_key_event(KeyCode::Char('f').into());
+        assert!(rx.try_recv().is_err());
+        view.handle_key_event(KeyCode::Esc.into());
     }
-    app.chat_widget.show_bottom_pane_view(Box::new(view));
-    insta::assert_snapshot!(
-        "agents_custom_lifecycle_chords",
-        render_bottom_popup(&app.chat_widget, /*width*/ 48)
-            .replace(&test_path_display("/tmp/project"), "/tmp/project")
+    view.handle_key_event(KeyCode::Char('f').into());
+    assert!(
+        matches!(rx.try_recv(), Ok(AppEvent::ForkAgentsOverviewThread { thread_id }) if thread_id == target)
     );
 }

@@ -1,6 +1,7 @@
 //! Registered runtime ownership and uninstall policy for the shared package watcher.
 //! Native cleanup stays inside the caller's setup lock and precedes package removal.
 
+use std::os::windows::io::AsRawHandle;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 
@@ -75,13 +76,16 @@ pub(super) fn clean_up(lifecycle: &PackageLifecycle, record: InstallationRecord)
             }),
         "waiting for the authenticated runtime owner and home before sandbox file cleanup"
     );
-    let record = crate::registered_runtime::prepare_cleanup(record)?;
+    let mut record = crate::registered_runtime::prepare_cleanup(record)?;
     let removal = {
         let installation = lifecycle.installation.borrow();
         let installation = installation
             .as_ref()
             .context("authenticated installation is missing")?;
-        crate::registered_runtime::prepare_removal(installation.user_token.0, &record)?
+        crate::registered_runtime::prepare_removal(
+            installation.user_token.as_raw_handle(),
+            &mut record,
+        )?
     };
     let prepared =
         prepare_packaged_windows_sandbox_cleanup_with_retained_tokens(&removal.tokens())?;

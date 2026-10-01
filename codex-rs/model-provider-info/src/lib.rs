@@ -8,8 +8,8 @@
 //! API provider construction applies the process-wide managed residency policy also
 //! used by default HTTP headers.
 
-use codex_api::Provider as ApiProvider;
-use codex_api::RetryConfig as ApiRetryConfig;
+use codex_client::Provider as ApiProvider;
+use codex_client::RetryConfig as ApiRetryConfig;
 use codex_protocol::auth::AuthMode;
 use codex_protocol::config_types::ModelProviderAuthInfo;
 use codex_protocol::error::CodexErr;
@@ -30,6 +30,10 @@ use std::path::Path;
 use std::sync::PoisonError;
 use std::sync::RwLock;
 use std::time::Duration;
+
+mod gateway_oauth;
+pub use gateway_oauth::GatewayOAuthConfig;
+pub use gateway_oauth::GatewayOAuthDelivery;
 
 pub const RESIDENCY_HEADER_NAME: &str = "x-openai-internal-codex-residency";
 
@@ -76,8 +80,10 @@ pub const AMAZON_BEDROCK_PROVIDER_ID: &str = "amazon-bedrock";
 const AMAZON_BEDROCK_RUNTIME_PROVIDER_NAME: &str = "Amazon Bedrock Runtime";
 pub const AMAZON_BEDROCK_RUNTIME_PROVIDER_ID: &str = "amazon-bedrock-runtime";
 pub const AMAZON_BEDROCK_GPT_5_5_MODEL_ID: &str = "openai.gpt-5.5";
-pub const AMAZON_BEDROCK_GPT_5_4_MODEL_ID: &str = "openai.gpt-5.4";
 pub const AMAZON_BEDROCK_GPT_5_6_SOL_MODEL_ID: &str = "openai.gpt-5.6-sol";
+pub const AMAZON_BEDROCK_GPT_6_1_SOL_MODEL_ID: &str = "openai.gpt-6.1-sol";
+pub const AMAZON_BEDROCK_GPT_6_SOL_MODEL_ID: &str = "openai.gpt-6-sol";
+pub const AMAZON_BEDROCK_GPT_6_LUNA_MODEL_ID: &str = "openai.gpt-6-luna";
 pub const AMAZON_BEDROCK_GPT_6_ASTRA_MODEL_ID: &str = "openai.gpt-6-astra";
 pub const AMAZON_BEDROCK_GPT_5_6_TERRA_MODEL_ID: &str = "openai.gpt-5.6-terra";
 pub const AMAZON_BEDROCK_GPT_5_6_LUNA_MODEL_ID: &str = "openai.gpt-5.6-luna";
@@ -133,6 +139,9 @@ pub struct ModelProviderInfo {
     pub name: String,
     /// Base URL for the provider's OpenAI-compatible API.
     pub base_url: Option<String>,
+    /// Optional full URL for a Codex-native model catalog. When unset, OpenAI discovery
+    /// uses the Codex backend unless `base_url` overrides the inference endpoint.
+    pub model_catalog_url: Option<RedactedString>,
     /// Environment variable that stores the user's API key for this provider.
     pub env_key: Option<String>,
 
@@ -145,6 +154,8 @@ pub struct ModelProviderInfo {
     pub experimental_bearer_token: Option<RedactedString>,
     /// Command-backed bearer-token configuration for this provider.
     pub auth: Option<ModelProviderAuthInfo>,
+    /// Secondary OAuth credentials required by the provider's gateway.
+    pub gateway_oauth: Option<GatewayOAuthConfig>,
     /// AWS SigV4 auth configuration for this provider.
     pub aws: Option<ModelProviderAwsAuthInfo>,
     /// Which wire protocol this provider expects.
@@ -170,10 +181,11 @@ pub struct ModelProviderInfo {
     /// Maximum time (in milliseconds) to wait for a websocket connection attempt before treating
     /// it as failed.
     pub websocket_connect_timeout_ms: Option<u64>,
-    /// Does this provider require an OpenAI API Key or ChatGPT login token? If true,
-    /// user is presented with login screen on first run, and login preference and token/key
-    /// are stored in auth.json. If false (which is the default), login screen is skipped,
-    /// and API key (if needed) comes from the "env_key" environment variable.
+    /// Does this provider require an OpenAI API key or ChatGPT login token? If true,
+    /// the user is presented with a login screen on first run, and credentials are
+    /// stored using the backend selected by `cli_auth_credentials_store`.
+    /// If false (the default), the login screen is skipped, and the API key
+    /// (if needed) comes from the environment variable specified by `env_key`.
     #[serde(default)]
     pub requires_openai_auth: bool,
     /// Whether this provider supports the Responses API WebSocket transport.
@@ -182,6 +194,11 @@ pub struct ModelProviderInfo {
     /// Whether this provider supports the standalone web-search endpoint.
     #[serde(default)]
     pub supports_standalone_web_search: bool,
+    /// Runtime-only opt-in for internal metadata, independent of the destination check.
+    /// This cannot be loaded from or written to serialized provider configuration.
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub include_internal_metadata: bool,
 }
 
 /// AWS SigV4 auth configuration for a model provider.
@@ -274,6 +291,9 @@ other non-default provider fields are not supported"
     }
 
     pub fn validate(&self) -> std::result::Result<(), String> {
+        if let Some(gateway) = &self.gateway_oauth {
+            gateway.validate(self)?;
+        }
         if let Some(aws) = self.aws.as_ref() {
             if self.supports_websockets {
                 // TODO(celia-oai): Support AWS SigV4 signing for WebSocket
@@ -501,10 +521,12 @@ other non-default provider fields are not supported"
         ModelProviderInfo {
             name: OPENAI_PROVIDER_NAME.into(),
             base_url,
+            model_catalog_url: None,
             env_key: None,
             env_key_instructions: None,
             experimental_bearer_token: None,
             auth: None,
+            gateway_oauth: None,
             aws: None,
             wire_api: WireApi::Responses,
             query_params: None,
@@ -532,6 +554,7 @@ other non-default provider fields are not supported"
             requires_openai_auth: true,
             supports_websockets: true,
             supports_standalone_web_search: true,
+            include_internal_metadata: true,
         }
     }
 
@@ -544,10 +567,12 @@ other non-default provider fields are not supported"
             // this is unset. A configured value is therefore unambiguously an
             // endpoint override.
             base_url: None,
+            model_catalog_url: None,
             env_key: None,
             env_key_instructions: None,
             experimental_bearer_token: None,
             auth: None,
+            gateway_oauth: None,
             aws: Some(aws.unwrap_or(ModelProviderAwsAuthInfo {
                 profile: None,
                 region: None,
@@ -568,6 +593,7 @@ other non-default provider fields are not supported"
             requires_openai_auth: false,
             supports_websockets: false,
             supports_standalone_web_search: false,
+            include_internal_metadata: false,
         }
     }
 
@@ -576,7 +602,6 @@ other non-default provider fields are not supported"
     ) -> ModelProviderInfo {
         let mut provider = Self::create_amazon_bedrock_provider(aws);
         provider.name = AMAZON_BEDROCK_RUNTIME_PROVIDER_NAME.into();
-        provider.http_headers = None;
         provider
     }
 
@@ -723,10 +748,12 @@ pub fn create_oss_provider_with_base_url(base_url: &str, wire_api: WireApi) -> M
     ModelProviderInfo {
         name: "gpt-oss".into(),
         base_url: Some(base_url.into()),
+        model_catalog_url: None,
         env_key: None,
         env_key_instructions: None,
         experimental_bearer_token: None,
         auth: None,
+        gateway_oauth: None,
         aws: None,
         wire_api,
         query_params: None,
@@ -739,6 +766,7 @@ pub fn create_oss_provider_with_base_url(base_url: &str, wire_api: WireApi) -> M
         requires_openai_auth: false,
         supports_websockets: false,
         supports_standalone_web_search: false,
+        include_internal_metadata: false,
     }
 }
 

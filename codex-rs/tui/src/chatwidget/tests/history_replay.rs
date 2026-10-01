@@ -1,3 +1,4 @@
+use super::helpers::drain_insert_history_transcript;
 use super::*;
 use crate::app_event::HistoryLookupResponse;
 use codex_app_server_protocol::ImageReference;
@@ -19,6 +20,7 @@ async fn resumed_initial_messages_render_history() {
     let thread_id = ThreadId::new();
     let rollout_file = NamedTempFile::new().unwrap();
     let configured = crate::session_state::ThreadSessionState {
+        daybreak_enabled: true,
         windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
         thread_id,
         forked_from_id: None,
@@ -36,13 +38,13 @@ async fn resumed_initial_messages_render_history() {
         instruction_source_paths: Vec::new(),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
         collaboration_mode: None,
-        personality: None,
         message_history: None,
         network_proxy: None,
         rollout_path: Some(rollout_file.path().to_path_buf()),
     };
 
     chat.handle_thread_session(configured);
+    assert!(chat.daybreak_enabled);
     replay_user_message_text(
         &mut chat,
         "user-1",
@@ -76,6 +78,7 @@ async fn resumed_initial_messages_render_history() {
         text_blob.contains("assistant reply"),
         "expected replayed agent message",
     );
+    insta::assert_snapshot!("resumed_daybreak_banner", merged_lines[0]);
 }
 
 #[tokio::test]
@@ -114,7 +117,7 @@ async fn replayed_failed_turns_preserve_overload_warnings_between_retries() {
         ReplayKind::ResumeInitialMessages,
     );
 
-    let rendered = drain_insert_history(&mut rx)
+    let rendered = drain_insert_history_transcript(&mut rx)
         .into_iter()
         .map(|lines| lines_to_single_string(&lines))
         .collect::<String>();
@@ -134,6 +137,7 @@ async fn restored_conversation_ultra_remains_selected_after_switching_to_plan() 
     chat.set_plan_mode_reasoning_effort(Some(ReasoningEffortConfig::High));
 
     chat.handle_thread_session(crate::session_state::ThreadSessionState {
+        daybreak_enabled: false,
         windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
         thread_id: ThreadId::new(),
         forked_from_id: None,
@@ -151,7 +155,6 @@ async fn restored_conversation_ultra_remains_selected_after_switching_to_plan() 
         instruction_source_paths: Vec::new(),
         reasoning_effort: Some(ReasoningEffortConfig::Ultra),
         collaboration_mode: None,
-        personality: None,
         message_history: None,
         network_proxy: None,
         rollout_path: None,
@@ -422,6 +425,7 @@ async fn replayed_user_message_preserves_text_elements_and_local_images() {
     let thread_id = ThreadId::new();
     let rollout_file = NamedTempFile::new().unwrap();
     let configured = crate::session_state::ThreadSessionState {
+        daybreak_enabled: false,
         windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
         thread_id,
         forked_from_id: None,
@@ -439,7 +443,6 @@ async fn replayed_user_message_preserves_text_elements_and_local_images() {
         instruction_source_paths: Vec::new(),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
         collaboration_mode: None,
-        personality: None,
         message_history: None,
         network_proxy: None,
         rollout_path: Some(rollout_file.path().to_path_buf()),
@@ -495,6 +498,7 @@ async fn replayed_user_message_preserves_remote_image_urls() {
     let thread_id = ThreadId::new();
     let rollout_file = NamedTempFile::new().unwrap();
     let configured = crate::session_state::ThreadSessionState {
+        daybreak_enabled: false,
         windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
         thread_id,
         forked_from_id: None,
@@ -512,7 +516,6 @@ async fn replayed_user_message_preserves_remote_image_urls() {
         instruction_source_paths: Vec::new(),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
         collaboration_mode: None,
-        personality: None,
         message_history: None,
         network_proxy: None,
         rollout_path: Some(rollout_file.path().to_path_buf()),
@@ -602,6 +605,7 @@ async fn session_configured_syncs_widget_config_permissions_and_cwd() {
         .expect("permission profile should project to legacy sandbox policy");
     let expected_sandbox = SandboxPolicy::from(expected_core_sandbox);
     let configured = crate::session_state::ThreadSessionState {
+        daybreak_enabled: false,
         windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
         thread_id: ThreadId::new(),
         forked_from_id: None,
@@ -619,7 +623,6 @@ async fn session_configured_syncs_widget_config_permissions_and_cwd() {
         instruction_source_paths: Vec::new(),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
         collaboration_mode: None,
-        personality: None,
         message_history: None,
         network_proxy: None,
         rollout_path: None,
@@ -676,6 +679,7 @@ async fn session_configured_preserves_profile_workspace_roots() {
     let session_permission_profile = PermissionProfile::workspace_write()
         .materialize_project_roots_with_workspace_roots(&session_effective_workspace_roots);
     let configured = crate::session_state::ThreadSessionState {
+        daybreak_enabled: false,
         windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
         thread_id: ThreadId::new(),
         forked_from_id: None,
@@ -693,7 +697,6 @@ async fn session_configured_preserves_profile_workspace_roots() {
         instruction_source_paths: Vec::new(),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
         collaboration_mode: None,
-        personality: None,
         message_history: None,
         network_proxy: None,
         rollout_path: None,
@@ -724,6 +727,7 @@ async fn session_configured_external_sandbox_keeps_external_runtime_policy() {
         network_access: NetworkAccess::Restricted,
     };
     let configured = crate::session_state::ThreadSessionState {
+        daybreak_enabled: false,
         windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
         thread_id: ThreadId::new(),
         forked_from_id: None,
@@ -741,7 +745,6 @@ async fn session_configured_external_sandbox_keeps_external_runtime_policy() {
         instruction_source_paths: Vec::new(),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
         collaboration_mode: None,
-        personality: None,
         message_history: None,
         network_proxy: None,
         rollout_path: None,
@@ -766,6 +769,7 @@ async fn replayed_user_message_with_only_remote_images_renders_history_cell() {
     let thread_id = ThreadId::new();
     let rollout_file = NamedTempFile::new().unwrap();
     let configured = crate::session_state::ThreadSessionState {
+        daybreak_enabled: false,
         windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
         thread_id,
         forked_from_id: None,
@@ -783,7 +787,6 @@ async fn replayed_user_message_with_only_remote_images_renders_history_cell() {
         instruction_source_paths: Vec::new(),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
         collaboration_mode: None,
-        personality: None,
         message_history: None,
         network_proxy: None,
         rollout_path: Some(rollout_file.path().to_path_buf()),
@@ -827,6 +830,7 @@ async fn replayed_user_message_with_only_local_images_renders_history_cell() {
     let thread_id = ThreadId::new();
     let rollout_file = NamedTempFile::new().unwrap();
     let configured = crate::session_state::ThreadSessionState {
+        daybreak_enabled: false,
         windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
         thread_id,
         forked_from_id: None,
@@ -844,7 +848,6 @@ async fn replayed_user_message_with_only_local_images_renders_history_cell() {
         instruction_source_paths: Vec::new(),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
         collaboration_mode: None,
-        personality: None,
         message_history: None,
         network_proxy: None,
         rollout_path: Some(rollout_file.path().to_path_buf()),
@@ -1182,6 +1185,7 @@ async fn replayed_reasoning_item_preserves_summary_parts_and_hides_raw_reasoning
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     chat.config.show_raw_agent_reasoning = false;
     chat.handle_thread_session(crate::session_state::ThreadSessionState {
+        daybreak_enabled: false,
         windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
         thread_id: ThreadId::new(),
         forked_from_id: None,
@@ -1199,7 +1203,6 @@ async fn replayed_reasoning_item_preserves_summary_parts_and_hides_raw_reasoning
         instruction_source_paths: Vec::new(),
         reasoning_effort: None,
         collaboration_mode: None,
-        personality: None,
         message_history: None,
         network_proxy: None,
         rollout_path: None,
@@ -1234,6 +1237,7 @@ async fn replayed_reasoning_item_shows_raw_reasoning_when_enabled() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     chat.config.show_raw_agent_reasoning = true;
     chat.handle_thread_session(crate::session_state::ThreadSessionState {
+        daybreak_enabled: false,
         windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
         thread_id: ThreadId::new(),
         forked_from_id: None,
@@ -1251,7 +1255,6 @@ async fn replayed_reasoning_item_shows_raw_reasoning_when_enabled() {
         instruction_source_paths: Vec::new(),
         reasoning_effort: None,
         collaboration_mode: None,
-        personality: None,
         message_history: None,
         network_proxy: None,
         rollout_path: None,
@@ -1278,26 +1281,27 @@ async fn replayed_reasoning_item_shows_raw_reasoning_when_enabled() {
 }
 
 #[tokio::test]
-async fn replayed_in_progress_mcp_tool_call_stays_active() {
+async fn replayed_mcp_tool_call_stays_active_until_completion() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     let _ = drain_insert_history(&mut rx);
 
+    let mut item = AppServerThreadItem::McpToolCall {
+        id: "mcp-1".to_string(),
+        server: "copilot-bridge".to_string(),
+        tool: "copilot".to_string(),
+        status: codex_app_server_protocol::McpToolCallStatus::InProgress,
+        arguments: json!({"action": "wait"}),
+        app_context: None,
+        mcp_app_resource_uri: None,
+        mcp_app_ui: None,
+        plugin_id: None,
+        read_only_hint: None,
+        result: None,
+        error: None,
+        duration_ms: None,
+    };
     chat.replay_thread_item(
-        AppServerThreadItem::McpToolCall {
-            id: "mcp-1".to_string(),
-            server: "copilot-bridge".to_string(),
-            tool: "copilot".to_string(),
-            status: codex_app_server_protocol::McpToolCallStatus::InProgress,
-            arguments: json!({"action": "wait"}),
-            app_context: None,
-            mcp_app_resource_uri: None,
-            mcp_app_ui: None,
-            plugin_id: None,
-            read_only_hint: None,
-            result: None,
-            error: None,
-            duration_ms: None,
-        },
+        item.clone(),
         "turn-1".to_string(),
         ReplayKind::ThreadSnapshot,
     );
@@ -1306,6 +1310,17 @@ async fn replayed_in_progress_mcp_tool_call_stays_active() {
     let active = active_blob(&chat);
     assert!(active.contains("Calling"));
     assert!(!active.contains("MCP tool call completed without a result"));
+
+    if let AppServerThreadItem::McpToolCall { status, .. } = &mut item {
+        *status = codex_app_server_protocol::McpToolCallStatus::Completed;
+    }
+    chat.on_mcp_tool_call_completed(item);
+    assert!(chat.transcript.active_cell.is_none());
+    let completed = drain_insert_history(&mut rx);
+    assert_eq!(completed.len(), 1);
+    assert!(
+        lines_to_single_string(&completed[0]).contains("MCP tool call completed without a result")
+    );
 }
 
 #[tokio::test]
@@ -1361,7 +1376,7 @@ async fn failed_repl_mcp_tool_call_preserves_status_and_result() {
               └ Script failed
                 {"exit_code": 0, "output": "ready", "chunk_id": "chunk-1"}
                 Script error:
-                permission denied
+                +1 line (⌃t to view transcript)
             "#);
         }
         assert_eq!(
@@ -1369,7 +1384,7 @@ async fn failed_repl_mcp_tool_call_preserves_status_and_result() {
             Some(&Line::from(vec![
                 "•".red().bold(),
                 " ".into(),
-                "Inspect workspace".cyan(),
+                "Inspect workspace".fg(crate::style::accent_color()),
             ])),
             "{server}",
         );

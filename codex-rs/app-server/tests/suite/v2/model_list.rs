@@ -39,14 +39,17 @@ use wiremock::matchers::path;
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 const INVALID_REQUEST_ERROR_CODE: i64 = -32600;
 
-#[test_case(None, false; "default off")]
-#[test_case(None, true; "app rollout")]
-#[test_case(Some(false), true; "user opt out")]
-#[test_case(Some(true), false; "user opt in")]
+#[test_case(None, None, true; "default on")]
+#[test_case(None, Some(false), true; "app rollback")]
+#[test_case(None, Some(true), true; "app rollout")]
+#[test_case(Some(false), Some(true), true; "user opt out")]
+#[test_case(Some(true), Some(false), true; "user opt in")]
+#[test_case(Some(true), Some(false), false; "base URL without catalog opt in")]
 #[tokio::test]
 async fn api_key_model_discovery_startup_enablement_respects_user_config(
     user_enablement: Option<bool>,
-    app_enablement: bool,
+    app_enablement: Option<bool>,
+    catalog_opt_in: bool,
 ) -> Result<()> {
     let server = MockServer::start().await;
     let mut remote_model = codex_models_manager::bundled_models_response()?
@@ -69,9 +72,24 @@ async fn api_key_model_discovery_startup_enablement_respects_user_config(
     let feature_config = user_enablement
         .map(|enabled| format!("[features]\napi_key_model_discovery = {enabled}\n"))
         .unwrap_or_default();
+    let catalog_config = if catalog_opt_in {
+        format!("model_catalog_url = \"{server_uri}/v1/models\"\n")
+    } else {
+        String::new()
+    };
     std::fs::write(
         codex_home.path().join("config.toml"),
-        format!("openai_base_url = \"{server_uri}/v1\"\n{feature_config}"),
+        format!(
+            r#"
+model_provider = "catalog-test"
+{feature_config}
+[model_providers.catalog-test]
+name = "OpenAI"
+base_url = "{server_uri}/v1"
+requires_openai_auth = true
+{catalog_config}
+"#
+        ),
     )?;
     login_with_api_key(
         codex_home.path(),
@@ -98,7 +116,10 @@ async fn api_key_model_discovery_startup_enablement_respects_user_config(
             |request_id| ClientRequest::ExperimentalFeatureEnablementSet {
                 request_id,
                 params: ExperimentalFeatureEnablementSetParams {
-                    enablement: [("api_key_model_discovery".to_string(), app_enablement)].into(),
+                    enablement: app_enablement
+                        .into_iter()
+                        .map(|enabled| ("api_key_model_discovery".to_string(), enabled))
+                        .collect(),
                 },
             },
         )
@@ -113,8 +134,16 @@ async fn api_key_model_discovery_startup_enablement_respects_user_config(
             },
         })
         .await?;
-    let enabled = user_enablement.unwrap_or(app_enablement);
-    let expected = if enabled { &remote } else { &bundled };
+    let enabled = user_enablement.or(app_enablement).unwrap_or(true) && catalog_opt_in;
+    let expected: &[ModelPreset] = if enabled {
+        &remote
+    } else if catalog_opt_in {
+        // The rollout gate suppresses discovery, but an explicit catalog still
+        // prevents bundled models from being advertised for this provider.
+        &[]
+    } else {
+        &bundled
+    };
     assert_eq!(
         response,
         ModelListResponse {
@@ -129,13 +158,15 @@ async fn api_key_model_discovery_startup_enablement_respects_user_config(
             next_cursor: None,
         }
     );
-    if !enabled {
+    // Only startup opt-outs prevent fetches before the app sends its enablement.
+    if user_enablement == Some(false) || !catalog_opt_in {
         assert!(
             server
                 .received_requests()
                 .await
                 .expect("request recording is enabled")
-                .is_empty()
+                .iter()
+                .all(|request| request.url.path() != "/v1/models")
         );
     }
     Ok(())
@@ -344,9 +375,14 @@ async fn list_models_uses_remote_catalog_as_source_of_truth(
 model = "mock-model"
 approval_policy = "never"
 sandbox_mode = "read-only"
-openai_base_url = "{server_uri}/v1"
+model_provider = "catalog-test"
 [features]
 api_key_model_discovery = true
+[model_providers.catalog-test]
+name = "OpenAI"
+base_url = "{server_uri}/v1"
+requires_openai_auth = true
+model_catalog_url = "{server_uri}/v1/models"
 "#
         ),
     )?;

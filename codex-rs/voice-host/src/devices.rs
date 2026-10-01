@@ -3,6 +3,9 @@
 //! Capture and actual rendered output carry device timing.
 //! References start with worker service; unmute rejects earlier device capture buffers.
 
+#[path = "input_channel.rs"]
+mod input_channel;
+
 #[path = "audio_sink.rs"]
 mod audio_sink;
 #[path = "device_buffers.rs"]
@@ -23,6 +26,7 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 use std::time::Instant;
 
+use codex_realtime_webrtc::AudioDeviceKind;
 use cpal::FromSample;
 use cpal::Sample;
 use cpal::SampleFormat;
@@ -40,6 +44,77 @@ use buffers::MAX_CALLBACK_FRAMES;
 use buffers::Playback;
 use buffers::QUEUE_CAPACITY;
 use playback::PlaybackPort;
+
+fn device(
+    host: &cpal::Host,
+    kind: AudioDeviceKind,
+    name: Option<&str>,
+) -> io::Result<cpal::Device> {
+    let selected = match (kind, name) {
+        (AudioDeviceKind::Input, None) => host.default_input_device(),
+        (AudioDeviceKind::Output, None) => host.default_output_device(),
+        (kind, Some(name)) => {
+            let devices = match kind {
+                AudioDeviceKind::Input => host.input_devices(),
+                AudioDeviceKind::Output => host.output_devices(),
+            }
+            .map_err(io::Error::other)?;
+            eligible_devices(devices, |device| device_description(device, kind))
+                .find(|(_, candidate, _)| candidate == name)
+                .map(|(device, _, _)| device)
+        }
+    };
+    selected.ok_or_else(|| io::Error::other("selected audio device unavailable"))
+}
+
+pub(super) fn list_devices(
+    kind: AudioDeviceKind,
+) -> io::Result<Vec<codex_realtime_webrtc::AudioDevice>> {
+    let host = cpal::default_host();
+    let default_id = device(&host, kind, /*name*/ None)
+        .ok()
+        .and_then(|device| device.id().ok());
+    let devices = match kind {
+        AudioDeviceKind::Input => host.input_devices(),
+        AudioDeviceKind::Output => host.output_devices(),
+    }
+    .map_err(io::Error::other)?;
+    Ok(
+        eligible_devices(devices, |device| device_description(device, kind))
+            .map(
+                |(device, name, channels)| codex_realtime_webrtc::AudioDevice {
+                    name,
+                    channels,
+                    is_default: default_id.is_some() && device.id().ok() == default_id,
+                },
+            )
+            .collect(),
+    )
+}
+
+fn device_description(
+    device: &cpal::Device,
+    kind: AudioDeviceKind,
+) -> Option<(String, cpal::SupportedStreamConfig)> {
+    let config = match kind {
+        AudioDeviceKind::Input => device.default_input_config(),
+        AudioDeviceKind::Output => device.default_output_config(),
+    }
+    .ok()?;
+    Some((device.description().ok()?.name().to_owned(), config))
+}
+
+// Listing and named startup must agree on which endpoints can be selected.
+fn eligible_devices<D>(
+    devices: impl Iterator<Item = D>,
+    mut describe: impl FnMut(&D) -> Option<(String, cpal::SupportedStreamConfig)>,
+) -> impl Iterator<Item = (D, String, u16)> {
+    devices.take(/*n*/ 64).filter_map(move |device| {
+        let (name, config) = describe(&device)?;
+        bounded_stream_config(&config).ok()?;
+        (name.chars().count() <= 256).then(|| (device, name, config.channels()))
+    })
+}
 
 const MAX_CAPTURE_AGE: Duration = Duration::from_secs(/*secs*/ 1);
 
@@ -76,14 +151,14 @@ impl Devices {
         self.worker.buffers.take_state()
     }
 
-    pub(super) fn open() -> io::Result<Self> {
+    pub(super) fn open(selection: codex_realtime_webrtc::AudioDeviceSelection) -> io::Result<Self> {
         let host = cpal::default_host();
-        let input = host
-            .default_input_device()
-            .ok_or_else(|| io::Error::other("microphone unavailable"))?;
-        let output = host
-            .default_output_device()
-            .ok_or_else(|| io::Error::other("speaker unavailable"))?;
+        let input = device(
+            &host,
+            AudioDeviceKind::Input,
+            selection.microphone.as_deref(),
+        )?;
+        let output = device(&host, AudioDeviceKind::Output, selection.speaker.as_deref())?;
         let input_config = input
             .default_input_config()
             .map_err(|_| io::Error::other("microphone configuration unavailable"))?;
@@ -91,6 +166,7 @@ impl Devices {
             .default_output_config()
             .map_err(|_| io::Error::other("speaker configuration unavailable"))?;
         let input_stream_config = bounded_stream_config(&input_config)?;
+        let source = input_channel::InputChannel::new(selection.channel, input_config.channels())?;
         let output_stream_config = bounded_stream_config(&output_config)?;
         let buffers = Arc::new(Buffers::new(
             input_config.sample_rate(),
@@ -114,6 +190,7 @@ impl Devices {
             build_input,
             &input,
             &input_stream_config,
+            source,
             buffers.clone()
         )
         .map_err(|_| io::Error::other("failed to open microphone"))?;
@@ -168,7 +245,6 @@ impl Devices {
             while buffers.playback.pop().is_some() {}
             while buffers.rendered.pop().is_some() {}
             buffers.queued.store(/*val*/ 0, Ordering::Release);
-            buffers.last_dac_ns.store(/*val*/ 0, Ordering::Release);
             drop(producer);
             while buffers.rendered.pop().is_some() {}
             // Opening a Bluetooth microphone can change the speaker's format.
@@ -296,6 +372,7 @@ fn handle_stream_error(buffers: &Buffers, error: cpal::Error) {
 fn build_input<T>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
+    source: input_channel::InputChannel,
     buffers: Arc<Buffers>,
 ) -> Result<cpal::Stream, cpal::Error>
 where
@@ -346,11 +423,7 @@ where
                     generation,
                 };
                 for (output, input) in frame.samples.iter_mut().zip(chunk.chunks_exact(channels)) {
-                    *output = input
-                        .iter()
-                        .map(|sample| f32::from_sample(*sample))
-                        .sum::<f32>()
-                        / channels as f32;
+                    *output = source.sample(input);
                     if !output.is_finite() {
                         buffers.failed.store(true, Ordering::Release);
                         return;
@@ -385,9 +458,6 @@ where
     device.build_output_stream(
         *config,
         move |data: &mut [T], info: &cpal::OutputCallbackInfo| {
-            buffers
-                .callback_sequence
-                .fetch_add(/*val*/ 1, Ordering::AcqRel);
             let timestamp = info.timestamp();
             let start = Instant::now()
                 + timestamp
@@ -395,9 +465,6 @@ where
                     .checked_duration_since(timestamp.callback)
                     .unwrap_or_default();
             render_output(data, channels, rate, start, &buffers, &mut output);
-            buffers
-                .callback_sequence
-                .fetch_add(/*val*/ 1, Ordering::Release);
         },
         move |error| handle_stream_error(&failure, error),
         /*timeout*/ None,
@@ -425,7 +492,6 @@ fn render_output<T>(
         data.fill(T::from_sample(0.0));
         return;
     }
-    let mut delivered_until = None;
     for (index, chunk) in data.chunks_mut(BLOCK * channels).enumerate() {
         let mut reference = Frame {
             samples: [0.0; BLOCK],
@@ -433,18 +499,8 @@ fn render_output<T>(
             at: start + Duration::from_secs_f64((index * BLOCK) as f64 / rate),
             generation: buffers.speaker.load(Ordering::Acquire),
         };
-        for (offset, (frame, sample)) in chunk
-            .chunks_mut(channels)
-            .zip(&mut reference.samples)
-            .enumerate()
-        {
-            let next = output.playback.next(buffers);
-            if next.is_some() {
-                delivered_until = Some(
-                    start + Duration::from_secs_f64((index * BLOCK + offset + 1) as f64 / rate),
-                );
-            }
-            let rendered = T::from_sample(next.unwrap_or(0.0));
+        for (frame, sample) in chunk.chunks_mut(channels).zip(&mut reference.samples) {
+            let rendered = T::from_sample(output.playback.next(buffers).unwrap_or(0.0));
             frame.fill(rendered);
             *sample = f32::from_sample(rendered);
             record_peak(&buffers.speaker_peak, *sample);
@@ -453,14 +509,6 @@ fn render_output<T>(
             output.reference.reset();
             buffers.render_dropped.store(true, Ordering::Release);
         }
-    }
-    if let Some(end) = delivered_until {
-        buffers.last_dac_ns.store(
-            end.saturating_duration_since(buffers.clock)
-                .as_nanos()
-                .min(u128::from(u64::MAX)) as u64,
-            Ordering::Release,
-        );
     }
 }
 

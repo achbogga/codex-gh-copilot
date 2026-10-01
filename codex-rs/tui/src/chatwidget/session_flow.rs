@@ -3,6 +3,7 @@
 //! checks the previous model when it applies the final selection.
 
 use super::*;
+use crate::style::accent_color;
 
 impl ChatWidget {
     /// Offer the flourish only for a successful primary thread/start without initial work.
@@ -70,6 +71,8 @@ impl ChatWidget {
         let connector_scope_changed = previous_thread_id != Some(session.thread_id)
             || self.config.cwd.as_path() != session.cwd.as_path();
         self.thread_id = Some(session.thread_id);
+        self.daybreak_enabled = session.daybreak_enabled
+            && !matches!(display, SessionConfiguredDisplay::SideConversation);
         #[cfg(target_os = "windows")]
         if self.windows_sandbox_local_server
             && matches!(self.codex_op_target, CodexOpTarget::AppEvent)
@@ -105,6 +108,10 @@ impl ChatWidget {
         self.current_cwd = Some(session.cwd.to_path_buf());
         self.config.cwd = session.cwd.clone();
         self.config.model_provider_id = session.model_provider_id.clone();
+        self.set_daybreak_enabled(self.daybreak_enabled);
+        if self.daybreak_enabled && previous_thread_id != self.thread_id {
+            self.add_info_message("Daybreak is on for new turns.".into(), /*hint*/ None);
+        }
         if connector_scope_changed {
             self.invalidate_connector_scope();
         }
@@ -146,7 +153,6 @@ impl ChatWidget {
             }
         }
         self.config.approvals_reviewer = session.approvals_reviewer;
-        self.config.personality = session.personality;
         self.status_line_project_root_name_cache = None;
         let forked_from_id = session.forked_from_id;
         let default_model = session.model.clone();
@@ -200,17 +206,15 @@ impl ChatWidget {
         let model_for_header = self.current_model().to_string();
         if display == SessionConfiguredDisplay::Normal {
             let startup_tooltip_override = self.startup_tooltip_override.take();
-            let show_fast_status = self
-                .should_show_fast_status(&model_for_header, self.effective_service_tier.as_deref());
             let session_info_cell = history_cell::new_session_info(
                 &self.config,
                 &self.local_settings,
                 &model_for_header,
+                self.model_catalog.display_name(&session.model),
                 &session,
                 self.show_welcome_banner,
                 startup_tooltip_override,
                 self.plan_type,
-                show_fast_status,
             );
             self.apply_session_info_cell(session_info_cell);
         } else if self
@@ -283,9 +287,9 @@ impl ChatWidget {
             vec![
                 "• ".dim(),
                 "Thread forked from ".into(),
-                name.cyan(),
+                name.fg(accent_color()),
                 " (".into(),
-                forked_from_id_text.cyan(),
+                forked_from_id_text.fg(accent_color()),
                 ")".into(),
             ]
             .into()
@@ -293,7 +297,7 @@ impl ChatWidget {
             vec![
                 "• ".dim(),
                 "Thread forked from ".into(),
-                forked_from_id_text.cyan(),
+                forked_from_id_text.fg(accent_color()),
             ]
             .into()
         };

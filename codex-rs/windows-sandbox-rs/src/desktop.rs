@@ -61,6 +61,7 @@ use windows_sys::Win32::System::StationsAndDesktops::DESKTOP_SWITCHDESKTOP;
 use windows_sys::Win32::System::StationsAndDesktops::DESKTOP_WRITE_DAC;
 use windows_sys::Win32::System::StationsAndDesktops::DESKTOP_WRITE_OWNER;
 use windows_sys::Win32::System::StationsAndDesktops::DESKTOP_WRITEOBJECTS;
+use windows_sys::Win32::System::StationsAndDesktops::HDESK;
 use windows_sys::Win32::System::StationsAndDesktops::OpenDesktopW;
 
 const PRIVATE_DESKTOP_PREFIX: &str = "CodexSandboxDesktop-";
@@ -145,13 +146,12 @@ impl DesktopPolicy {
 }
 
 pub struct LaunchDesktop {
-    _private_desktop: Option<PrivateDesktop>,
+    _private_desktop: PrivateDesktop,
     startup_name: Vec<u16>,
 }
 
 impl LaunchDesktop {
     pub(crate) fn prepare_legacy(
-        use_private_desktop: bool,
         permissions: &ResolvedWindowsSandboxPermissions,
         cwd: &Path,
         env: &HashMap<String, String>,
@@ -159,9 +159,6 @@ impl LaunchDesktop {
         additional_deny_write_paths: &[PathBuf],
         logs_base_dir: Option<&Path>,
     ) -> Result<Self> {
-        if !use_private_desktop {
-            return Self::prepare(/*use_private_desktop*/ false, logs_base_dir);
-        }
         Self::open_private(&Self::shared_legacy_name(
             permissions,
             cwd,
@@ -216,20 +213,13 @@ impl LaunchDesktop {
         Ok(desktop.name.clone())
     }
 
-    pub fn prepare(use_private_desktop: bool, logs_base_dir: Option<&Path>) -> Result<Self> {
-        if use_private_desktop {
-            let private_desktop = PrivateDesktop::create(logs_base_dir)?;
-            let startup_name = to_wide(format!("Winsta0\\{}", private_desktop.name));
-            Ok(Self {
-                _private_desktop: Some(private_desktop),
-                startup_name,
-            })
-        } else {
-            Ok(Self {
-                _private_desktop: None,
-                startup_name: to_wide("Winsta0\\Default"),
-            })
-        }
+    pub fn prepare(logs_base_dir: Option<&Path>) -> Result<Self> {
+        let private_desktop = PrivateDesktop::create(logs_base_dir)?;
+        let startup_name = to_wide(format!("Winsta0\\{}", private_desktop.name));
+        Ok(Self {
+            _private_desktop: private_desktop,
+            startup_name,
+        })
     }
 
     /// Opens the caller-owned private desktop without creating one or falling back to Default.
@@ -253,14 +243,14 @@ impl LaunchDesktop {
                 DESKTOP_PARTICIPANT_ACCESS,
             )
         };
-        if handle == 0 {
+        if handle.is_null() {
             anyhow::bail!("OpenDesktopW failed: {}", unsafe { GetLastError() });
         }
         Ok(Self {
-            _private_desktop: Some(PrivateDesktop {
+            _private_desktop: PrivateDesktop {
                 handle,
                 name: name.to_owned(),
-            }),
+            },
             startup_name: to_wide(format!("Winsta0\\{name}")),
         })
     }
@@ -338,7 +328,7 @@ pub(crate) fn shared_private_desktop_for_user(
     unsafe {
         LocalFree(security_descriptor as HLOCAL);
     }
-    if handle == 0 {
+    if handle.is_null() {
         logging::debug_log(
             &format!("CreateDesktopW failed for shared private desktop: {error}"),
             logs_base_dir,
@@ -359,9 +349,14 @@ pub(crate) fn shared_private_desktop_for_user(
 }
 
 struct PrivateDesktop {
-    handle: isize,
+    handle: HDESK,
     name: String,
 }
+
+// SAFETY: HDESK is an opaque Windows handle, and this owner only uses it through
+// Windows APIs. After setup, its only handle operation is CloseDesktop, which
+// reports failure if a thread in the calling process is using the handle.
+unsafe impl Send for PrivateDesktop {}
 
 impl PrivateDesktop {
     fn create(logs_base_dir: Option<&Path>) -> Result<Self> {
@@ -378,7 +373,7 @@ impl PrivateDesktop {
                 ptr::null_mut(),
             )
         };
-        if handle == 0 {
+        if handle.is_null() {
             let err = unsafe { GetLastError() } as i32;
             logging::debug_log(
                 &format!(
@@ -402,7 +397,7 @@ impl PrivateDesktop {
     }
 }
 
-unsafe fn grant_desktop_access(handle: isize, logs_base_dir: Option<&Path>) -> Result<()> {
+unsafe fn grant_desktop_access(handle: HDESK, logs_base_dir: Option<&Path>) -> Result<()> {
     let token = get_current_token_for_restriction()?;
     let mut logon_sid = get_logon_sid_bytes(token)?;
     CloseHandle(token);
@@ -465,7 +460,7 @@ unsafe fn grant_desktop_access(handle: isize, logs_base_dir: Option<&Path>) -> R
 impl Drop for PrivateDesktop {
     fn drop(&mut self) {
         unsafe {
-            if self.handle != 0 {
+            if !self.handle.is_null() {
                 let _ = CloseDesktop(self.handle);
             }
         }
