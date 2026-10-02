@@ -36,6 +36,42 @@ All exported environment variables, including credentials, are inherited. Codex 
 
 `cxf` expands to `codex-copilot -- --yolo`. Reload it with `source ~/.bash_aliases` and restart any already-running Docker session to get host access. The host launcher also accepts the former alias's `--network bridge --allow-git-write` flags for compatibility with existing shells. Model traffic still uses the official Copilot SDK through an authenticated loopback bridge; full host mode does not isolate local credentials from Codex's tools.
 
+## SoL-Pi-inspired efficiency
+
+The local efficiency tools adapt ideas from [NVIDIA SoL-Pi](https://github.com/NVlabs/SoL-Pi/tree/e1a586af0ad8956f42ae5b26bba20e48fbf30e00). This is an independent Codex integration, not the Pi extension installed into Codex. It uses Codex's public MCP interface and existing Code Mode; no Rust rebuild or additional inference provider is needed.
+
+```bash
+cxf efficiency on      # Enable for subsequent launches (also affects cxo and Docker)
+cxf efficiency status  # Local output-byte statistics, including recall overhead
+cxf efficiency off    # Disable for subsequent launches; retain evidence
+```
+
+The configured machine has this enabled. A fresh `cxf` or `cxo` provides two tools through `sol_efficiency`:
+
+- `run(command, workdir, timeout_ms?, focus?)`: executes a command once, preserving stdout/stderr together in a private archive. Outputs up to 10 KiB remain complete. Larger outputs return bounded, numbered, exact head/tail/diagnostic excerpts, exit status and an archive handle. An optional literal `focus` brings a known target into the first receipt without another model turn.
+- `recall(archive, offset?, limit?, contains?)`: retrieves up to 16 KiB of exact text at a time, with byte offsets for pagination and literal search. SHA-256 verification rejects changed archives. The raw file path remains available for native shell access, including binary or exceptionally long output.
+
+The `run` tool's instructions encourage Action Fusion: in one Code Mode call, await a native patch and then run the already-known validation only if the patch succeeds. Fusion depends on the model choosing that sequence; validation is never skipped automatically. Native shell tools remain available, and their output is not intercepted. Savings apply when the agent uses `sol_efficiency`, chiefly for noisy builds, tests and diagnostics; small reads may be cheaper with native tools.
+
+| SoL-Pi mechanism            | Codex adaptation                                                                                                                                                                           |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Action Fusion               | Native Code Mode sequences patch and validation without an intervening model turn.                                                                                                         |
+| ObservationPack             | Compact before the first tool-result insertion, preserving exact local recall. No later history rewrites or prompt-cache-prefix changes.                                                   |
+| Evidence-Preserving Reducer | Local exact diagnostic/focus excerpts; no remote summarizer or extra model calls. Excerpts are partial evidence, not semantic summaries or success verdicts.                               |
+| Online Context Compact      | Keep Codex's existing native compaction. Pi's plan-boundary compact-and-continue API is unavailable in this launcher; no guessed early-compaction thresholds or hidden continuation calls. |
+
+The model selection, max reasoning and full context settings are unchanged. Opus signed thinking is not rewritten. This deliberately differs from SoL-Pi's two-full-sends projection: the compact receipt is the original tool result in Codex's session history, so resume and compaction do not depend on a transport-side rewrite ledger.
+
+Configuration is `CODEX_HOME/efficiency.json` in the dedicated Copilot state directory. Missing configuration means disabled. Archives and local metrics live in `CODEX_HOME/efficiency-archives`, with private directory/file permissions and no automatic deletion. Exact logs can contain anything the command printed. Host commands inherit the launcher's exported environment; Docker commands stay inside its existing mounts and environment. A full archive (>512 MiB) refuses new commands until old files are moved. Commands are noninteractive, default to a 60-second deadline, allow up to 120 seconds, and are interrupted if observed output exceeds 64 MiB. Interrupted or incomplete capture is explicit; use native exec for background or longer work.
+
+Run the reproducible, zero-inference benchmark with:
+
+```bash
+node scripts/copilot-pilot/efficiency/benchmark.mjs
+```
+
+The October 2 check returned about 98.1% fewer bytes for three synthetic 257 KiB logs, including receipt and one exact recall, while preserving exit codes and byte-for-byte archives. This is **not** an end-to-end token, billing or model-quality result: it excludes prompts, reasoning, cache pricing and native Codex truncation. The live GPT-6.1 Sol and Opus 5.5 checks recovered a hidden log marker, patched a bug and passed three tests, with patch-and-validation fusion confirmed in the recorded Code Mode calls. Opus resume and inheritance of a synthetic token environment variable also passed.
+
 ## Optional Docker isolation
 
 `codex-copilot-docker` retains the previous container launcher, also available directly as `node scripts/copilot-pilot/docker-run.mjs`. It uses a read-only root filesystem, no Linux capabilities, no privilege escalation, only the chosen project and dedicated Codex state writable, and existing `.git`, `.codex`, and `.agents` directories mounted read-only. Codex's inner sandbox is disabled inside the container; Docker supplies the outer restriction. The Node image is pinned by digest.

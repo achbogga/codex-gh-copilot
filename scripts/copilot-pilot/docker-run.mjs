@@ -9,6 +9,7 @@ import { listModels, startBridge } from "./bridge.mjs";
 import { codexInvocation } from "./run.mjs";
 import { createSdkTransport } from "./sdk-transport.mjs";
 import { modelArguments } from "./model-config.mjs";
+import { efficiencyArguments, enabled } from "./efficiency/config.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const { values, positionals } = parseArgs({
@@ -126,6 +127,11 @@ async function main() {
           join(transportDir, "models.json"),
           "/transport/models.json",
         )),
+        ...(await efficiencyArguments(state, {
+          node: "node",
+          server: "/opt/efficiency/server.mjs",
+          visibleState: "/codex-home",
+        })),
         ...(separator < 0 ? [] : process.argv.slice(separator + 1)),
       ],
     });
@@ -168,6 +174,9 @@ async function main() {
       [transportDir, "/transport", true],
       [dirname(binary), "/opt/codex/bin", true],
       [join(here, "docker-entry.mjs"), "/opt/entry.mjs", true],
+      ...((await enabled(state))
+        ? [[join(here, "efficiency"), "/opt/efficiency", true]]
+        : []),
     ])
       args.push(
         "--mount",

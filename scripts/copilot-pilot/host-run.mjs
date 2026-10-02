@@ -10,6 +10,11 @@ import { codexInvocation } from "./run.mjs";
 import { createSdkTransport } from "./sdk-transport.mjs";
 import { runUpdate, updateArguments } from "./update-command.mjs";
 import { modelArguments } from "./model-config.mjs";
+import {
+  efficiencyArguments,
+  efficiencyCommand,
+  manageEfficiency,
+} from "./efficiency/config.mjs";
 
 // Host mode deliberately gives Codex the invoking user's filesystem and exported
 // environment, including credentials. It does not add a container or sandbox.
@@ -74,6 +79,9 @@ export async function runHost({
           reasoning,
           join(transportDir, "models.json"),
         )),
+        ...(await efficiencyArguments(state, {
+          environmentKeys: Object.keys(environment),
+        })),
         "-c",
         'shell_environment_policy={inherit="all",ignore_default_excludes=true}',
         ...args,
@@ -134,6 +142,23 @@ async function main() {
     },
   });
   const forwarded = separator < 0 ? [] : process.argv.slice(separator + 1);
+  const efficiency = efficiencyCommand([...positionals, ...forwarded]);
+  if (efficiency !== null) {
+    console.log(
+      JSON.stringify(
+        await manageEfficiency(
+          resolve(
+            values["state-dir"] ??
+              join(homedir(), ".codex-copilot-pilot", "codex-home"),
+          ),
+          efficiency,
+        ),
+        null,
+        2,
+      ),
+    );
+    return;
+  }
   const update = updateArguments([...positionals, ...forwarded]);
   if (update !== null) {
     process.exitCode = await runUpdate([
@@ -146,7 +171,7 @@ async function main() {
   }
   if (values.help) {
     console.log(
-      "Usage: codex-copilot [-C DIRECTORY] [--model ID] [--reasoning max] [--state-dir PATH] [--codex-bin BINARY] [--copilot-bin BINARY] [-- CODEX_ARGS]\n       cxf update [--check | --show]\nRuns Codex directly on the host as your user, with YOLO, full exported environment, home and PATH access. Default: GPT-6.1 Sol/max, full advertised context, and existing Copilot session history. For container isolation use codex-copilot-docker.",
+      "Usage: codex-copilot [-C DIRECTORY] [--model ID] [--reasoning max] [--state-dir PATH] [--codex-bin BINARY] [--copilot-bin BINARY] [-- CODEX_ARGS]\n       cxf update [--check | --show]\n       cxf efficiency [on | off | status]\nRuns Codex directly on the host as your user, with YOLO, full exported environment, home and PATH access. Default: GPT-6.1 Sol/max, full advertised context, and existing Copilot session history. For container isolation use codex-copilot-docker.",
     );
     return;
   }
