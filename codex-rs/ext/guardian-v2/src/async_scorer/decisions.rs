@@ -3,8 +3,10 @@
 //! Unsupported evidence is rejected intact; errors never contain credentials or wire bodies.
 //! The caller records measurements after baseline publication; dropping its task aborts Decisions work.
 
+use super::sampler::LunaSampler;
 use super::sampler::LunaSamplingRequest;
 use codex_context_fragments::RenderedFragment;
+use codex_history::ResponseItemEnvelope;
 use codex_http_client::HttpClient;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ImageReference;
@@ -23,6 +25,7 @@ use tokio::task::AbortHandle;
 use tokio::task::JoinHandle;
 
 const MAX_CONCURRENT_REQUESTS: usize = 16;
+pub(super) const URL: &str = "https://api.openai.com/v1/decisions";
 const MODEL: &str = "gpt-6-luna";
 // Provisional local rollout budgets, not Decisions API limits or model context limits.
 // Guardian owns the text/context budget; bound HTTP lifetime, image bytes and response buffering here.
@@ -35,6 +38,8 @@ const MAX_RESPONSE_BYTES: usize = 16 * 1024;
 pub(super) enum DecisionsError {
     #[error("Decisions credentials are missing or empty")]
     Credentials,
+    #[error("Decisions HTTP client setup failed")]
+    ClientSetup,
     #[error("Decisions cannot represent the complete classifier evidence")]
     UnsupportedEvidence,
     #[error("Decisions input exceeds the request limit")]
@@ -108,16 +113,40 @@ impl DecisionsSampler {
     }
 
     /// Retain the newest requests; the caller joins after baseline publication.
-    pub(super) fn start(self: &Arc<Self>, request: &LunaSamplingRequest) -> DecisionsTask {
-        let body = match request_body(
+    pub(super) fn spawn(
+        self: &Arc<Self>,
+        request: &LunaSamplingRequest,
+        max_input_tokens: usize,
+    ) -> DecisionsTask {
+        let started = Instant::now();
+        let body = request_body(
             &request.instructions,
             &request.input,
             request.parent_compaction.as_ref(),
-        ) {
+        )
+        .and_then(|body| {
+            // Reuse Guardian's complete budget without changing its sampling path.
+            // The temporary copy is dropped before admission; Responses prepares again.
+            let (_, tokens) = LunaSampler::prepare_input(
+                request,
+                /*history*/ None,
+                request
+                    .input
+                    .iter()
+                    .cloned()
+                    .map(ResponseItemEnvelope::new)
+                    .collect(),
+            );
+            if tokens > max_input_tokens.saturating_sub(/*rhs*/ 256) {
+                return Err(DecisionsError::InputTooLarge);
+            }
+            Ok(body)
+        });
+        let body = match body {
             Ok(body) => body,
             Err(error) => {
                 return DecisionsTask {
-                    handle: tokio::spawn(async move { (Err(error), Duration::ZERO) }),
+                    handle: tokio::spawn(async move { (Err(error), started.elapsed()) }),
                     sampler: Weak::new(),
                 };
             }
@@ -135,9 +164,8 @@ impl DecisionsSampler {
         let sampler = Arc::clone(self);
         let handle = tokio::spawn(async move {
             let Ok(_permit) = sampler.slots.acquire().await else {
-                return (Err(DecisionsError::Transport), Duration::ZERO);
+                return (Err(DecisionsError::Transport), started.elapsed());
             };
-            let started = Instant::now();
             let result = tokio::time::timeout(DEADLINE, sampler.request(body))
                 .await
                 .unwrap_or(Err(DecisionsError::Timeout));
