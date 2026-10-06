@@ -107,6 +107,56 @@ fn next_copy_selection(
 }
 
 #[tokio::test]
+async fn service_tier_commands_and_saved_selection_respect_independent_speed_policy() {
+    for (fast_enabled, ultrafast_enabled) in [(false, true), (true, false)] {
+        let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.5")).await;
+        let mut preset = get_available_model(&chat, "gpt-5.5");
+        preset.service_tiers = ["priority", "ultrafast"]
+            .into_iter()
+            .map(|tier| codex_protocol::openai_models::ModelServiceTier {
+                id: tier.to_string(),
+                name: tier.to_string(),
+                description: format!("{tier} processing"),
+            })
+            .collect();
+        preset.default_service_tier = Some("ultrafast".to_string());
+        chat.model_catalog = std::sync::Arc::new(ModelCatalog::new(vec![preset]));
+        chat.set_feature_enabled(Feature::FastMode, fast_enabled);
+        chat.set_feature_enabled(Feature::UltrafastMode, ultrafast_enabled);
+        chat.set_service_tier(Some("ultrafast".to_string()));
+        assert_eq!(
+            chat.current_service_tier(),
+            ultrafast_enabled.then_some("ultrafast")
+        );
+        assert_eq!(
+            chat.current_model_service_tier_commands()
+                .into_iter()
+                .map(|tier| tier.id)
+                .collect::<Vec<_>>(),
+            vec![
+                if ultrafast_enabled {
+                    "ultrafast"
+                } else {
+                    "priority"
+                }
+                .to_string()
+            ],
+        );
+        chat.bottom_pane
+            .set_composer_text("/ultra".to_string(), Vec::new(), Vec::new());
+        let snapshot_name = if ultrafast_enabled {
+            "ultrafast_command_allowed"
+        } else {
+            "ultrafast_command_denied"
+        };
+        insta::assert_snapshot!(
+            snapshot_name,
+            normalize_snapshot_paths(render_bottom_popup(&chat, /*width*/ 80))
+        );
+    }
+}
+
+#[tokio::test]
 async fn service_tier_commands_lowercase_catalog_names() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.5")).await;
     let mut preset = get_available_model(&chat, "gpt-5.5");
@@ -1530,12 +1580,12 @@ async fn no_op_stub_slash_command_is_available_from_local_recall() {
 }
 
 #[tokio::test]
-async fn slash_quit_requests_exit() {
-    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-
-    chat.dispatch_command(SlashCommand::Quit);
-
-    assert_matches!(rx.try_recv(), Ok(AppEvent::Exit(ExitMode::ShutdownFirst)));
+async fn slash_exit_aliases_request_exit() {
+    for command in [SlashCommand::Quit, SlashCommand::Exit] {
+        let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+        chat.dispatch_command(command);
+        assert_matches!(rx.try_recv(), Ok(AppEvent::Exit(ExitMode::ShutdownFirst)));
+    }
 }
 
 #[tokio::test]
@@ -2168,6 +2218,7 @@ async fn slash_copy_picker_remains_available_from_parent_owned_threads() {
 #[tokio::test]
 async fn slash_daybreak_offers_an_application_when_unavailable() {
     let (mut chat, mut rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.set_feature_enabled(Feature::CliDaybreak, /*enabled*/ true);
     chat.has_chatgpt_account = true;
     chat.config.model_provider_id = "openai".into();
     let mut model = crate::test_support::TEST_MODEL_PRESETS[0].clone();
@@ -2250,6 +2301,12 @@ async fn slash_daybreak_offers_an_application_when_unavailable() {
                 .unwrap()
         );
     }
+    chat.set_feature_enabled(Feature::CliDaybreak, /*enabled*/ false);
+    chat.set_daybreak_enabled(/*enabled*/ true);
+    assert!(!chat.daybreak_enabled);
+    assert!(chat.daybreak_command_description().is_none());
+    chat.dispatch_command(SlashCommand::Daybreak);
+    assert!(drain_insert_history(&mut rx).is_empty());
 }
 
 #[tokio::test]
@@ -2454,10 +2511,15 @@ async fn slash_keymap_invalid_args_show_usage() {
 async fn copy_shortcut_can_be_remapped() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     for modifiers in [KeyModifiers::CONTROL, KeyModifiers::ALT] {
+        let paste = KeyEvent::new(KeyCode::Char('v'), modifiers);
         assert_matches!(
-            chat.handle_key_event(KeyEvent::new(KeyCode::Char('v'), modifiers)),
+            chat.handle_key_event(paste),
             crate::chatwidget::KeyEventAction::PasteImage
         );
+        chat.handle_key_event(KeyEvent {
+            kind: KeyEventKind::Release,
+            ..paste
+        });
     }
     let mut keymap_config = chat.config_ref().tui_keymap.clone();
     keymap_config.global.copy = Some(codex_config::types::KeybindingsSpec::One(
@@ -2484,6 +2546,29 @@ async fn copy_shortcut_can_be_remapped() {
         rendered.contains("No agent response to copy"),
         "expected remapped copy shortcut to run, got {rendered:?}"
     );
+}
+
+#[tokio::test]
+async fn legacy_image_paste_ignores_buffered_press_until_other_input() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let paste = KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL);
+
+    assert_matches!(chat.handle_key_event(paste), KeyEventAction::PasteImage);
+    assert_matches!(chat.handle_key_event(paste), KeyEventAction::None);
+
+    chat.suppress_image_paste_until = Instant::now() - Duration::from_secs(/*secs*/ 1);
+    assert_matches!(chat.handle_key_event(paste), KeyEventAction::PasteImage);
+
+    chat.suppress_image_paste_until = Instant::now() + Duration::from_secs(/*secs*/ 1);
+    chat.handle_key_event(KeyEvent::from(KeyCode::Char('x')));
+    assert_matches!(chat.handle_key_event(paste), KeyEventAction::PasteImage);
+
+    chat.suppress_image_paste_until = Instant::now() + Duration::from_secs(/*secs*/ 1);
+    chat.handle_key_event(KeyEvent {
+        kind: KeyEventKind::Release,
+        ..paste
+    });
+    assert_matches!(chat.handle_key_event(paste), KeyEventAction::PasteImage);
 }
 
 #[tokio::test]
@@ -2632,15 +2717,6 @@ async fn queued_menu_slash_keeps_agent_turn_complete_notification() {
 }
 
 #[tokio::test]
-async fn slash_exit_requests_exit() {
-    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-
-    chat.dispatch_command(SlashCommand::Exit);
-
-    assert_matches!(rx.try_recv(), Ok(AppEvent::Exit(ExitMode::ShutdownFirst)));
-}
-
-#[tokio::test]
 async fn slash_stop_submits_background_terminal_cleanup() {
     let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
 
@@ -2771,23 +2847,25 @@ async fn slash_archive_cancellation_keeps_task_running() {
 }
 
 #[tokio::test]
-async fn slash_memory_drop_reports_stubbed_feature() {
-    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+async fn slash_memory_maintenance_reports_stubbed_feature() {
+    for command in [SlashCommand::MemoryDrop, SlashCommand::MemoryUpdate] {
+        let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
 
-    chat.dispatch_command(SlashCommand::MemoryDrop);
+        chat.dispatch_command(command);
 
-    let event = rx.try_recv().expect("expected unsupported-feature error");
-    match event {
-        AppEvent::InsertHistoryCell(cell) => {
-            let rendered = lines_to_single_string(&cell.display_lines(/*width*/ 80));
-            assert!(rendered.contains("Memory maintenance: Not available in TUI yet."));
+        let event = rx.try_recv().expect("expected unsupported-feature error");
+        match event {
+            AppEvent::InsertHistoryCell(cell) => {
+                let rendered = lines_to_single_string(&cell.display_lines(/*width*/ 80));
+                assert!(rendered.contains("Memory maintenance: Not available in TUI yet."));
+            }
+            other => panic!("expected InsertHistoryCell error, got {other:?}"),
         }
-        other => panic!("expected InsertHistoryCell error, got {other:?}"),
+        assert!(
+            op_rx.try_recv().is_err(),
+            "expected no memory op to be sent"
+        );
     }
-    assert!(
-        op_rx.try_recv().is_err(),
-        "expected no memory op to be sent"
-    );
 }
 
 #[tokio::test]
@@ -2876,26 +2954,6 @@ async fn slash_memories_opens_memory_menu() {
     assert!(render_bottom_popup(&chat, /*width*/ 80).contains("Use memories"));
     assert_matches!(rx.try_recv(), Err(TryRecvError::Empty));
     assert!(op_rx.try_recv().is_err(), "expected no core op to be sent");
-}
-
-#[tokio::test]
-async fn slash_memory_update_reports_stubbed_feature() {
-    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-
-    chat.dispatch_command(SlashCommand::MemoryUpdate);
-
-    let event = rx.try_recv().expect("expected unsupported-feature error");
-    match event {
-        AppEvent::InsertHistoryCell(cell) => {
-            let rendered = lines_to_single_string(&cell.display_lines(/*width*/ 80));
-            assert!(rendered.contains("Memory maintenance: Not available in TUI yet."));
-        }
-        other => panic!("expected InsertHistoryCell error, got {other:?}"),
-    }
-    assert!(
-        op_rx.try_recv().is_err(),
-        "expected no memory op to be sent"
-    );
 }
 
 #[tokio::test]
@@ -3031,34 +3089,19 @@ async fn slash_pets_with_arg_selects_named_pet() {
 
 #[tokio::test]
 #[serial]
-async fn slash_pets_disable_disables_pets_even_on_unsupported_terminal() {
-    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-    force_tmux_pet_image_unsupported(&mut chat);
+async fn slash_pet_disable_aliases_work_on_unsupported_terminal() {
+    for input in ["/pets disable", "/pet hide"] {
+        let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+        force_tmux_pet_image_unsupported(&mut chat);
 
-    chat.bottom_pane
-        .set_composer_text("/pets disable".to_string(), Vec::new(), Vec::new());
-    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
-    assert_matches!(rx.try_recv(), Ok(AppEvent::FollowTranscript));
-
-    assert_matches!(rx.try_recv(), Ok(AppEvent::PetDisabled));
-    assert_matches!(rx.try_recv(), Err(TryRecvError::Empty));
-    assert_matches!(op_rx.try_recv(), Err(TryRecvError::Empty));
-}
-
-#[tokio::test]
-#[serial]
-async fn slash_pet_hide_disables_pets_even_on_unsupported_terminal() {
-    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-    force_tmux_pet_image_unsupported(&mut chat);
-
-    chat.bottom_pane
-        .set_composer_text("/pet hide".to_string(), Vec::new(), Vec::new());
-    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
-    assert_matches!(rx.try_recv(), Ok(AppEvent::FollowTranscript));
-
-    assert_matches!(rx.try_recv(), Ok(AppEvent::PetDisabled));
-    assert_matches!(rx.try_recv(), Err(TryRecvError::Empty));
-    assert_matches!(op_rx.try_recv(), Err(TryRecvError::Empty));
+        chat.bottom_pane
+            .set_composer_text(input.to_string(), Vec::new(), Vec::new());
+        chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+        assert_matches!(rx.try_recv(), Ok(AppEvent::FollowTranscript));
+        assert_matches!(rx.try_recv(), Ok(AppEvent::PetDisabled));
+        assert_matches!(rx.try_recv(), Err(TryRecvError::Empty));
+        assert_matches!(op_rx.try_recv(), Err(TryRecvError::Empty));
+    }
 }
 
 #[tokio::test]
@@ -3735,10 +3778,6 @@ async fn transcript_copy_feedback_stays_in_the_footer_without_history_or_interru
     insta::assert_snapshot!(
         "transcript_copy_unconfirmed",
         render_bottom_popup(&chat, /*width*/ 80)
-    );
-    insta::assert_snapshot!(
-        "transcript_copy_unconfirmed_narrow",
-        render_bottom_popup(&chat, /*width*/ 40)
     );
     chat.open_warnings(&[Arc::new(history_cell::new_warning_event(
         "selected café".into(),

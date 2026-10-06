@@ -708,6 +708,8 @@ pub struct Config {
     /// The resolved policy config replaces its `{{ tenant_policy_config }}`
     /// placeholder when a review session is built.
     pub guardian_policy_template: Option<String>,
+    /// Transcript encoding shared by Guardian review and scoring.
+    pub guardian_transcript_mode: codex_protocol::TranscriptFormat,
 
     /// Optional replacement for the gated history-retrieval instructions.
     /// Blank config values are treated as unset, like other Guardian policy overrides.
@@ -847,6 +849,9 @@ pub struct Config {
 
     /// Preferred layout for resume/fork session picker results.
     pub tui_session_picker_view: SessionPickerViewMode,
+
+    /// Last selected grouping in Agent Command Center.
+    pub tui_agents_overview_grouping: codex_config::types::AgentsOverviewGrouping,
 
     /// Working directory to use when resuming or forking a session.
     /// When unset, prompt if the current and session directories differ.
@@ -3986,6 +3991,9 @@ impl Config {
                     .enabled(Feature::FastMode)
                     .then(|| ServiceTier::Fast.request_value().to_string()),
                 Some(ServiceTier::Flex) => Some(ServiceTier::Flex.request_value().to_string()),
+                None if service_tier == "ultrafast" => features
+                    .enabled(Feature::UltrafastMode)
+                    .then_some(service_tier),
                 None => Some(service_tier),
             }
         });
@@ -4050,6 +4058,15 @@ impl Config {
                 normalize_guardian_policy_config(auto_review.extra_policy.as_deref())
             })
         });
+        let guardian_transcript_mode = cfg
+            .features
+            .as_ref()
+            .and_then(|features| features.guardianv2.as_ref())
+            .and_then(|feature| match feature {
+                FeatureToml::Config(config) => config.transcript_mode,
+                FeatureToml::Enabled(_) => None,
+            })
+            .unwrap_or_default();
         let guardian_policy_template = cfg
             .auto_review
             .as_ref()
@@ -4419,6 +4436,7 @@ impl Config {
             guardian_policy_config,
             guardian_extra_policy,
             guardian_policy_template,
+            guardian_transcript_mode,
             guardian_conversation_history_prompt,
             guardian_conversation_history_max_output_tokens,
             guardian_circuit_break_action: cfg
@@ -4571,6 +4589,7 @@ impl Config {
                 .as_ref()
                 .and_then(|t| t.session_picker_view)
                 .unwrap_or_default(),
+            tui_agents_overview_grouping: cfg.tui.as_ref().map(|t| t.agents_overview_grouping).unwrap_or_default(),
             tui_resume_cwd: cfg.tui.as_ref().and_then(|t| t.resume_cwd),
             terminal_resize_reflow,
             tui_keymap: cfg

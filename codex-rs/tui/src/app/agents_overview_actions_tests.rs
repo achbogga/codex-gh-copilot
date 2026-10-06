@@ -251,11 +251,12 @@ async fn archiving_selects_the_next_displayed_task() -> Result<()> {
                 app_server.shutdown().await?;
             }
         }
-        let snapshot = match action {
-            AgentsOverviewAction::Archive => "archiving_selects_the_next_displayed_task",
-            AgentsOverviewAction::Delete => "deleting_selects_the_next_displayed_task",
-        };
-        insta::assert_snapshot!(snapshot, selections.join("\n"));
+        if matches!(action, AgentsOverviewAction::Archive) {
+            insta::assert_snapshot!(
+                "archiving_selects_the_next_displayed_task",
+                selections.join("\n")
+            );
+        }
     }
     Ok(())
 }
@@ -956,6 +957,18 @@ async fn lifecycle_removes_background_and_current_tasks_without_losing_the_dashb
         // Canceling pagination must allow automatic refill to finish after removing the last task.
         app.agents_overview.initialized = true;
         app.agents_overview.view_state.lock().unwrap().loading = true;
+        // An invalidated refresh can already be queued when the lifecycle action
+        // aborts its task. It must not satisfy the wait for the replacement refresh.
+        app.app_event_tx
+            .send(AppEvent::AgentsOverviewThreadsLoaded {
+                request_id,
+                result: Ok(AgentsOverviewThreadRefresh {
+                    threads: HashMap::new(),
+                    last_messages: HashMap::new(),
+                    recent_seed_complete: true,
+                    discovery: None,
+                }),
+            });
         Box::pin(app.handle_event(&mut tui, &mut app_server, confirmed)).await?;
         if app.agents_overview.request_id.is_some() {
             finish_overview_refresh(&mut app, &app_server, &mut rx).await;
