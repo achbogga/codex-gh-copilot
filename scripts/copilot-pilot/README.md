@@ -4,7 +4,7 @@ This fork's experimental adapter runs **real Codex**, including Code Mode, its n
 
 ## Run on Linux
 
-Requires Node.js 22+, an authenticated `copilot` CLI (tested with 1.0.91), and the installed Codex executable bundle (tested with 0.160.0). Docker is needed only for the optional container launcher.
+Requires Node.js 22+, an authenticated `copilot` CLI (tested with 1.0.92), and the installed Codex executable bundle (tested with 0.160.1). Docker is needed only for the optional container launcher.
 
 ```bash
 npm ci --prefix scripts/copilot-pilot --ignore-scripts
@@ -110,6 +110,8 @@ Release reminders appear when launching `codex-copilot`, `cx`, or `cxf` in a ter
 Stop scheduled checks with `systemctl --user disable --now codex-copilot-updates.timer`. To adopt upstream source, first review `git log HEAD..upstream/main`; fetching alone does not update the installed Codex binary.
 
 ## Validation
+
+The October 6 maintenance check verified Codex 0.160.1, Copilot CLI 1.0.92 and SDK 1.0.16. All 36 automated checks passed (one additional optional integration test was skipped). Live GPT-6.1 Sol and Opus 5.5 sessions each used native Code Mode reads and apply_patch, passed three tests through the efficiency tool, and verified exported environment and home access outside the launch directory. Both retained max reasoning and their configured context windows. An Opus session saved under Codex 0.160.0 and Copilot CLI 1.0.91 also resumed and reran its tool check successfully after the upgrade.
 
 ```bash
 node --test scripts/copilot-pilot/*.test.mjs
