@@ -80,6 +80,7 @@ mod cyber_exec_policy;
 mod daybreak_access;
 mod deprecation_notice;
 mod direct_tool_metadata;
+mod dynamic_tool_cancellation;
 mod exec;
 mod exec_policy;
 #[cfg(not(target_os = "windows"))]
@@ -129,6 +130,8 @@ mod managed_threads;
 mod mcp_auth_elicitation;
 mod mcp_auth_refresh;
 mod mcp_ema_config;
+#[path = "mcp_executor_context_tests.rs"]
+mod mcp_executor_context;
 mod mcp_extension_protocol;
 mod mcp_optional_startup_grace;
 mod mcp_refresh_cleanup;
@@ -166,6 +169,7 @@ mod prompt_cache_key;
 mod prompt_caching;
 mod prompt_debug_tests;
 mod quota_exceeded;
+mod realtime_attachment;
 mod realtime_conversation;
 mod realtime_initial_items;
 mod realtime_misalignment;
@@ -247,8 +251,6 @@ mod web_search;
 mod web_search_system_proxy;
 mod websocket_fallback;
 mod window_headers;
-#[cfg(target_os = "windows")]
-mod windows_sandbox;
 mod workspace_roots;
 mod worktree_trust;
 

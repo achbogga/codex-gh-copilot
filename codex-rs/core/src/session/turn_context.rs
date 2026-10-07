@@ -35,6 +35,7 @@ use codex_protocol::protocol::ErrorEvent;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::TurnEnvironmentSelection;
+use codex_protocol::sandbox::SandboxOverride;
 use codex_protocol::turn_input::CyberAccessProgram;
 use codex_sandboxing::policy_transforms::effective_permission_profile;
 use codex_sandboxing::policy_transforms::merge_permission_profiles;
@@ -242,6 +243,7 @@ impl TurnEnvironment {
             additional_permissions.as_ref(),
         );
         FileSystemSandboxContext {
+            sandbox_override: SandboxOverride::NoOverride,
             permissions,
             cwd: self.cwd().clone(),
             workspace_roots: self.workspace_roots().to_vec(),
@@ -737,29 +739,6 @@ impl TurnContext {
         )
     }
 
-    /// Combines the selected environment's workspace roots with its permission profile roots.
-    pub(crate) fn effective_workspace_roots(&self) -> Vec<PathUri> {
-        let Some(environment) = self.initial_environments.primary() else {
-            return self.config.effective_workspace_roots();
-        };
-
-        let mut workspace_roots = environment.workspace_roots().to_vec();
-        for root in environment
-            .config()
-            .permission_profile
-            .profile_workspace_roots()
-        {
-            let root = root.as_uri();
-            if !workspace_roots
-                .iter()
-                .any(|existing| existing.to_string() == root.to_string())
-            {
-                workspace_roots.push(root.clone());
-            }
-        }
-        workspace_roots
-    }
-
     /// Legacy: returns the frozen initial-turn reasoning effort, including the initial model default.
     /// Step-scoped consumers should use their captured `StepContext::settings`.
     pub(crate) fn effective_reasoning_effort(&self) -> Option<ReasoningEffortConfig> {
@@ -913,31 +892,6 @@ impl TurnContext {
     }
 
     pub(crate) fn to_turn_context_item(&self) -> TurnContextItem {
-        // The legacy rollout field still stores host-native paths. Keep its
-        // runtime-root filtering and omit it for unrepresentable profile roots;
-        // the authoritative permission profile retains its concrete entries.
-        let profile_roots = self.initial_environments.primary().map_or_else(
-            || self.config.permissions.profile_workspace_roots(),
-            |environment| {
-                environment
-                    .config()
-                    .permission_profile
-                    .profile_workspace_roots()
-            },
-        );
-        let workspace_roots = if profile_roots
-            .iter()
-            .all(|root| root.as_uri().to_abs_path().is_ok())
-        {
-            let roots = self
-                .effective_workspace_roots()
-                .iter()
-                .filter_map(|root| root.to_abs_path().ok())
-                .collect::<Vec<_>>();
-            (!roots.is_empty()).then_some(roots)
-        } else {
-            None
-        };
         #[allow(deprecated)]
         let cwd = self.cwd.clone();
         TurnContextItem {
@@ -945,9 +899,6 @@ impl TurnContext {
             root_turn_id: self.turn_metadata_state.root_turn_id(),
             disabled_plugin_ids: Some(self.disabled_plugin_ids.clone()),
             cwd,
-            workspace_roots,
-            current_date: self.current_date.clone(),
-            timezone: self.timezone.clone(),
             approval_policy: self.approval_policy(),
             approvals_reviewer: Some(self.config.approvals_reviewer),
             sandbox_policy: self.sandbox_policy(),
@@ -956,40 +907,16 @@ impl TurnContext {
                 || self.config.permissions.active_permission_profile(),
                 TurnEnvironment::active_permission_profile,
             ),
-            network: self.turn_context_network_item(),
             file_system_sandbox_policy: self.non_legacy_file_system_sandbox_policy(),
             model: self.model_info().slug.clone(),
             comp_hash: self.model_info().comp_hash.clone(),
-            personality: self.personality(),
             collaboration_mode: Some(self.collaboration_mode()),
             multi_agent_version: Some(self.multi_agent_version),
-            multi_agent_mode: None,
             realtime_active: Some(self.realtime_active),
             cyber_access_program: self.cyber_access_program,
             effort: self.reasoning_effort().cloned(),
-            summary: self.reasoning_summary(),
+            summary: Some(ReasoningSummaryConfig::None),
         }
-    }
-
-    fn turn_context_network_item(&self) -> Option<TurnContextNetworkItem> {
-        let network = self
-            .config
-            .config_layer_stack
-            .requirements()
-            .network
-            .as_ref()?;
-        Some(TurnContextNetworkItem {
-            allowed_domains: network
-                .domains
-                .as_ref()
-                .and_then(codex_config::NetworkDomainPermissionsToml::allowed_domains)
-                .unwrap_or_default(),
-            denied_domains: network
-                .domains
-                .as_ref()
-                .and_then(codex_config::NetworkDomainPermissionsToml::denied_domains)
-                .unwrap_or_default(),
-        })
     }
 }
 

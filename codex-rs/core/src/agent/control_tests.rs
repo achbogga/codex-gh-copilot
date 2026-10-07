@@ -31,6 +31,7 @@ use crate::thread_manager::ForkSnapshot;
 use crate::thread_manager::StartThreadOptions;
 use crate::tools::handlers::multi_agents_common::thread_spawn_source;
 use assert_matches::assert_matches;
+use codex_extension_api::ExtensionDataInit;
 use codex_extension_api::Instructions;
 use codex_extension_api::LoadInstructionsFuture;
 use codex_extension_api::LoadedUserInstructions;
@@ -45,6 +46,8 @@ use codex_login::AuthManager;
 use codex_login::CodexAuth;
 use codex_protocol::AgentPath;
 use codex_protocol::ResponseItemId;
+use codex_protocol::capabilities::CapabilityRootLocation;
+use codex_protocol::capabilities::SelectedCapabilityRoot;
 use codex_protocol::config_types::ApprovalsReviewer;
 use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::ModeKind;
@@ -88,6 +91,7 @@ use codex_protocol::protocol::TurnCompleteEvent;
 use codex_protocol::protocol::TurnEnvironmentSelection;
 use codex_protocol::protocol::TurnEnvironmentSelections;
 use codex_protocol::protocol::TurnStartedEvent;
+use codex_protocol::protocol::WorldStateItem;
 use codex_thread_store::ArchiveThreadParams;
 use codex_thread_store::InMemoryThreadStore;
 use codex_thread_store::LocalThreadStore;
@@ -468,6 +472,10 @@ async fn mcp_attribution_in_constructed_request(thread: &CodexThread) -> McpAttr
             .for_prompt(&step_context.settings.model_info.input_modalities),
         &step_context,
         thread.session.get_prompt_base_instructions().await,
+        thread
+            .session
+            .current_window_uses_incremental_tools(&step_context)
+            .await,
     );
     let metadata = thread
         .session
@@ -1920,6 +1928,7 @@ async fn v2_spawn_resolves_reported_effort_without_changing_child_selection(
     parent.shutdown_and_wait().await.expect("shutdown parent");
 }
 
+/// Pending configuration reaches descendants even when their root metadata differs.
 #[tokio::test]
 async fn pending_environment_failure_reaches_child_and_grandchild() {
     let (home, mut config) = test_config().await;
@@ -1935,15 +1944,31 @@ async fn pending_environment_failure_reaches_child_and_grandchild() {
     let harness = AgentControlHarness::new_with_config(home, config).await;
     let cwd = PathUri::from_abs_path(&harness.config.codex_home);
     let pending = TurnEnvironmentSelection {
+        selected_capability_roots: Default::default(),
         environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
         cwd: cwd.clone(),
-        workspace_roots: vec![cwd],
+        workspace_roots: vec![cwd.clone()],
         config: EnvironmentConfigState::Pending,
     };
+    // Only the second root's environment is selected. Inherited root lists can therefore
+    // give this root a different position without changing which configuration to follow.
+    let roots = ["unselected", codex_exec_server::LOCAL_ENVIRONMENT_ID]
+        .into_iter()
+        .map(|environment_id| SelectedCapabilityRoot {
+            id: environment_id.to_string(),
+            location: CapabilityRootLocation::Environment {
+                environment_id: environment_id.to_string(),
+                path: cwd.clone(),
+            },
+        })
+        .collect::<Vec<_>>();
+    let mut thread_extension_init = ExtensionDataInit::new();
+    thread_extension_init.insert(roots);
     let root = harness
         .manager
         .start_thread(StartThreadOptions {
             environments: Some(vec![pending.clone().into_request()]),
+            thread_extension_init,
             ..StartThreadOptions::new(harness.config.clone())
         })
         .await
@@ -1964,8 +1989,16 @@ async fn pending_environment_failure_reaches_child_and_grandchild() {
             .get_thread(agent.thread_id)
             .await
             .expect("get descendant");
-        assert_eq!(thread.environment_selections().await, vec![pending.clone()]);
-        descendants.push(Arc::clone(&thread));
+        let selections = thread.environment_selections().await;
+        assert_eq!(
+            selections
+                .clone()
+                .into_iter()
+                .map(TurnEnvironmentSelection::into_request)
+                .collect::<Vec<_>>(),
+            vec![pending.clone().into_request()],
+        );
+        descendants.push((Arc::clone(&thread), selections));
         parent = thread;
     }
 
@@ -1973,13 +2006,12 @@ async fn pending_environment_failure_reaches_child_and_grandchild() {
     root.environment_failed(&pending, error.to_string())
         .await
         .expect("fail root environment");
-    let failed = TurnEnvironmentSelection {
-        config: EnvironmentConfigState::Failed(error.to_string()),
-        ..pending
-    };
     timeout(Duration::from_secs(/*secs*/ 5), async {
-        for thread in descendants {
-            while thread.environment_selections().await != [failed.clone()] {
+        for (thread, mut expected) in descendants {
+            for selection in &mut expected {
+                selection.config = EnvironmentConfigState::Failed(error.to_string());
+            }
+            while thread.environment_selections().await != expected {
                 sleep(Duration::from_millis(/*millis*/ 10)).await;
             }
         }
@@ -2528,6 +2560,15 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
         "parent trigger message".to_string(),
         /*trigger_turn*/ true,
     );
+    let tool_declarations = ResponseItem::AdditionalTools {
+        id: None,
+        role: "developer".to_string(),
+        tools: vec![serde_json::json!({"type": "function", "name": "parent_tool"})],
+    };
+    let tool_state = serde_json::json!({"top_level_tools": {"function:parent_tool": "hash"}})
+        .as_object()
+        .unwrap()
+        .clone();
     let standalone_output = ResponseItem::FunctionCallOutput {
         id: None,
         call_id: None,
@@ -2608,6 +2649,7 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
                     internal_chat_message_metadata_passthrough: None,
                 },
                 trigger_message.to_response_input_item().into(),
+                tool_declarations.clone(),
                 spawn_agent_call(&parent_spawn_call_id),
             ],
         )
@@ -2623,9 +2665,10 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
     let parent_reference_context_item = turn_context.to_turn_context_item();
     parent_thread
         .session
-        .persist_rollout_items(&[RolloutItem::TurnContext(
-            parent_reference_context_item.clone(),
-        )])
+        .persist_rollout_items(&[
+            RolloutItem::WorldState(WorldStateItem::full(tool_state.clone())),
+            RolloutItem::TurnContext(parent_reference_context_item.clone()),
+        ])
         .await;
     parent_thread
         .session
@@ -2754,6 +2797,7 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
         expected_partial_answer,
         expected_final_answer,
         expected_standalone_output,
+        tool_declarations,
         ContextualUserFragment::into(MultiAgentRoleInstructions::Configured(
             "Child subagent guidance.".to_string(),
         )),
@@ -2769,6 +2813,12 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
         serde_json::to_value(Some(parent_reference_context_item))
             .expect("serialize expected reference context item"),
         "full-history forked child should preserve the parent diff baseline"
+    );
+
+    assert_eq!(
+        history.world_state_checkpoint().unwrap().state,
+        tool_state,
+        "full-history forks must retain the catalog baseline with its declarations"
     );
 
     let mut no_hint_child_config = harness.config.clone();
@@ -2900,7 +2950,13 @@ async fn spawn_agent_fork_strips_parent_usage_hints_from_compacted_history(marke
         "compacted parent delegated task".to_string(),
         /*trigger_turn*/ true,
     );
+    let tool_declarations = ResponseItem::AdditionalTools {
+        id: None,
+        role: "developer".to_string(),
+        tools: vec![serde_json::json!({"type": "function", "name": "compacted_tool"})],
+    };
     let replacement_history = vec![
+        tool_declarations.clone(),
         ContextualUserFragment::into(crate::context::GuardianApprovedAction::new("parent-private-release".to_owned())),
         ResponseItem::Message {
             id: None,
@@ -3043,6 +3099,17 @@ async fn spawn_agent_fork_strips_parent_usage_hints_from_compacted_history(marke
         .await
         .expect("child thread should be registered");
     let history = child_thread.session.clone_history().await;
+    assert_eq!(
+        strip_response_item_ids(
+            &history
+                .raw_items()
+                .filter(|item| matches!(item, ResponseItem::AdditionalTools { .. }))
+                .cloned()
+                .collect::<Vec<_>>()
+        ),
+        vec![tool_declarations],
+        "full-history forks must retain declarations embedded in compaction checkpoints"
+    );
     assert!(
         !history_contains_text(
             history.conversation_history_snapshot().review_items(),
@@ -4204,7 +4271,14 @@ async fn completion_watcher_does_not_hide_tree_shutdown_failure() {
         child_thread_id.to_string(),
         /*child_agent_path*/ None,
     );
-    harness.control.runtime.record_shutdown_failure();
+    harness.control.runtime.record_shutdown_failure(
+        crate::thread_manager::AgentTreeShutdownFailure::operation_failed(
+            "completion_watcher_test",
+            "test",
+            Some(parent_thread_id),
+            "test_error",
+        ),
+    );
     let shutdown = harness.control.runtime.request_shutdown();
 
     timeout(Duration::from_secs(5), shutdown.wait())

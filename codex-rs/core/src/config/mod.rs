@@ -221,6 +221,7 @@ pub use windows_sandbox_config::PreparedWindowsSandboxConfig;
 use windows_sandbox_config::config_allows_mxc;
 pub use windows_sandbox_config::prepare_windows_sandbox_config;
 use windows_sandbox_config::resolve_windows_sandbox_type;
+pub use windows_sandbox_config::windows_mxc_allowed_by_config;
 
 const DEFAULT_IGNORE_LARGE_UNTRACKED_DIRS: i64 = 200;
 const DEFAULT_IGNORE_LARGE_UNTRACKED_FILES: i64 = 10 * 1024 * 1024;
@@ -3441,6 +3442,14 @@ impl Config {
         };
         let respect_system_proxy = features.enabled(Feature::RespectSystemProxy);
         let enable_network_proxy = features.enabled(Feature::NetworkProxy);
+        let allow_mxc =
+            cfg.windows.as_ref().and_then(|windows| windows.allow_mxc) != Some(false);
+        if !allow_mxc && resolve_windows_sandbox_mode(&cfg) == Some(WindowsSandboxModeToml::Mxc) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "windows.sandbox = \"mxc\" is not allowed when windows.allow_mxc = false",
+            ));
+        }
         let PreparedWindowsSandboxConfig {
             mode: windows_sandbox_mode,
             sandbox_type: windows_sandbox_type,
@@ -3536,7 +3545,7 @@ impl Config {
                 profiles_are_active,
                 permission_profile.as_ref(),
                 network_requirements.as_ref(),
-                cfg.features.as_ref(),
+                &cfg,
                 enable_network_proxy,
             )?
             && codex_sandboxing::windows_mxc_available();

@@ -19,12 +19,12 @@ use crate::ResponseItemId;
 use crate::SanitizedGitUrl;
 use crate::SessionId;
 use crate::ThreadId;
+use crate::approvals::ElicitationAbandonedEvent;
 use crate::approvals::ElicitationRequestEvent;
 use crate::capabilities::SelectedCapabilityRoot;
 use crate::config_types::ApprovalsReviewer;
 use crate::config_types::CollaborationMode;
 use crate::config_types::ModeKind;
-use crate::config_types::MultiAgentMode;
 use crate::config_types::Personality;
 use crate::config_types::ReasoningSummary as ReasoningSummaryConfig;
 use crate::config_types::WindowsSandboxLevel;
@@ -174,7 +174,7 @@ pub struct W3cTraceContext {
     pub tracestate: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct ConversationStartParams {
     /// Whether Codex response handoffs are managed through explicit client append calls.
     pub client_managed_handoffs: bool,
@@ -213,6 +213,17 @@ pub struct ConversationStartParams {
     /// Overrides the configured realtime protocol version for this session only.
     pub version: Option<RealtimeConversationVersion>,
     pub voice: Option<RealtimeVoice>,
+}
+
+impl fmt::Debug for ConversationStartParams {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Text, instructions, and transport endpoints can contain credentials.
+        f.debug_struct("ConversationStartParams")
+            .field("output_modality", &self.output_modality)
+            .field("initial_items_count", &self.initial_items.len())
+            .field("version", &self.version)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -595,6 +606,12 @@ pub enum Op {
     #[debug("RealtimeConversationStart {{ session_id: {:?}, version: {:?}, output_modality: {:?} }}", _0.realtime_session_id, _0.version, _0.output_modality)]
     RealtimeConversationStart(ConversationStartParams),
 
+    /// Start a realtime conversation and report completion of the connection attempt.
+    RealtimeConversationAttach {
+        params: ConversationStartParams,
+        reply: oneshot::Sender<CodexResult<()>>,
+    },
+
     /// Send audio input to the running realtime conversation stream.
     #[debug("RealtimeConversationAudio {{ item_id: {:?}, sample_rate: {}, num_channels: {}, samples_per_channel: {:?} }}", _0.frame.item_id, _0.frame.sample_rate, _0.frame.num_channels, _0.frame.samples_per_channel)]
     RealtimeConversationAudio(ConversationAudioParams),
@@ -609,6 +626,12 @@ pub enum Op {
 
     /// Close the running realtime conversation stream.
     RealtimeConversationClose,
+
+    /// Close only the matching session after earlier start operations finish.
+    RealtimeConversationDetach {
+        realtime_session_id: String,
+        reply: oneshot::Sender<CodexResult<()>>,
+    },
 
     /// Request the list of voices supported by realtime conversation streams.
     RealtimeConversationListVoices,
@@ -953,10 +976,12 @@ impl Op {
             Self::InterruptIfNoPendingInput { .. } => "interrupt_if_no_pending_input",
             Self::CleanBackgroundTerminals => "clean_background_terminals",
             Self::RealtimeConversationStart(_) => "realtime_conversation_start",
+            Self::RealtimeConversationAttach { .. } => "realtime_conversation_attach",
             Self::RealtimeConversationAudio(_) => "realtime_conversation_audio",
             Self::RealtimeConversationText(_) => "realtime_conversation_text",
             Self::RealtimeConversationSpeech(_) => "realtime_conversation_speech",
             Self::RealtimeConversationClose => "realtime_conversation_close",
+            Self::RealtimeConversationDetach { .. } => "realtime_conversation_detach",
             Self::RealtimeConversationListVoices => "realtime_conversation_list_voices",
             Self::TurnInput { .. } => "turn_input",
             Self::RecoverTurn { .. } => "recover_turn",
@@ -1511,6 +1536,9 @@ pub enum EventMsg {
     DynamicToolCallResponse(DynamicToolCallResponseEvent),
 
     ElicitationRequest(ElicitationRequestEvent),
+
+    /// An unanswered MCP responder was abandoned at its original unbounded source.
+    ElicitationAbandoned(ElicitationAbandonedEvent),
 
     ApplyPatchApprovalRequest(ApplyPatchApprovalRequestEvent),
 
@@ -3317,12 +3345,6 @@ impl WorldStateItem {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema, TS)]
-pub struct TurnContextNetworkItem {
-    pub allowed_domains: Vec<String>,
-    pub denied_domains: Vec<String>,
-}
-
 /// Persist once per real user turn after computing that turn's model-visible
 /// context updates, and again after mid-turn compaction when replacement
 /// history re-establishes full context, so resume/fork replay can recover the
@@ -3339,14 +3361,6 @@ pub struct TurnContextItem {
     #[ts(optional)]
     pub disabled_plugin_ids: Option<Vec<String>>,
     pub cwd: AbsolutePathBuf,
-    /// Effective workspace roots used to materialize symbolic
-    /// `:workspace_roots` filesystem permissions in `permission_profile`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workspace_roots: Option<Vec<AbsolutePathBuf>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub current_date: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub timezone: Option<String>,
     pub approval_policy: AskForApproval,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approvals_reviewer: Option<ApprovalsReviewer>,
@@ -3357,33 +3371,25 @@ pub struct TurnContextItem {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub active_permission_profile: Option<ActivePermissionProfile>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub network: Option<TurnContextNetworkItem>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file_system_sandbox_policy: Option<RawFileSystemSandboxPolicy>,
     pub model: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub comp_hash: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub personality: Option<Personality>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub collaboration_mode: Option<CollaborationMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub multi_agent_version: Option<MultiAgentVersion>,
-    /// Legacy effective model-visible mode retained to deserialize older rollouts.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub multi_agent_mode: Option<MultiAgentMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub realtime_active: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cyber_access_program: Option<CyberAccessProgram>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub effort: Option<ReasoningEffortConfig>,
-    // Compatibility-only field written with a default value so older Codex
-    // versions can deserialize turn-context rollout items. It is no longer
-    // read by context reconstruction and should be removed in a future schema
-    // cleanup.
-    pub summary: ReasoningSummaryConfig,
+    /// Legacy placeholder written as `Some(ReasoningSummaryConfig::None)` for older readers.
+    /// Optional so newer readers also accept its future removal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<ReasoningSummaryConfig>,
 }
 
 impl TurnContextItem {
@@ -4537,6 +4543,10 @@ pub struct CollabResumeEndEvent {
     /// resume.
     pub status: AgentStatus,
 }
+
+#[cfg(test)]
+#[path = "conversation_start_params_tests.rs"]
+mod conversation_start_params_tests;
 
 #[cfg(test)]
 mod tests {
@@ -6197,18 +6207,18 @@ mod tests {
     }
 
     #[test]
-    fn turn_context_item_deserializes_without_network() -> Result<()> {
+    fn turn_context_item_deserializes_without_summary() -> Result<()> {
         let item: TurnContextItem = serde_json::from_value(json!({
             "cwd": test_path_buf("/tmp"),
             "approval_policy": "never",
             "sandbox_policy": { "type": "danger-full-access" },
             "model": "gpt-5",
-            "summary": "auto",
         }))?;
 
-        assert_eq!(item.network, None);
+        assert_eq!(item.summary, None);
         assert_eq!(item.file_system_sandbox_policy, None);
         assert_eq!(item.comp_hash, None);
+        assert_eq!(serde_json::to_value(item)?.get("summary"), None);
         Ok(())
     }
 
@@ -6227,24 +6237,17 @@ mod tests {
     }
 
     #[test]
-    fn turn_context_item_serializes_network_when_present() -> Result<()> {
+    fn turn_context_item_serializes_split_policy_and_summary() -> Result<()> {
         let item = TurnContextItem {
             turn_id: None,
             root_turn_id: None,
             disabled_plugin_ids: None,
             cwd: test_path_buf("/tmp").abs(),
-            workspace_roots: None,
-            current_date: None,
-            timezone: None,
             approval_policy: AskForApproval::Never,
             approvals_reviewer: None,
             sandbox_policy: SandboxPolicy::DangerFullAccess,
             permission_profile: None,
             active_permission_profile: None,
-            network: Some(TurnContextNetworkItem {
-                allowed_domains: vec!["api.example.com".to_string()],
-                denied_domains: vec!["blocked.example.com".to_string()],
-            }),
             file_system_sandbox_policy: Some(
                 FileSystemSandboxPolicy::restricted(vec![FileSystemSandboxEntry {
                     path: FileSystemPath::GlobPattern {
@@ -6258,24 +6261,15 @@ mod tests {
             ),
             model: "gpt-5".to_string(),
             comp_hash: None,
-            personality: None,
             collaboration_mode: None,
             multi_agent_version: None,
-            multi_agent_mode: None,
             realtime_active: None,
             cyber_access_program: None,
             effort: None,
-            summary: ReasoningSummaryConfig::Auto,
+            summary: Some(ReasoningSummaryConfig::None),
         };
 
         let value = serde_json::to_value(item)?;
-        assert_eq!(
-            value["network"],
-            json!({
-                "allowed_domains": ["api.example.com"],
-                "denied_domains": ["blocked.example.com"],
-            })
-        );
         assert_eq!(
             value["file_system_sandbox_policy"],
             json!({
@@ -6289,7 +6283,9 @@ mod tests {
                 }]
             })
         );
-        assert_eq!(value["summary"], json!("auto"));
+        let legacy_summary: ReasoningSummaryConfig =
+            serde_json::from_value(value["summary"].clone())?;
+        assert_eq!(legacy_summary, ReasoningSummaryConfig::None);
         Ok(())
     }
 

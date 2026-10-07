@@ -1,3 +1,24 @@
+# Thread list exclusions
+
+`thread/list` accepts `excludedThreadIds`, an optional array of up to 100
+thread ID strings. Omitted, null, or empty lists do not exclude anything.
+Invalid IDs or more than 100 entries return JSON-RPC error `-32602`;
+duplicates count toward that bound and no entries are silently truncated.
+
+Exclusions apply before the returned result limit, along with the existing
+source, provider, archive, project, section and cwd filters. Pages refill to
+the requested limit (at most 100) unless history is exhausted. Send the same
+exclusions and filters with each returned cursor. Clients that display a saved
+manual order can load those summaries separately, then exclude the entire saved
+ID set when listing the remainder. This field does not save or sort that order.
+
+DB-only requests (`useStateDbOnly: true`) return JSON-RPC error `-32603`
+when the local state DB cannot serve the query, even for an empty cwd filter.
+Listing also returns `-32603` if the store repeats a cursor while filling a page.
+These errors are not evidence that history is exhausted; callers can retry.
+A successful response with `nextCursor: null` still indicates exhaustion.
+Default scan-and-repair requests retain their filesystem fallback.
+
 # Guardian circuit-breaker errors
 
 Set `auto_review.circuit_break_action = "strict"` to include `TooManyDenials` in

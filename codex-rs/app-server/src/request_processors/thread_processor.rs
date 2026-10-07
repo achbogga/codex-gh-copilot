@@ -36,6 +36,7 @@ use std::ops::ControlFlow;
 
 pub(super) const THREAD_LIST_DEFAULT_LIMIT: usize = 25;
 pub(super) const THREAD_LIST_MAX_LIMIT: usize = 100;
+const THREAD_LIST_MAX_EXCLUDED_IDS: usize = 100;
 const PAGINATED_FULL_HISTORY_DEPRECATION_SUMMARY: &str = "Full-history hydration is deprecated for paginated threads; use `excludeTurns: true`, then page with `thread/turns/list` and `thread/items/list`.";
 const PAGINATED_THREAD_READ_DEPRECATION_SUMMARY: &str = "Full-history hydration is deprecated for paginated threads; omit `includeTurns` or set it to `false`, then page with `thread/turns/list` and `thread/items/list`.";
 
@@ -84,6 +85,7 @@ struct ThreadListFilters {
     search_term: Option<String>,
     use_state_db_only: bool,
     relation_filter: Option<StoreThreadRelationFilter>,
+    excluded_thread_ids: HashSet<ThreadId>,
 }
 
 // Persisted inputs that can change while loading configuration without the metadata permit.
@@ -2528,6 +2530,7 @@ impl ThreadRequestProcessor {
         let ThreadListParams {
             cursor,
             limit,
+            excluded_thread_ids,
             sort_key,
             sort_direction,
             model_providers,
@@ -2542,6 +2545,19 @@ impl ThreadRequestProcessor {
             parent_thread_id,
             ancestor_thread_id,
         } = params;
+        let excluded_thread_ids = excluded_thread_ids.unwrap_or_default();
+        if excluded_thread_ids.len() > THREAD_LIST_MAX_EXCLUDED_IDS {
+            return Err(invalid_params(format!(
+                "excludedThreadIds accepts at most {THREAD_LIST_MAX_EXCLUDED_IDS} entries"
+            )));
+        }
+        let excluded_thread_ids = excluded_thread_ids
+            .iter()
+            .map(|id| {
+                ThreadId::from_string(id)
+                    .map_err(|err| invalid_params(format!("invalid excluded thread id: {err}")))
+            })
+            .collect::<Result<HashSet<_>, _>>()?;
         if originators
             .as_ref()
             .is_some_and(|values| !values.is_empty())
@@ -2620,6 +2636,7 @@ impl ThreadRequestProcessor {
                     search_term,
                     use_state_db_only,
                     relation_filter,
+                    excluded_thread_ids,
                 },
             )
             .await?;
@@ -5483,9 +5500,10 @@ impl ThreadRequestProcessor {
             search_term,
             use_state_db_only,
             relation_filter,
+            excluded_thread_ids,
         } = filters;
         let mut cursor_obj = cursor;
-        let mut last_cursor = cursor_obj.clone();
+        let mut seen_cursors: HashSet<String> = cursor_obj.iter().cloned().collect();
         let mut remaining = requested_page_size;
         let mut items = Vec::with_capacity(requested_page_size);
         let mut next_cursor: Option<String> = None;
@@ -5542,9 +5560,10 @@ impl ThreadRequestProcessor {
                     it.agent_nickname.clone(),
                     it.agent_role.clone(),
                 );
-                if source_kind_filter
-                    .as_ref()
-                    .is_none_or(|filter| source_kind_matches(&source, filter))
+                if !excluded_thread_ids.contains(&it.thread_id)
+                    && source_kind_filter
+                        .as_ref()
+                        .is_none_or(|filter| source_kind_matches(&source, filter))
                     && cwd_filters.as_ref().is_none_or(|expected_cwds| {
                         expected_cwds.iter().any(|expected_cwd| {
                             path_utils::paths_match_after_normalization(&it.cwd, expected_cwd)
@@ -5561,20 +5580,16 @@ impl ThreadRequestProcessor {
             remaining = requested_page_size.saturating_sub(items.len());
 
             next_cursor = page.next_cursor;
-            if remaining == 0 {
-                break;
-            }
-
             let Some(cursor_val) = next_cursor.clone() else {
                 break;
             };
-            // Break if our pagination would reuse the same cursor again; this avoids
-            // an infinite loop when filtering drops everything on the page.
-            if last_cursor.as_ref() == Some(&cursor_val) {
-                next_cursor = None;
+            // Check full pages too: returning a repeated cursor would loop on the next request.
+            if !seen_cursors.insert(cursor_val.clone()) {
+                return Err(internal_error("thread listing returned a repeated cursor"));
+            }
+            if remaining == 0 {
                 break;
             }
-            last_cursor = Some(cursor_val.clone());
             cursor_obj = Some(cursor_val);
         }
 

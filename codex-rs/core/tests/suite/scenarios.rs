@@ -91,6 +91,8 @@ const ONE_PIXEL_PNG_BASE64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ
 
 #[path = "scenarios_incremental_tools.rs"]
 mod incremental_tools;
+#[path = "scenarios_incremental_tools_resume.rs"]
+mod incremental_tools_resume;
 
 #[path = "scenarios_code_mode_settled_helpers_tests.rs"]
 mod code_mode_settled_helpers;
@@ -106,6 +108,9 @@ mod mailbox_preemption;
 
 #[path = "scenarios_partial_answers.rs"]
 mod partial_answers;
+
+#[path = "scenarios_guardian_sender_context.rs"]
+mod guardian_sender_context;
 
 #[path = "scenarios_guardian_extra_policy.rs"]
 mod guardian_extra_policy;
@@ -266,6 +271,20 @@ fn configure_scenario_catalog(config: &mut Config) {
     .expect("fixture config layers");
     config.model_catalog = Some(bundled_models_response().expect("bundled model catalog"));
     config.cloud_skill_enabled = false;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn realtime_attachment_replacement_preserves_handoff_context() -> Result<()> {
+    let requests = super::realtime_attachment::attachment_replacement_scenario().await?;
+    insta::assert_snapshot!(
+        "realtime_attachment_replacement",
+        context_snapshot::format_request_history_snapshot(
+            "A replacement fences an older pending connection and stale stops; only the selected call starts a Codex handoff.",
+            &requests,
+            &ContextSnapshotOptions::default().rewrite_known_segments(),
+        )
+    );
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

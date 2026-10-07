@@ -4906,7 +4906,7 @@ class SkillSummary(BaseModel):
     enabled: bool
     interface: SkillInterface | None = None
     name: str
-    path: AbsolutePathBuf | None = None
+    path: LegacyAppPathString | None = None
     short_description: Annotated[str | None, Field(alias="shortDescription")] = None
 
 
@@ -9794,7 +9794,7 @@ class SkillMetadata(BaseModel):
     enabled: bool
     interface: SkillInterface | None = None
     name: str
-    path: AbsolutePathBuf
+    path: LegacyAppPathString
     plugin_id: Annotated[
         str | None,
         Field(
@@ -10135,6 +10135,13 @@ class ThreadListParams(BaseModel):
         ThreadListCwdFilter | None,
         Field(
             description="Optional cwd filter or filters; when set, only threads whose session cwd exactly matches one of these paths are returned."
+        ),
+    ] = None
+    excluded_thread_ids: Annotated[
+        list[str] | None,
+        Field(
+            alias="excludedThreadIds",
+            description="Thread IDs to exclude before applying the result limit. Up to 100 entries; invalid IDs or a larger list are rejected, never truncated. Send the same exclusions on each page. Omitted, null, or empty means no exclusions.",
         ),
     ] = None
     limit: Annotated[

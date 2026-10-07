@@ -1619,6 +1619,11 @@ async fn start_thread_seeds_extension_data_for_mcp_and_lifecycle_contributors() 
         ) -> codex_extension_api::ExtensionFuture<'a, Vec<codex_extension_api::SelectedPlugin<'a>>>
         {
             Box::pin(async move {
+                assert_eq!(
+                    context.selected_environments(),
+                    Some([].as_slice()),
+                    "thread MCP projection must preserve explicitly empty selections"
+                );
                 let thread_init = context
                     .thread_init()
                     .expect("initial MCP resolution should be thread-scoped");
@@ -1990,6 +1995,7 @@ async fn resume_and_fork_do_not_restore_thread_environments_from_rollout() {
         AbsolutePathBuf::try_from(config.cwd.as_path().join("selected")).expect("absolute path");
     std::fs::create_dir_all(&selected_cwd).expect("create selected cwd");
     let environments = vec![TurnEnvironmentSelection {
+        selected_capability_roots: Default::default(),
         environment_id: "local".to_string(),
         cwd: PathUri::from_abs_path(&selected_cwd),
         workspace_roots: Vec::new(),
