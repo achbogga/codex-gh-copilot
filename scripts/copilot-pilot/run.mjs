@@ -67,6 +67,11 @@ export function codexInvocation({
       `model=${JSON.stringify(model)}`,
       "-c",
       `model_providers.copilot-pilot=${provider}`,
+      // The SDK supplies the enabled Copilot catalog and provider limits.
+      // Codex 0.161 enables separate API-key discovery by default; this bridge
+      // only implements Responses, not Codex's model-discovery endpoint.
+      "-c",
+      "features.api_key_model_discovery=false",
       "-c",
       'web_search="disabled"',
       "--sandbox",
