@@ -30,11 +30,18 @@ async function fixture(t, upstream, replay = false, messages = false) {
     async createSession(options) {
       assert.deepEqual(options.availableTools, []);
       const controller = new AbortController();
+      let listener;
       return {
+        on: (handler) => {
+          listener = handler;
+          return () => {
+            listener = undefined;
+          };
+        },
         sessionId: "test-session",
         abort: async () => controller.abort(),
         disconnect: async () => {},
-        sendAndWait: async () => {
+        send: async () => {
           const send = () =>
             this.handler.sendRequest(
               new Request(
@@ -52,6 +59,7 @@ async function fixture(t, upstream, replay = false, messages = false) {
             );
           acknowledgements.push(await (await send()).json());
           if (replay) await send();
+          listener?.({ type: "session.idle", data: {} });
         },
       };
     }
@@ -154,6 +162,37 @@ test("SDK transports native tool events unchanged and acknowledges without an in
   ]);
 });
 
+test("SDK preserves accounting when Codex stops reading after real completion", async (t) => {
+  const completed = {
+    type: "response.completed",
+    response: { id: "finished", usage: { input_tokens: 12, output_tokens: 4 } },
+  };
+  const sdk = await fixture(
+    t,
+    () =>
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(
+              Buffer.from(`data: ${JSON.stringify(completed)}\n\n`),
+            );
+          },
+        }),
+        { headers: { "content-type": "text/event-stream" } },
+      ),
+  );
+  const response = await sdk.transport(
+    "https://api.githubcopilot.com/responses",
+    init(new AbortController().signal),
+  );
+  const reader = response.body.getReader();
+  await reader.read();
+  await reader.cancel();
+  await sdk.close();
+  assert.equal(sdk.acknowledgements.length, 1);
+  assert.deepEqual(sdk.acknowledgements[0].usage, completed.response.usage);
+});
+
 test("SDK surfaces denied access without an inference retry", async (t) => {
   const sdk = await fixture(t, () => new Response("denied", { status: 403 }));
   const response = await sdk.transport(
@@ -163,7 +202,50 @@ test("SDK surfaces denied access without an inference retry", async (t) => {
   assert.equal(response.status, 403);
   await sdk.close();
   assert.equal(sdk.requests.length, 1);
+  assert.deepEqual(sdk.acknowledgements, []);
 });
+
+for (const failure of ["eof", "read-error", "cancel"])
+  test(
+    `SDK ${failure} settles without acknowledging incomplete inference or hanging shutdown`,
+    { timeout: 3000 },
+    async (t) => {
+      let source;
+      const sdk = await fixture(
+        t,
+        () =>
+          new Response(
+            new ReadableStream({
+              start(controller) {
+                source = controller;
+                controller.enqueue(
+                  new TextEncoder().encode(
+                    'data: {"type":"response.created"}\n\n',
+                  ),
+                );
+                if (failure === "eof") controller.close();
+              },
+            }),
+            { headers: { "content-type": "text/event-stream" } },
+          ),
+      );
+      const response = await sdk.transport(
+        "https://api.githubcopilot.com/responses",
+        init(new AbortController().signal),
+      );
+      const reader = response.body.getReader();
+      assert.equal((await reader.read()).done, false);
+      if (failure === "cancel") await reader.cancel();
+      else {
+        if (failure === "read-error")
+          source.error(new Error("private upstream error"));
+        await assert.rejects(reader.read());
+      }
+      await sdk.close();
+      assert.equal(sdk.requests.length, 1);
+      assert.deepEqual(sdk.acknowledgements, []);
+    },
+  );
 
 for (const messages of [false, true])
   test(`cancelling Codex aborts an in-flight SDK ${messages ? "Messages" : "Responses"} upstream`, async (t) => {

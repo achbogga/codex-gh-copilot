@@ -73,13 +73,18 @@ export async function startBridge({
   model,
   transport = fetch,
   socketPath,
+  streamIdleTimeoutMs = 300000,
 }) {
   const expected = Buffer.from(`Bearer ${localToken}`);
   const active = new Set();
   const server = createServer(async (request, response) => {
     const controller = new AbortController();
     active.add(controller);
-    const timer = setTimeout(() => controller.abort(), 300000);
+    // A long, active max-reasoning response must not hit a total-duration cap.
+    const timer = setTimeout(() => controller.abort(), streamIdleTimeoutMs);
+    const activity = () => {
+      if (!controller.signal.aborted) timer.refresh();
+    };
     response.on("close", () => controller.abort());
     try {
       const received = Buffer.from(request.headers.authorization ?? "");
@@ -139,7 +144,10 @@ export async function startBridge({
         body,
         redirect: "error",
         signal: controller.signal,
+        // SDK transport also reports raw Anthropic activity before translation.
+        onActivity: activity,
       });
+      activity();
       if (!result.ok) {
         await result.body?.cancel();
         // Upstream error bodies can echo request data or credentials. Never relay them.
@@ -161,16 +169,37 @@ export async function startBridge({
         "cache-control": "no-store",
       });
       response.flushHeaders();
-      await pipeline(Readable.fromWeb(result.body), response, {
-        signal: controller.signal,
-      });
+      async function* stream() {
+        try {
+          for await (const chunk of Readable.fromWeb(result.body, {
+            signal: controller.signal,
+          })) {
+            activity();
+            yield chunk;
+          }
+        } catch {
+          // Report a real failure, never fabricate response.completed or replay
+          // a partially executed tool call. Suppress upstream error payloads.
+          if (!response.destroyed) {
+            const message = controller.signal.aborted
+              ? `Copilot stream inactive for ${streamIdleTimeoutMs} ms. No automatic retry.`
+              : "Copilot stream ended before completion. No automatic retry.";
+            yield Buffer.from(
+              `\n\nevent: response.failed\ndata: ${JSON.stringify({ type: "response.failed", response: { status: "failed", error: { type: "copilot_pilot_error", code: "stream_interrupted", message } } })}\n\n`,
+            );
+          }
+        }
+      }
+      await pipeline(Readable.from(stream()), response);
     } catch {
       if (response.headersSent) response.destroy();
       else if (!response.destroyed)
         fail(
           response,
           502,
-          "Pilot request failed; check credentials, JSON, size, TLS, and connectivity.",
+          controller.signal.aborted
+            ? `Copilot request inactive for ${streamIdleTimeoutMs} ms. No automatic retry.`
+            : "Pilot request failed; check credentials, JSON, size, TLS, and connectivity.",
         );
     } finally {
       clearTimeout(timer);

@@ -21,6 +21,8 @@ export async function modelArguments(
     `model_context_window=${limits.max_context_window_tokens}`,
     "-c",
     `model_auto_compact_token_limit=${compact}`,
+    "-c",
+    'model_auto_compact_token_limit_scope="total"',
   ];
   let metadata;
   if (usesMessages(model)) {

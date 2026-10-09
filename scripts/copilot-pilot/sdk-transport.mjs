@@ -5,6 +5,7 @@ import {
 } from "@github/copilot-sdk";
 import { messagesRequest, usesMessages } from "./anthropic-request.mjs";
 import { messagesResponse } from "./anthropic-stream.mjs";
+import { responsesResponse } from "./responses-stream.mjs";
 
 // The official runtime supplies authentication, account routing and model policy.
 // Its request handler carries native Responses or translated Messages payloads
@@ -61,8 +62,12 @@ export async function createSdkTransport({
       const headers = new Headers(request.headers);
       headers.delete("content-length");
       headers.set("x-initiator", job.init.headers["X-Initiator"]);
-      const signal = AbortSignal.any([context.signal, job.init.signal]);
-      const response = await forward(
+      const signal = AbortSignal.any([
+        context.signal,
+        job.init.signal,
+        job.controller.signal,
+      ]);
+      let response = await forward(
         new Request(url, {
           method: "POST",
           headers,
@@ -73,6 +78,20 @@ export async function createSdkTransport({
           redirect: "error",
         }),
       );
+      job.init.onActivity?.();
+      if (response.ok && response.body) {
+        response = new Response(
+          response.body.pipeThrough(
+            new TransformStream({
+              transform(chunk, controller) {
+                job.init.onActivity?.();
+                controller.enqueue(chunk);
+              },
+            }),
+          ),
+          { status: response.status, headers: response.headers },
+        );
+      }
       if (job.messages) {
         if (!response.ok) {
           job.resolve(response);
@@ -89,47 +108,15 @@ export async function createSdkTransport({
           throw new Error("Anthropic stream did not complete.");
         return Response.json(acknowledgement);
       }
-      let completed;
-      if (!response.ok) job.resolve(response);
-      else {
-        // Observe completion for SDK accounting without rewriting a byte sent to Codex.
-        const done = Promise.withResolvers();
-        const decoder = new TextDecoder();
-        let buffer = "";
-        const body = response.body.pipeThrough(
-          new TransformStream({
-            transform(chunk, controller) {
-              buffer += decoder.decode(chunk, { stream: true });
-              if (buffer.length > 8 * 1024 * 1024)
-                throw new Error("Oversized Copilot event.");
-              let end;
-              while ((end = buffer.indexOf("\n")) >= 0) {
-                const line = buffer.slice(0, end).trimEnd();
-                buffer = buffer.slice(end + 1);
-                if (
-                  line.startsWith("data: {") &&
-                  line.includes('"response.completed"')
-                ) {
-                  const event = JSON.parse(line.slice(6));
-                  if (event.type === "response.completed") completed = event;
-                }
-              }
-              controller.enqueue(chunk);
-            },
-            flush() {
-              done.resolve();
-            },
-          }),
-        );
-        signal.addEventListener("abort", () => done.resolve(), { once: true });
-        job.resolve(
-          new Response(body, {
-            status: response.status,
-            headers: response.headers,
-          }),
-        );
-        await done.promise;
+      if (!response.ok) {
+        job.resolve(response);
+        throw new Error("Copilot Responses request denied.");
       }
+      const observed = responsesResponse(response);
+      job.resolve(observed.response);
+      const completed = await observed.completion;
+      if (!completed)
+        throw new Error("Copilot Responses stream did not complete.");
       // Internal acknowledgement prevents the SDK from executing Codex's tools.
       // Preserve real token/billing accounting; this is never returned to Codex.
       return Response.json({
@@ -203,17 +190,35 @@ export async function createSdkTransport({
         init,
         messages,
         started: false,
+        controller: new AbortController(),
       };
       pending.set(session.sessionId, job);
+      // sendAndWait has a total-duration deadline. Let the bridge's inactivity
+      // watchdog and explicit cancellation govern long, active requests instead.
+      const outcome = Promise.withResolvers();
+      const unsubscribe = session.on((event) => {
+        if (event.agentId) return;
+        if (event.type === "session.error") {
+          job.controller.abort();
+          outcome.resolve(false);
+        }
+        if (event.type === "session.idle" && event.data?.mode !== "autopilot")
+          outcome.resolve(true);
+      });
       const abort = () => {
         job.reject(new Error("Codex request cancelled."));
+        job.controller.abort();
+        outcome.resolve(false);
         void session.abort().catch(() => {});
       };
+      job.abort = abort;
       init.signal.addEventListener("abort", abort, { once: true });
       if (init.signal.aborted) abort();
-      const task = session
-        .sendAndWait({ prompt: "Forward the pending Codex request." }, 300000)
-        .catch(() => job.reject(new Error("Copilot runtime request failed.")))
+      const task = outcome.promise
+        .then((success) => {
+          if (!success)
+            job.reject(new Error("Copilot runtime request failed."));
+        })
         .finally(async () => {
           job.reject(
             new Error(
@@ -221,14 +226,21 @@ export async function createSdkTransport({
             ),
           );
           init.signal.removeEventListener("abort", abort);
+          unsubscribe();
+          job.controller.abort();
           pending.delete(session.sessionId);
           await session.disconnect().catch(() => {});
           tasks.delete(task);
         });
       tasks.add(task);
+      if (!init.signal.aborted)
+        void session
+          .send({ prompt: "Forward the pending Codex request." })
+          .catch(() => outcome.resolve(false));
       return job.promise;
     },
     close: async () => {
+      for (const job of pending.values()) job.abort();
       await client.stop();
       await Promise.allSettled(tasks);
     },

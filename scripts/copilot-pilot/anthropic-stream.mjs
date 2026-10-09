@@ -78,9 +78,13 @@ export function messagesResponse(response, request) {
               });
             } else if (delta.type === "input_json_delta")
               partial += delta.partial_json;
-            else if (delta.type === "thinking_delta")
+            else if (delta.type === "thinking_delta") {
               block.thinking += delta.thinking;
-            else if (delta.type === "signature_delta")
+              // Keep the SSE inactivity timer alive without exposing signed thinking.
+              yield event("response.in_progress", {
+                response: { id: message.id, status: "in_progress" },
+              });
+            } else if (delta.type === "signature_delta")
               block.signature = (block.signature ?? "") + delta.signature;
             else throw new Error(`Unsupported Anthropic delta: ${delta.type}`);
           } else if (value.type === "content_block_stop") {

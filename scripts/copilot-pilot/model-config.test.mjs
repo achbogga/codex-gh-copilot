@@ -23,6 +23,8 @@ test("context configuration reserves output space and uses the container catalog
     "-c",
     "model_auto_compact_token_limit=828400",
     "-c",
+    'model_auto_compact_token_limit_scope="total"',
+    "-c",
     'model_catalog_json="/container/catalog.json"',
   ]);
   const catalog = JSON.parse(await readFile(join(dir, "catalog.json"), "utf8"));

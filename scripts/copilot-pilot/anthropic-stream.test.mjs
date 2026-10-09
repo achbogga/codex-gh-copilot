@@ -180,6 +180,47 @@ test("Messages stream replays signed thinking, namespaced tools and parallel res
   });
 });
 
+test(
+  "thinking activity reaches Codex before the signed block finishes",
+  { timeout: 3000 },
+  async () => {
+    let source;
+    const upstream = new Response(
+      new ReadableStream({
+        start(controller) {
+          source = controller;
+        },
+      }),
+    );
+    const translated = messagesResponse(
+      upstream,
+      messagesRequest(payload, model),
+    );
+    const reader = translated.response.body.getReader();
+    const values = events();
+    const send = (value) =>
+      source.enqueue(Buffer.from(`data: ${JSON.stringify(value)}\n\n`));
+    for (const value of values.slice(0, 2)) send(value);
+    send({
+      type: "content_block_delta",
+      index: 0,
+      delta: {
+        type: "thinking_delta",
+        thinking: "private signed thinking",
+      },
+    });
+    await reader.read(); // response.created
+    await reader.read(); // response.output_item.added
+    const progress = Buffer.from((await reader.read()).value).toString();
+    assert.match(progress, /response.in_progress/);
+    assert.doesNotMatch(progress, /private signed thinking|signed-opaque-data/);
+    for (const value of values.slice(2)) send(value);
+    source.close();
+    while (!(await reader.read()).done) {}
+    assert.ok(await translated.completion);
+  },
+);
+
 test("stream handles fragmented UTF-8 text and refuses truncated, errored or output-limited responses", async () => {
   const text = "Fixed café ✅";
   const translated = messagesResponse(

@@ -4,7 +4,7 @@ This fork's experimental adapter runs **real Codex**, including Code Mode, its n
 
 ## Run on Linux
 
-Requires Node.js 22+ (tested with 22.23.3), an authenticated `copilot` CLI (tested with 1.0.93), and the installed Codex executable bundle (tested with 0.161.0). Docker is needed only for the optional container launcher.
+Requires Node.js 22+ (tested with 22.23.3), an authenticated `copilot` CLI (tested with 1.0.95), and the installed Codex executable bundle (tested with 0.162.1). Docker is needed only for the optional container launcher.
 
 ```bash
 npm ci --prefix scripts/copilot-pilot --ignore-scripts
@@ -16,6 +16,16 @@ node scripts/copilot-pilot/host-run.mjs -C /path/to/project -- resume --last
 The configured machine has `codex-copilot` and Bash aliases `cx` and `cxf`, all using the host launcher. Both launchers default to GPT-6.1 Sol (`gpt-6.1-sol`), max reasoning, and the full advertised context limit. The enabled Copilot catalog currently advertises 1,050,000 total context tokens, with a 922,000-token input limit and 128,000-token output limit. Auto-compaction retains headroom at 95% of the input limit (875,900 tokens). Limits are read from the provider catalog at launch. `--model`, `--reasoning`, `--state-dir`, `--copilot-bin`, and `--codex-bin` override these choices. The Codex binary must retain its companion executables, including `codex-code-mode-host`. Changes to Rust are unnecessary for this transport integration.
 
 All launchers explicitly set `features.api_key_model_discovery=false`. Codex 0.161 enables API-key model discovery by default, but this bridge implements Responses rather than Codex's discovery endpoint. The Copilot SDK still checks the seat's enabled model catalog and context limits at every launch. This setting applies to `cxf`, `cxo`, the direct launcher, and Docker; verify it with `cxf features list`.
+
+### Streaming and compaction
+
+Active Responses requests have no adapter-imposed total-duration deadline. The bridge cancels after five minutes without upstream bytes; Codex's own SSE inactivity limit is six minutes so the bridge can report its error first. Opus thinking activity emits progress events while preserving signed thinking. A stalled, truncated or failed stream reports failure, cancels the outstanding request, and releases the SDK session. The adapter never fabricates completion or automatically replays a partially executed tool call.
+
+The October 9 investigation found two GPT requests interrupted almost exactly 300 seconds after the preceding tool result, with about 265k and 388k input tokens. The original bridge timer and SDK `sendAndWait` each imposed a five-minute total limit. These limits predated the API-key discovery change; they have been replaced with inactivity and session-lifecycle handling. The Copilot provider uses HTTP streaming with WebSockets disabled. The separate `websocket closed by server before response.completed` message from regular Codex is outside this bridge.
+
+Compaction uses Codex's native local summarization through the normal model endpoint. The provider explicitly sets `capabilities.remote_compaction="unsupported"`, since the bridge does not implement the new remote compaction protocol. `model_auto_compact_token_limit_scope="total"` counts the whole context. GPT's 875,900-token and Opus's 828,400-token thresholds retain output headroom; the full context windows and max reasoning defaults are unchanged. Compaction itself can take time and obeys the same inactivity watchdog.
+
+Restart existing `cxf` and `cxo` processes after upgrading to load the updated adapter and binary. Existing sessions can then be resumed normally.
 
 ### Opus 5.5 option
 
@@ -90,7 +100,7 @@ In Docker mode, GitHub credentials remain outside the container. A private Unix 
 - ChatGPT-hosted features are not conferred by a Copilot seat. Copilot-specific governance controls are not automatically equivalent to Codex's controls; enterprise approval of this custom client and its data handling remains an organizational question.
 - Access denials and unsupported models fail closed. Inference requests are not retried automatically, upstream HTTP error bodies are suppressed, requests are bounded to 8 MiB, and a disconnected caller cancels inference. TLS verification stays enabled.
 
-The SDK transport hook is experimental and pinned to SDK 1.0.17. Its internal completion acknowledgement preserves the real usage/accounting while preventing the runtime from executing Codex tool calls; only the unmodified upstream output reaches Codex.
+The SDK transport hook is experimental and pinned to SDK 1.0.19. Its internal completion acknowledgement preserves the real usage/accounting while preventing the runtime from executing Codex tool calls; only the unmodified upstream output reaches Codex.
 
 ## Installation and upstream checks on the configured machine
 
@@ -113,7 +123,9 @@ Stop scheduled checks with `systemctl --user disable --now codex-copilot-updates
 
 ## Validation
 
-The October 7 maintenance check verified Codex 0.161.0, Copilot CLI 1.0.93, SDK 1.0.17 and host Node 22.23.3. All 36 automated checks passed (one additional optional integration test was skipped). Live GPT-6.1 Sol and Opus 5.5 sessions each used native Code Mode reads and apply_patch, passed three tests through the efficiency tool, and verified exported environment and home access outside the launch directory. Both retained max reasoning and their configured context windows. An Opus session saved under Codex 0.160.1, Copilot CLI 1.0.92 and SDK 1.0.16 also resumed and reran its checks successfully. Host and Docker launches both reported API-key model discovery disabled. The refreshed, digest-pinned Node 24.21.0 Docker image passed the exact-archive efficiency benchmark with its network disabled and root filesystem read-only.
+The October 9 maintenance check verified Codex 0.162.1, Copilot CLI 1.0.95, SDK 1.0.19 and host Node 22.23.3 after merging 110 upstream commits. All 43 automated checks passed (one additional optional integration test was skipped). New checks cover active streams exceeding the idle deadline, stalled-stream cancellation, incomplete Responses cleanup, accounting when the client stops reading after completion, and Opus thinking progress.
+
+Live GPT-6.1 Sol and Opus 5.5 sessions used disposable state directories and a test-only 35,000-token compaction threshold. Both automatically compacted, preserved a marker, continued with native apply_patch, passed three tests through the efficiency tool, and verified exported environment and home access outside the launch directory. Both sessions resumed with the normal thresholds and retained the marker. Max reasoning and the full context windows remained enabled. The installed Codex also correctly displayed a synthetic inactivity failure without retrying, and completed a 310-second active stream through the bridge with exactly one request. These two transport checks used local synthetic responses and no Copilot inference. API-key model discovery remains disabled. The optional Docker image was last checked on October 7; its pinned digest is unchanged.
 
 ```bash
 node --test scripts/copilot-pilot/*.test.mjs

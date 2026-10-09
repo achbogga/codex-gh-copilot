@@ -6,6 +6,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
 import { listModels, startBridge } from "./bridge.mjs";
 import { codexInvocation, tokenSource } from "./run.mjs";
@@ -31,7 +32,7 @@ const completed = {
   },
 };
 
-async function fixture(t, handler) {
+async function fixture(t, handler, options = {}) {
   const server = createServer(handler);
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
@@ -47,6 +48,7 @@ async function fixture(t, handler) {
     localToken,
     model,
     transport,
+    ...options,
   });
   t.after(async () => {
     await bridge.close();
@@ -66,6 +68,52 @@ function send(url, body = payload, options = {}) {
     ...options,
   });
 }
+
+test(
+  "active streams outlive the idle deadline without changing response bytes",
+  { timeout: 5000 },
+  async (t) => {
+    const chunks = Array(16).fill(": activity\n\n");
+    chunks.push(sse([completed]));
+    const bridge = await fixture(
+      t,
+      async (_req, res) => {
+        res.writeHead(200, { "content-type": "text/event-stream" });
+        for (const chunk of chunks) {
+          res.write(chunk);
+          await delay(25);
+        }
+        res.end();
+      },
+      { streamIdleTimeoutMs: 200 },
+    );
+    assert.equal(await (await send(bridge.url)).text(), chunks.join(""));
+  },
+);
+
+test(
+  "inactive streams cancel upstream and return a redacted error without retry or fake completion",
+  { timeout: 5000 },
+  async (t) => {
+    let requests = 0;
+    const disconnected = Promise.withResolvers();
+    const bridge = await fixture(
+      t,
+      (_req, res) => {
+        requests++;
+        res.on("close", disconnected.resolve);
+        res.writeHead(200, { "content-type": "text/event-stream" });
+        res.write(": activity\n\n");
+      },
+      { streamIdleTimeoutMs: 100 },
+    );
+    const output = await (await send(bridge.url)).text();
+    assert.match(output, /Copilot stream inactive for 100 ms/);
+    assert.doesNotMatch(output, /response.completed|upstream-test-secret/);
+    await disconnected.promise;
+    assert.equal(requests, 1);
+  },
+);
 
 test("preserves payload and SSE bytes; sets honest user/tool continuation headers", async (t) => {
   const requests = [];
