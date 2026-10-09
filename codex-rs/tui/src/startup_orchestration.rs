@@ -441,7 +441,6 @@ pub(super) async fn run_main_inner(
         model_provider: model_provider_override.clone(),
         codex_self_exe: arg0_paths.codex_self_exe.clone(),
         codex_linux_sandbox_exe: arg0_paths.codex_linux_sandbox_exe.clone(),
-        main_execve_wrapper_exe: arg0_paths.main_execve_wrapper_exe.clone(),
         show_raw_agent_reasoning: cli.oss.then_some(true),
         bypass_hook_trust: cli.bypass_hook_trust.then_some(true),
         additional_writable_roots: additional_dirs,
@@ -585,6 +584,7 @@ pub(super) async fn run_main_inner(
             &mut startup_draft,
             &app_server_target,
             &config,
+            &cli_kv_overrides,
             managed_daemon,
         )
         .await?
