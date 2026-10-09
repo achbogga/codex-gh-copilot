@@ -191,15 +191,15 @@ test("redacts errors and makes no retries on auth, policy, quota or compatibilit
     let count = 0;
     const bridge = await fixture(t, (_req, res) => {
       count++;
-      res.writeHead(status);
+      res.writeHead(status, { "retry-after": "7" });
       res.end("upstream-test-secret private context");
     });
     const result = await send(bridge.url);
-    assert.equal(result.status, status);
-    assert.doesNotMatch(
-      await result.text(),
-      /upstream-test-secret|private context/,
-    );
+    assert.equal(result.status, status < 500 ? 200 : status);
+    assert.equal(result.headers.get("retry-after"), "7");
+    const text = await result.text();
+    if (status < 500) assert.match(text, /"code":"invalid_prompt"/);
+    assert.doesNotMatch(text, /upstream-test-secret|private context/);
     assert.equal(count, 1);
   }
 });

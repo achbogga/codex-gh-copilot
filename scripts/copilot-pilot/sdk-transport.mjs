@@ -6,6 +6,7 @@ import {
 import { messagesRequest, usesMessages } from "./anthropic-request.mjs";
 import { messagesResponse } from "./anthropic-stream.mjs";
 import { responsesResponse } from "./responses-stream.mjs";
+import { appendFileSync, statSync } from "node:fs";
 
 // The official runtime supplies authentication, account routing and model policy.
 // Its request handler carries native Responses or translated Messages payloads
@@ -16,6 +17,7 @@ export async function createSdkTransport({
   environment = process.env,
   Client = CopilotClient,
   forward = fetch,
+  diagnosticFile,
 } = {}) {
   if (environment.NODE_TLS_REJECT_UNAUTHORIZED === "0")
     throw new Error("TLS verification must remain enabled.");
@@ -35,6 +37,23 @@ export async function createSdkTransport({
   const pending = new Map();
   const tasks = new Set();
   let catalog;
+  const diagnose = (details) => {
+    if (!diagnosticFile) return;
+    try {
+      let size = 0;
+      try {
+        size = statSync(diagnosticFile).size;
+      } catch (error) {
+        if (error.code !== "ENOENT") return;
+      }
+      if (size < 1024 * 1024)
+        appendFileSync(
+          diagnosticFile,
+          JSON.stringify({ time: new Date().toISOString(), ...details }) + "\n",
+          { mode: 0o600 },
+        );
+    } catch {} // Diagnostics must never interrupt inference.
+  };
   class Handler extends CopilotRequestHandler {
     async sendRequest(request, context) {
       const url = new URL(request.url);
@@ -112,7 +131,17 @@ export async function createSdkTransport({
         job.resolve(response);
         throw new Error("Copilot Responses request denied.");
       }
-      const observed = responsesResponse(response);
+      const observed = responsesResponse(response, {
+        onDiagnostic: (details) =>
+          diagnose({
+            ...details,
+            model: job.model,
+            elapsed_ms: Date.now() - job.startedAt,
+            sdk_cancelled: context.signal.aborted,
+            caller_cancelled: job.init.signal.aborted,
+            session_cancelled: job.controller.signal.aborted,
+          }),
+      });
       job.resolve(observed.response);
       const completed = await observed.completion;
       if (!completed)
@@ -188,6 +217,8 @@ export async function createSdkTransport({
       const job = {
         ...Promise.withResolvers(),
         init,
+        model: payload.model,
+        startedAt: Date.now(),
         messages,
         started: false,
         controller: new AbortController(),

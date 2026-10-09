@@ -40,6 +40,7 @@ export async function runHost({
     sdk = await connect({
       cliPath: copilotBin,
       directory: transportDir,
+      diagnosticFile: join(state, "stream-diagnostics.jsonl"),
       environment,
     });
     const selected = (

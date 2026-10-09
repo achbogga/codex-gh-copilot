@@ -19,9 +19,15 @@ All launchers explicitly set `features.api_key_model_discovery=false`. Codex 0.1
 
 ### Streaming and compaction
 
-Active Responses requests have no adapter-imposed total-duration deadline. The bridge cancels after five minutes without upstream bytes; Codex's own SSE inactivity limit is six minutes so the bridge can report its error first. Opus thinking activity emits progress events while preserving signed thinking. A stalled, truncated or failed stream reports failure, cancels the outstanding request, and releases the SDK session. The adapter never fabricates completion or automatically replays a partially executed tool call.
+Active Responses requests have no adapter-imposed total-duration deadline. The bridge cancels after five minutes without upstream bytes; Codex's own SSE inactivity limit is six minutes so the bridge can report its error first. Opus thinking activity emits progress events while preserving signed thinking. A stalled or truncated stream cancels the outstanding request and releases the SDK session. Codex can reconnect up to three times per sampling request, using its current conversation history and completed tool results. Unbounded connection retries are disabled. The bridge and SDK do not retry or execute tools themselves, and never fabricate a completion. Upstream HTTP 4xx responses become terminal Responses rejections; authentication, policy, quota and compatibility denials are not retried. Server and transport failures use the bounded native recovery path.
+
+A provider `response.failed` or `response.incomplete` event is preserved instead of being replaced by a generic disconnect. An `interrupted` response uses Codex's native continuation protocol and retains its real accounting. Generic provider error events are classified for Codex; unknown generic rejections stop without retrying.
+
+Responses failures write metadata to `CODEX_HOME/stream-diagnostics.jsonl`: time, model, elapsed milliseconds, event/byte counts, allowlisted error codes and which cancellation signal fired. Prompts, tool outputs, credentials, raw error messages and reasoning content are excluded. The private log stops appending at 1 MiB; move it aside to start a fresh log. Diagnostics failure never interrupts inference.
 
 The October 9 investigation found two GPT requests interrupted almost exactly 300 seconds after the preceding tool result, with about 265k and 388k input tokens. The original bridge timer and SDK `sendAndWait` each imposed a five-minute total limit. These limits predated the API-key discovery change; they have been replaced with inactivity and session-lifecycle handling. The Copilot provider uses HTTP streaming with WebSockets disabled. The separate `websocket closed by server before response.completed` message from regular Codex is outside this bridge.
+
+Later October 9 failures occurred after about 47 and 97 seconds, with reasoning still arriving and context below the compaction threshold. The prior error handler discarded the underlying error, so those logs cannot establish the original trigger. Two additional adapter problems were verified: native stream recovery was disabled, and the Responses observer treated legitimate non-completed terminal events as truncated streams. The follow-up change enables bounded recovery, preserves terminal events and records diagnostic metadata. No context or reasoning settings were reduced.
 
 Compaction uses Codex's native local summarization through the normal model endpoint. The provider explicitly sets `capabilities.remote_compaction="unsupported"`, since the bridge does not implement the new remote compaction protocol. `model_auto_compact_token_limit_scope="total"` counts the whole context. GPT's 875,900-token and Opus's 828,400-token thresholds retain output headroom; the full context windows and max reasoning defaults are unchanged. Compaction itself can take time and obeys the same inactivity watchdog.
 
@@ -100,7 +106,7 @@ In Docker mode, GitHub credentials remain outside the container. A private Unix 
 - ChatGPT-hosted features are not conferred by a Copilot seat. Copilot-specific governance controls are not automatically equivalent to Codex's controls; enterprise approval of this custom client and its data handling remains an organizational question.
 - Access denials and unsupported models fail closed. Inference requests are not retried automatically, upstream HTTP error bodies are suppressed, requests are bounded to 8 MiB, and a disconnected caller cancels inference. TLS verification stays enabled.
 
-The SDK transport hook is experimental and pinned to SDK 1.0.19. Its internal completion acknowledgement preserves the real usage/accounting while preventing the runtime from executing Codex tool calls; only the unmodified upstream output reaches Codex.
+The SDK transport hook is experimental and pinned to SDK 1.0.19. Its internal completion acknowledgement preserves the real usage/accounting while preventing the runtime from executing Codex tool calls. Successful Responses output reaches Codex unchanged; generic protocol errors can be classified into Responses failure events.
 
 ## Installation and upstream checks on the configured machine
 
@@ -122,6 +128,16 @@ Release reminders appear when launching `codex-copilot`, `cx`, or `cxf` in a ter
 Stop scheduled checks with `systemctl --user disable --now codex-copilot-updates.timer`. To adopt upstream source, first review `git log HEAD..upstream/main`; fetching alone does not update the installed Codex binary.
 
 ## Validation
+
+The follow-up validation passed 41 regular Node checks, seven native recovery checks and seven updater checks; the legacy optional tool-loop integration test was not run. The recovery checks use installed Codex 0.162.1 against synthetic streams. They cover disconnects before and after tool execution, continuation after `response.incomplete`, exhaustion of the three-reconnect limit, and no retries for HTTP 403, quota or generic policy denials. After a forced disconnect following a shell side effect, the recovered request included the completed tool result and the command executed exactly once.
+
+Live GPT-6.1 Sol and Opus 5.5 checks injected a socket failure into the official SDK's upstream response. Both displayed `Reconnecting... 1/3`, continued with real inference and native shell tools, and appended their test marker exactly once. A separate max-reasoning request with 239,084 input tokens completed after 145 seconds. These checks demonstrate recovery under injected faults; the historical generic errors do not identify their original network or provider cause.
+
+Run the zero-inference native recovery tests with the installed binary:
+
+```bash
+COPILOT_PILOT_CODEX_BIN=/absolute/path/to/native/codex node --test scripts/copilot-pilot/recovery.test.mjs
+```
 
 The October 9 maintenance check verified Codex 0.162.1, Copilot CLI 1.0.95, SDK 1.0.19 and host Node 22.23.3 after merging 110 upstream commits. All 43 automated checks passed (one additional optional integration test was skipped). New checks cover active streams exceeding the idle deadline, stalled-stream cancellation, incomplete Responses cleanup, accounting when the client stops reading after completion, and Opus thinking progress.
 

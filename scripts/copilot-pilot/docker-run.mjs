@@ -91,7 +91,11 @@ async function main() {
   const transportDir = await mkdtemp(join(root, "transport-"));
   let bridge, sdk;
   try {
-    sdk = await createSdkTransport({ cliPath, directory: transportDir });
+    sdk = await createSdkTransport({
+      cliPath,
+      directory: transportDir,
+      diagnosticFile: join(state, "stream-diagnostics.jsonl"),
+    });
     const model = (
       await listModels(async () => "sdk-owned", sdk.transport, {
         messages: true,

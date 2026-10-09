@@ -14,6 +14,10 @@ function fail(response, status, message) {
   );
 }
 
+function failedEvent(message, code = "stream_interrupted") {
+  return `\n\nevent: response.failed\ndata: ${JSON.stringify({ type: "response.failed", response: { status: "failed", error: { type: "copilot_pilot_error", code, message } } })}\n\n`;
+}
+
 function headers(token) {
   if (!token || /\s/.test(token)) throw new Error("Invalid credential.");
   return {
@@ -149,14 +153,27 @@ export async function startBridge({
       });
       activity();
       if (!result.ok) {
+        const retryAfter = result.headers.get("retry-after");
+        if (retryAfter) response.setHeader("retry-after", retryAfter);
         await result.body?.cancel();
         // Upstream error bodies can echo request data or credentials. Never relay them.
         const status = result.status >= 400 ? result.status : 502;
-        return fail(
-          response,
-          status,
-          `Copilot returned HTTP ${result.status}; check authentication, policy, model compatibility, or budget. No automatic retry.`,
-        );
+        const message = `Copilot returned HTTP ${result.status}; check authentication, policy, model compatibility, or budget.`;
+        if (status >= 400 && status < 500) {
+          // Native Codex retries unknown HTTP statuses. Encode an explicit
+          // terminal rejection so enabling stream recovery cannot retry denial.
+          response.writeHead(200, {
+            "content-type": "text/event-stream",
+            "cache-control": "no-store",
+          });
+          return response.end(
+            failedEvent(
+              message + " This rejection is not retried.",
+              "invalid_prompt",
+            ),
+          );
+        }
+        return fail(response, status, message);
       }
       if (
         !result.headers.get("content-type")?.startsWith("text/event-stream")
@@ -177,16 +194,14 @@ export async function startBridge({
             activity();
             yield chunk;
           }
-        } catch {
+        } catch (error) {
           // Report a real failure, never fabricate response.completed or replay
           // a partially executed tool call. Suppress upstream error payloads.
           if (!response.destroyed) {
             const message = controller.signal.aborted
-              ? `Copilot stream inactive for ${streamIdleTimeoutMs} ms. No automatic retry.`
-              : "Copilot stream ended before completion. No automatic retry.";
-            yield Buffer.from(
-              `\n\nevent: response.failed\ndata: ${JSON.stringify({ type: "response.failed", response: { status: "failed", error: { type: "copilot_pilot_error", code: "stream_interrupted", message } } })}\n\n`,
-            );
+              ? `Copilot stream inactive for ${streamIdleTimeoutMs} ms.`
+              : `Copilot stream ended before completion${["COPILOT_UNEXPECTED_EOF", "UND_ERR_SOCKET", "UND_ERR_BODY_TIMEOUT", "ECONNRESET", "ETIMEDOUT", "ABORT_ERR", "INVALID_SSE_JSON", "STREAM_READ_ERROR"].includes(error.code) ? ` (${error.code})` : ""}.`;
+            yield Buffer.from(failedEvent(message));
           }
         }
       }
@@ -198,7 +213,7 @@ export async function startBridge({
           response,
           502,
           controller.signal.aborted
-            ? `Copilot request inactive for ${streamIdleTimeoutMs} ms. No automatic retry.`
+            ? `Copilot request inactive for ${streamIdleTimeoutMs} ms.`
             : "Pilot request failed; check credentials, JSON, size, TLS, and connectivity.",
         );
     } finally {
