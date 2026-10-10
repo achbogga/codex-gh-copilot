@@ -136,6 +136,9 @@ export async function createSdkTransport({
           diagnose({
             ...details,
             model: job.model,
+            context_tier: job.contextTier ?? "default",
+            reasoning_effort: job.reasoningEffort ?? "default",
+            request_bytes: Buffer.byteLength(job.init.body),
             elapsed_ms: Date.now() - job.startedAt,
             sdk_cancelled: context.signal.aborted,
             caller_cancelled: job.init.signal.aborted,
@@ -201,8 +204,15 @@ export async function createSdkTransport({
       const messages = usesMessages(model)
         ? messagesRequest(payload, model)
         : undefined;
+      const contextTier =
+        model?.capabilities?.limits?.max_context_window_tokens >= 1000000
+          ? "long_context"
+          : undefined;
+      const reasoningEffort = payload.reasoning?.effort;
       const session = await client.createSession({
         model: payload.model,
+        contextTier,
+        reasoningEffort,
         availableTools: [],
         onPermissionRequest: async () => ({
           kind: "denied-no-approval-rule-and-could-not-request-from-user",
@@ -218,6 +228,8 @@ export async function createSdkTransport({
         ...Promise.withResolvers(),
         init,
         model: payload.model,
+        contextTier,
+        reasoningEffort,
         startedAt: Date.now(),
         messages,
         started: false,

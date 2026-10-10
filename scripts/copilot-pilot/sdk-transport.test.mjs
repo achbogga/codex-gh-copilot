@@ -4,14 +4,20 @@ import { createSdkTransport } from "./sdk-transport.mjs";
 
 async function fixture(t, upstream, replay = false, messages = false) {
   const requests = [],
-    acknowledgements = [];
+    acknowledgements = [],
+    sessions = [];
   const catalog = {
     data: [
       messages
         ? {
             id: "claude-opus-5.5",
             supported_endpoints: ["/v1/messages"],
-            capabilities: { limits: { max_output_tokens: 128000 } },
+            capabilities: {
+              limits: {
+                max_output_tokens: 128000,
+                max_context_window_tokens: 1000000,
+              },
+            },
           }
         : { id: "test-model", policy: { state: "enabled" } },
     ],
@@ -29,6 +35,11 @@ async function fixture(t, upstream, replay = false, messages = false) {
     }
     async createSession(options) {
       assert.deepEqual(options.availableTools, []);
+      sessions.push({
+        model: options.model,
+        contextTier: options.contextTier,
+        reasoningEffort: options.reasoningEffort,
+      });
       const controller = new AbortController();
       let listener;
       return {
@@ -79,12 +90,13 @@ async function fixture(t, upstream, replay = false, messages = false) {
     },
   });
   t.after(() => sdk.close());
-  return { ...sdk, requests, acknowledgements, catalog };
+  return { ...sdk, requests, acknowledgements, catalog, sessions };
 }
 
 const init = (signal) => ({
   body: JSON.stringify({
     model: "test-model",
+    reasoning: { effort: "max" },
     tools: [{ type: "custom", name: "apply_patch" }],
     input: [
       { type: "custom_tool_call_output", call_id: "call", output: "patched" },
@@ -129,6 +141,9 @@ test("SDK transports native tool events unchanged and acknowledges without an in
     bytes,
   );
   await sdk.close();
+  assert.deepEqual(sdk.sessions, [
+    { model: "test-model", contextTier: undefined, reasoningEffort: "max" },
+  ]);
   assert.deepEqual(sdk.requests, [
     {
       body: request.body,
@@ -339,6 +354,13 @@ test("SDK translates Opus with runtime authentication and real accounting, witho
   assert.equal(sent.authorization, "Bearer runtime-owned-token");
   assert.equal(sent.initiator, "agent");
   assert.deepEqual(JSON.parse(sent.body).output_config, { effort: "max" });
+  assert.deepEqual(sdk.sessions, [
+    {
+      model: "claude-opus-5.5",
+      contextTier: "long_context",
+      reasoningEffort: "max",
+    },
+  ]);
   assert.deepEqual(sdk.acknowledgements, [
     {
       ...message,

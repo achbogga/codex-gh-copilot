@@ -74,14 +74,14 @@ const events = (content = blocks, stop = "tool_use") => [
   },
   { type: "message_stop" },
 ];
-function response(values) {
+function response(values, { doneMarker = false } = {}) {
   const bytes = Buffer.from(
     values
       .map(
         (value) =>
           `event: ${value.type}\r\ndata: ${JSON.stringify(value)}\r\n\r\n`,
       )
-      .join(""),
+      .join("") + (doneMarker ? "data: [DONE]\r\n\r\n" : ""),
   );
   return new Response(
     new ReadableStream({
@@ -220,6 +220,22 @@ test(
     assert.ok(await translated.completion);
   },
 );
+
+test("Copilot DONE trailers preserve completion and accounting but cannot complete a truncated Messages stream", async () => {
+  const request = messagesRequest(payload, model);
+  const complete = messagesResponse(
+    response(events(), { doneMarker: true }),
+    request,
+  );
+  assert.match(await complete.response.text(), /response.completed/);
+  assert.ok(await complete.completion);
+  const truncated = messagesResponse(
+    response(events().slice(0, -1), { doneMarker: true }),
+    request,
+  );
+  await assert.rejects(truncated.response.text(), /before message_stop/);
+  assert.equal(await truncated.completion, null);
+});
 
 test("stream handles fragmented UTF-8 text and refuses truncated, errored or output-limited responses", async () => {
   const text = "Fixed café ✅";

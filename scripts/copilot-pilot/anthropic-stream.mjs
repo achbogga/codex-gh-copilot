@@ -28,7 +28,13 @@ export function messagesResponse(response, request) {
           const line = buffer.slice(0, end).trimEnd();
           buffer = buffer.slice(end + 1);
           if (!line.startsWith("data: ")) continue;
-          const value = JSON.parse(line.slice(6));
+          const data = line.slice(6).trim();
+          if (data === "[DONE]") {
+            if (!stopped)
+              throw new Error("Anthropic stream ended before message_stop.");
+            continue;
+          }
+          const value = JSON.parse(data);
           if (value.type === "error")
             throw new Error("Anthropic inference stream failed.");
           if (value.type === "message_start") {
