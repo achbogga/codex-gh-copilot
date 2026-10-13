@@ -7,6 +7,7 @@ import { messagesRequest, usesMessages } from "./anthropic-request.mjs";
 import { messagesResponse } from "./anthropic-stream.mjs";
 import { responsesResponse } from "./responses-stream.mjs";
 import { appendFileSync, statSync } from "node:fs";
+import { runtimeAcknowledgement } from "./runtime-ack.mjs";
 
 // The official runtime supplies authentication, account routing and model policy.
 // Its request handler carries native Responses or translated Messages payloads
@@ -78,6 +79,7 @@ export async function createSdkTransport({
       )
         throw new Error("Unexpected additional runtime inference request.");
       job.started = true;
+      job.sdkSignal = context.signal;
       const headers = new Headers(request.headers);
       headers.delete("content-length");
       headers.set("x-initiator", job.init.headers["X-Initiator"]);
@@ -104,6 +106,7 @@ export async function createSdkTransport({
             new TransformStream({
               transform(chunk, controller) {
                 job.init.onActivity?.();
+                job.runtimeActivity?.();
                 controller.enqueue(chunk);
               },
             }),
@@ -122,10 +125,20 @@ export async function createSdkTransport({
           throw new Error("Expected an Anthropic event stream.");
         const translated = messagesResponse(response, job.messages);
         job.resolve(translated.response);
-        const acknowledgement = await translated.completion;
-        if (!acknowledgement)
-          throw new Error("Anthropic stream did not complete.");
-        return Response.json(acknowledgement);
+        const runtime = runtimeAcknowledgement(
+          translated.started,
+          translated.completion.then((acknowledgement) => {
+            if (!acknowledgement)
+              throw new Error("Anthropic stream did not complete.");
+            job.completed = true;
+            return acknowledgement;
+          }),
+          () => job.controller.abort(),
+          true,
+        );
+        job.runtimeActivity = runtime.activity;
+        job.sdkResponseStarted = true;
+        return runtime.response;
       }
       if (!response.ok) {
         job.resolve(response);
@@ -146,35 +159,43 @@ export async function createSdkTransport({
           }),
       });
       job.resolve(observed.response);
-      const completed = await observed.completion;
-      if (!completed)
-        throw new Error("Copilot Responses stream did not complete.");
-      // Internal acknowledgement prevents the SDK from executing Codex's tools.
-      // Preserve real token/billing accounting; this is never returned to Codex.
-      return Response.json({
-        ...(completed?.response ?? {}),
-        id: completed?.response?.id ?? "codex-transport-ack",
-        object: "response",
-        status: "completed",
-        output: [
-          {
-            type: "message",
-            role: "assistant",
-            status: "completed",
-            id: "transport-ack",
-            content: [
-              {
-                type: "output_text",
-                text: "Forwarded to Codex.",
-                annotations: [],
-              },
-            ],
-          },
-        ],
-        ...(completed?.copilot_usage
-          ? { copilot_usage: completed.copilot_usage }
-          : {}),
+      const completion = observed.completion.then((completed) => {
+        if (!completed)
+          throw new Error("Copilot Responses stream did not complete.");
+        job.completed = true;
+        // Internal acknowledgement prevents the SDK from executing Codex's tools.
+        // Preserve real token/billing accounting; this is never returned to Codex.
+        return {
+          ...(completed?.response ?? {}),
+          id: completed?.response?.id ?? "codex-transport-ack",
+          object: "response",
+          status: "completed",
+          output: [
+            {
+              type: "message",
+              role: "assistant",
+              status: "completed",
+              id: "transport-ack",
+              content: [
+                {
+                  type: "output_text",
+                  text: "Forwarded to Codex.",
+                  annotations: [],
+                },
+              ],
+            },
+          ],
+          ...(completed?.copilot_usage
+            ? { copilot_usage: completed.copilot_usage }
+            : {}),
+        };
       });
+      const runtime = runtimeAcknowledgement(observed.started, completion, () =>
+        job.controller.abort(),
+      );
+      job.runtimeActivity = runtime.activity;
+      job.sdkResponseStarted = true;
+      return runtime.response;
     }
   }
   const client = new Client({
@@ -213,6 +234,7 @@ export async function createSdkTransport({
         model: payload.model,
         contextTier,
         reasoningEffort,
+        streaming: true,
         availableTools: [],
         onPermissionRequest: async () => ({
           kind: "denied-no-approval-rule-and-could-not-request-from-user",
@@ -242,19 +264,46 @@ export async function createSdkTransport({
       const unsubscribe = session.on((event) => {
         if (event.agentId) return;
         if (event.type === "session.error") {
+          diagnose({
+            code: "SDK_SESSION_ERROR",
+            model: job.model,
+            context_tier: job.contextTier ?? "default",
+            reasoning_effort: job.reasoningEffort ?? "default",
+            request_bytes: Buffer.byteLength(job.init.body),
+            elapsed_ms: Date.now() - job.startedAt,
+            sdk_response_started: job.sdkResponseStarted ?? false,
+            error_type: [
+              "query",
+              "rate_limit",
+              "quota",
+              "authentication",
+              "connection",
+              "timeout",
+            ].includes(event.data?.errorType)
+              ? event.data.errorType
+              : "unknown",
+            sdk_cancelled: job.sdkSignal?.aborted ?? false,
+            caller_cancelled: job.init.signal.aborted,
+            session_cancelled: job.controller.signal.aborted,
+          });
           job.controller.abort();
           outcome.resolve(false);
         }
         if (event.type === "session.idle" && event.data?.mode !== "autopilot")
           outcome.resolve(true);
       });
-      const abort = () => {
+      const abortJob = (force = false) => {
+        // A caller can close immediately after the terminal SSE frame. Allow
+        // the runtime to finish receiving real accounting for that completed
+        // request instead of cancelling its acknowledgement during cleanup.
+        if (job.completed && !force) return;
         job.reject(new Error("Codex request cancelled."));
         job.controller.abort();
         outcome.resolve(false);
         void session.abort().catch(() => {});
       };
-      job.abort = abort;
+      const abort = () => abortJob();
+      job.abort = abortJob;
       init.signal.addEventListener("abort", abort, { once: true });
       if (init.signal.aborted) abort();
       const task = outcome.promise
@@ -284,8 +333,21 @@ export async function createSdkTransport({
     },
     close: async () => {
       for (const job of pending.values()) job.abort();
+      const settled = Promise.allSettled([...tasks]);
+      let timer;
+      try {
+        await Promise.race([
+          settled,
+          new Promise((resolve) => {
+            timer = setTimeout(resolve, 3000);
+          }),
+        ]);
+      } finally {
+        clearTimeout(timer);
+      }
+      for (const job of pending.values()) job.abort(true);
       await client.stop();
-      await Promise.allSettled(tasks);
+      await settled;
     },
   };
 }

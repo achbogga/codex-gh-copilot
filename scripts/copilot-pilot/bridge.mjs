@@ -110,7 +110,9 @@ export async function startBridge({
     const activity = () => {
       if (!controller.signal.aborted) timer.refresh();
     };
-    response.on("close", () => controller.abort());
+    response.on("close", () => {
+      if (!response.writableFinished) controller.abort();
+    });
     try {
       const received = Buffer.from(request.headers.authorization ?? "");
       if (

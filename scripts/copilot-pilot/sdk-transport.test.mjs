@@ -2,10 +2,18 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createSdkTransport } from "./sdk-transport.mjs";
 
-async function fixture(t, upstream, replay = false, messages = false) {
+async function fixture(
+  t,
+  upstream,
+  replay = false,
+  messages = false,
+  headerTimeoutMs,
+) {
   const requests = [],
     acknowledgements = [],
-    sessions = [];
+    sessions = [],
+    responseStarts = [],
+    runtimeEvents = [];
   const catalog = {
     data: [
       messages
@@ -35,6 +43,7 @@ async function fixture(t, upstream, replay = false, messages = false) {
     }
     async createSession(options) {
       assert.deepEqual(options.availableTools, []);
+      assert.equal(options.streaming, true);
       sessions.push({
         model: options.model,
         contextTier: options.contextTier,
@@ -68,7 +77,59 @@ async function fixture(t, upstream, replay = false, messages = false) {
               ),
               { sessionId: "test-session", signal: controller.signal },
             );
-          acknowledgements.push(await (await send()).json());
+          let timer;
+          try {
+            const response = headerTimeoutMs
+              ? await Promise.race([
+                  send(),
+                  new Promise((_, reject) => {
+                    timer = setTimeout(() => {
+                      controller.abort();
+                      reject(
+                        new Error("Synthetic SDK response-header timeout."),
+                      );
+                    }, headerTimeoutMs);
+                  }),
+                ])
+              : await send();
+            clearTimeout(timer);
+            responseStarts.push({ status: response.status });
+            assert.match(
+              response.headers.get("content-type"),
+              /^text\/event-stream/,
+            );
+            let buffer = "",
+              message,
+              text = "",
+              completed;
+            for await (const chunk of response.body) {
+              buffer += Buffer.from(chunk).toString();
+              let end;
+              while ((end = buffer.indexOf("\n")) >= 0) {
+                const line = buffer.slice(0, end);
+                buffer = buffer.slice(end + 1);
+                if (!line.startsWith("data: ")) continue;
+                const event = JSON.parse(line.slice(6));
+                runtimeEvents.push(event);
+                if (event.type === "response.completed")
+                  completed = event.response;
+                if (event.type === "message_start") message = event.message;
+                if (event.type === "content_block_delta")
+                  text += event.delta.text;
+                if (event.type === "message_delta") {
+                  Object.assign(message, event.delta);
+                  Object.assign(message.usage, event.usage);
+                  if (event.copilot_usage)
+                    message.copilot_usage = event.copilot_usage;
+                }
+                if (event.type === "message_stop")
+                  completed = { ...message, content: [{ type: "text", text }] };
+              }
+            }
+            if (completed) acknowledgements.push(completed);
+          } finally {
+            clearTimeout(timer);
+          }
           if (replay) await send();
           listener?.({ type: "session.idle", data: {} });
         },
@@ -90,7 +151,15 @@ async function fixture(t, upstream, replay = false, messages = false) {
     },
   });
   t.after(() => sdk.close());
-  return { ...sdk, requests, acknowledgements, catalog, sessions };
+  return {
+    ...sdk,
+    requests,
+    acknowledgements,
+    catalog,
+    sessions,
+    responseStarts,
+    runtimeEvents,
+  };
 }
 
 const init = (signal) => ({
@@ -108,6 +177,100 @@ const init = (signal) => ({
   },
   signal,
 });
+
+test(
+  "SDK receives headers and liveness before long inference finishes, then only real accounting",
+  { timeout: 3000 },
+  async (t) => {
+    const completed = {
+      type: "response.completed",
+      response: {
+        id: "long-inference",
+        usage: { input_tokens: 20, output_tokens: 7 },
+      },
+      copilot_usage: { total_nano_aiu: 321 },
+    };
+    const chunks = [];
+    const sdk = await fixture(
+      t,
+      (request) =>
+        new Response(
+          new ReadableStream({
+            start(controller) {
+              const send = (event) => {
+                const data = `data: ${JSON.stringify(event)}\n\n`;
+                chunks.push(data);
+                controller.enqueue(Buffer.from(data));
+              };
+              send({
+                type: "response.created",
+                response: { id: "long-inference" },
+              });
+              const timer = setInterval(
+                () => send({ type: "response.in_progress" }),
+                30,
+              );
+              const finish = setTimeout(() => {
+                clearInterval(timer);
+                request.signal.removeEventListener("abort", abort);
+                send(completed);
+                controller.close();
+              }, 250);
+              const abort = () => {
+                clearInterval(timer);
+                clearTimeout(finish);
+                controller.error(new Error("Synthetic request cancelled."));
+              };
+              request.signal.addEventListener("abort", abort, { once: true });
+            },
+          }),
+          { headers: { "content-type": "text/event-stream" } },
+        ),
+      false,
+      false,
+      80,
+    );
+    const response = await sdk.transport(
+      "https://api.githubcopilot.com/responses",
+      init(new AbortController().signal),
+    );
+    const output = response.text();
+    while (!sdk.responseStarts.length)
+      await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(sdk.responseStarts, [{ status: 200 }]);
+    assert.deepEqual(
+      sdk.acknowledgements,
+      [],
+      "Headers and activity must not acknowledge unfinished inference.",
+    );
+    while (
+      !sdk.runtimeEvents.some(
+        (event) => event.type === "response.output_text.delta",
+      )
+    )
+      await new Promise((resolve) => setImmediate(resolve));
+    assert.ok(
+      !sdk.runtimeEvents.some((event) => event.type === "response.completed"),
+    );
+    assert.equal(
+      await output,
+      chunks.join(""),
+      "SDK liveness must never change Codex's model stream.",
+    );
+    await sdk.close();
+    assert.equal(sdk.requests.length, 1);
+    assert.equal(sdk.acknowledgements.length, 1);
+    assert.deepEqual(sdk.acknowledgements[0].usage, completed.response.usage);
+    assert.deepEqual(
+      sdk.acknowledgements[0].copilot_usage,
+      completed.copilot_usage,
+    );
+    assert.equal(
+      sdk.acknowledgements[0].output[0].content[0].text,
+      "Forwarded to Codex.",
+    );
+  },
+);
 
 test("SDK transports native tool events unchanged and acknowledges without an inner tool loop", async (t) => {
   const completed = {
@@ -366,6 +529,7 @@ test("SDK translates Opus with runtime authentication and real accounting, witho
       ...message,
       content: [{ type: "text", text: "Forwarded to Codex." }],
       stop_reason: "end_turn",
+      stop_sequence: null,
       copilot_usage: { total_nano_aiu: 55 },
     },
   ]);

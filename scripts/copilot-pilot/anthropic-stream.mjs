@@ -1,8 +1,12 @@
 import { Readable } from "node:stream";
 import { thinkingPrefix } from "./anthropic-request.mjs";
 
+const maxEventBytes = 32 * 1024 * 1024;
+const maxContentBytes = 32 * 1024 * 1024;
+
 export function messagesResponse(response, request) {
   const finished = Promise.withResolvers();
+  const started = Promise.withResolvers();
   const encode = (event) => Buffer.from(`data: ${JSON.stringify(event)}\n\n`);
   async function* stream() {
     let message,
@@ -10,23 +14,27 @@ export function messagesResponse(response, request) {
       item,
       partial = "",
       buffer = "",
-      size = 0,
+      contentBytes = 0,
       stopped = false;
     const output = [],
       decoder = new TextDecoder();
     const event = (type, data = {}) => encode({ type, ...data });
     const itemEvent = (type) =>
       event(type, { output_index: output.length, item });
+    const accountContent = (text) => {
+      contentBytes += Buffer.byteLength(text);
+      if (contentBytes > maxContentBytes)
+        throw new Error("Anthropic output content exceeds 32 MiB.");
+    };
     try {
       for await (const chunk of response.body) {
-        size += chunk.length;
-        if (size > 8 * 1024 * 1024)
-          throw new Error("Anthropic response exceeds 8 MiB.");
         buffer += decoder.decode(chunk, { stream: true });
         let end;
         while ((end = buffer.indexOf("\n")) >= 0) {
           const line = buffer.slice(0, end).trimEnd();
           buffer = buffer.slice(end + 1);
+          if (Buffer.byteLength(line) > maxEventBytes)
+            throw new Error("Anthropic event exceeds 32 MiB.");
           if (!line.startsWith("data: ")) continue;
           const data = line.slice(6).trim();
           if (data === "[DONE]") {
@@ -35,15 +43,38 @@ export function messagesResponse(response, request) {
             continue;
           }
           const value = JSON.parse(data);
-          if (value.type === "error")
-            throw new Error("Anthropic inference stream failed.");
+          if (value.copilot_usage && message)
+            message.copilot_usage = value.copilot_usage;
+          if (value.type === "error") {
+            const type = value.error?.type;
+            const code =
+              {
+                api_error: "server_error",
+                overloaded_error: "server_is_overloaded",
+                timeout_error: "stream_interrupted",
+                request_too_large: "context_length_exceeded",
+              }[type] ?? "invalid_prompt";
+            // In-stream denials are terminal, just like HTTP 4xx. Never turn
+            // quota, authentication or policy errors into transport retries.
+            yield event("response.failed", {
+              response: {
+                status: "failed",
+                error: { code, message: "Copilot Anthropic inference failed." },
+              },
+            });
+            return;
+          }
           if (value.type === "message_start") {
             message = value.message;
+            if (value.copilot_usage)
+              message.copilot_usage = value.copilot_usage;
+            started.resolve(message);
             yield event("response.created", {
               response: { id: message.id, status: "in_progress", output: [] },
             });
           } else if (value.type === "content_block_start") {
             block = value.content_block;
+            accountContent(JSON.stringify(block));
             partial = "";
             const id = `${message.id}_${value.index}`;
             if (block.type === "text")
@@ -75,6 +106,7 @@ export function messagesResponse(response, request) {
           } else if (value.type === "content_block_delta") {
             const delta = value.delta;
             if (delta.type === "text_delta") {
+              accountContent(delta.text);
               block.text += delta.text;
               yield event("response.output_text.delta", {
                 item_id: item.id,
@@ -82,17 +114,21 @@ export function messagesResponse(response, request) {
                 content_index: 0,
                 delta: delta.text,
               });
-            } else if (delta.type === "input_json_delta")
+            } else if (delta.type === "input_json_delta") {
+              accountContent(delta.partial_json);
               partial += delta.partial_json;
-            else if (delta.type === "thinking_delta") {
+            } else if (delta.type === "thinking_delta") {
+              accountContent(delta.thinking);
               block.thinking += delta.thinking;
               // Keep the SSE inactivity timer alive without exposing signed thinking.
               yield event("response.in_progress", {
                 response: { id: message.id, status: "in_progress" },
               });
-            } else if (delta.type === "signature_delta")
+            } else if (delta.type === "signature_delta") {
+              accountContent(delta.signature);
               block.signature = (block.signature ?? "") + delta.signature;
-            else throw new Error(`Unsupported Anthropic delta: ${delta.type}`);
+            } else
+              throw new Error(`Unsupported Anthropic delta: ${delta.type}`);
           } else if (value.type === "content_block_stop") {
             if (block.type === "text")
               item.content = [
@@ -165,20 +201,21 @@ export function messagesResponse(response, request) {
               output.push(item);
             }
             stopped = true;
+            finished.resolve({
+              ...message,
+              stop_reason: "end_turn",
+              content: [{ type: "text", text: "Forwarded to Codex." }],
+            });
             yield event("response.completed", { response: completed });
+            return; // message_stop is terminal; EOF and DONE trailers are optional.
           }
-          if (value.copilot_usage && message)
-            message.copilot_usage = value.copilot_usage;
         }
+        if (Buffer.byteLength(buffer) > maxEventBytes)
+          throw new Error("Anthropic event exceeds 32 MiB.");
       }
       if (!stopped) throw new Error("Incomplete Anthropic event stream.");
-      // Acknowledge real usage to the SDK, without asking its agent to run tools.
-      finished.resolve({
-        ...message,
-        stop_reason: "end_turn",
-        content: [{ type: "text", text: "Forwarded to Codex." }],
-      });
     } finally {
+      started.resolve(null);
       finished.resolve(null);
     }
   }
@@ -187,5 +224,6 @@ export function messagesResponse(response, request) {
       headers: { "content-type": "text/event-stream" },
     }),
     completion: finished.promise,
+    started: started.promise,
   };
 }

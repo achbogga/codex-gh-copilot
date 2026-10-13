@@ -245,16 +245,77 @@ test("stream handles fragmented UTF-8 text and refuses truncated, errored or out
   );
   assert.match(await translated.response.text(), /Fixed café ✅/);
   assert.ok(await translated.completion);
-  for (const values of [
-    events().slice(0, -1),
-    events(blocks, "max_tokens"),
-    [{ type: "error", error: { message: "private upstream data" } }],
-  ]) {
+  for (const values of [events().slice(0, -1), events(blocks, "max_tokens")]) {
     const failed = messagesResponse(
       response(values),
       messagesRequest(payload, model),
     );
     await assert.rejects(failed.response.text(), /Anthropic/);
     assert.equal(await failed.completion, null);
+  }
+});
+
+test("Messages stream accepts more than 8 MiB of SSE framing without enlarging decoded output", async () => {
+  const comment = ":" + "padding".repeat(20000) + "\n\n";
+  const body = new ReadableStream({
+    start(controller) {
+      for (let n = 0; n < 65; n++) controller.enqueue(Buffer.from(comment));
+      for (const value of events())
+        controller.enqueue(Buffer.from(`data: ${JSON.stringify(value)}\n\n`));
+      controller.close();
+    },
+  });
+  const translated = messagesResponse(
+    new Response(body),
+    messagesRequest(payload, model),
+  );
+  assert.match(await translated.response.text(), /response.completed/);
+  assert.ok(await translated.completion);
+});
+
+test("message_stop completes accounting without EOF and survives immediate reader cancellation", async () => {
+  const body = new ReadableStream({
+    start(controller) {
+      for (const value of events())
+        controller.enqueue(Buffer.from(`data: ${JSON.stringify(value)}\n\n`));
+    },
+  });
+  const translated = messagesResponse(
+    new Response(body),
+    messagesRequest(payload, model),
+  );
+  const reader = translated.response.body.getReader();
+  while (
+    !Buffer.from((await reader.read()).value)
+      .toString()
+      .includes('"type":"response.completed"')
+  ) {}
+  await reader.cancel();
+  const acknowledgement = await translated.completion;
+  assert.equal(acknowledgement.usage.output_tokens, 7);
+  assert.deepEqual(acknowledgement.copilot_usage, { total_nano_aiu: 123 });
+});
+
+test("Messages in-stream errors retain size/server classification and stop quota/policy retries", async () => {
+  for (const [type, code] of [
+    ["request_too_large", "context_length_exceeded"],
+    ["overloaded_error", "server_is_overloaded"],
+    ["api_error", "server_error"],
+    ["rate_limit_error", "invalid_prompt"],
+    ["permission_error", "invalid_prompt"],
+    ["authentication_error", "invalid_prompt"],
+    ["billing_error", "invalid_prompt"],
+    ["future_unknown_rejection", "invalid_prompt"],
+  ]) {
+    const translated = messagesResponse(
+      response([
+        { type: "error", error: { type, message: "private upstream data" } },
+      ]),
+      messagesRequest(payload, model),
+    );
+    const output = await translated.response.text();
+    assert.match(output, new RegExp(`"code":"${code}"`));
+    assert.doesNotMatch(output, /response.completed|private upstream data/);
+    assert.equal(await translated.completion, null);
   }
 });

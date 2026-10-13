@@ -1,7 +1,10 @@
 // Preserve Responses events and acknowledge only a genuine completed/interrupted
 // terminal response. Never turn an unexpected EOF into a successful completion.
+const maxEventBytes = 32 * 1024 * 1024;
+
 export function responsesResponse(response, { onDiagnostic = () => {} } = {}) {
   const finished = Promise.withResolvers();
+  const started = Promise.withResolvers();
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let completed,
@@ -13,8 +16,18 @@ export function responsesResponse(response, { onDiagnostic = () => {} } = {}) {
     cancelled = false,
     buffer = "";
   const observe = (line) => {
+    if (Buffer.byteLength(line) > maxEventBytes)
+      throw new Error("Oversized Copilot event.");
     if (!/^data:\s*\{/.test(line)) return;
     const event = JSON.parse(line.slice(5).trim());
+    if (
+      [
+        "response.created",
+        "response.completed",
+        "response.incomplete",
+      ].includes(event.type)
+    )
+      started.resolve(event.response ?? {});
     events++;
     // Only protocol names, counts and allowlisted reasons enter diagnostics.
     lastEvent =
@@ -38,6 +51,9 @@ export function responsesResponse(response, { onDiagnostic = () => {} } = {}) {
         event.response?.incomplete_details?.reason === "interrupted"
       )
         completed = event;
+      // The terminal event is sufficient. Waiting for EOF can deadlock the SDK
+      // acknowledgement when the provider keeps its HTTP connection open.
+      if (completed) finished.resolve(completed);
       if (!completed) {
         const errorCodes = [
           "server_error",
@@ -91,6 +107,7 @@ export function responsesResponse(response, { onDiagnostic = () => {} } = {}) {
         if (cancelled) return;
         if (done) {
           observe(buffer + decoder.decode());
+          started.resolve(null);
           if (!terminal) {
             const error = new Error(
               "Copilot closed the stream without a terminal event.",
@@ -107,13 +124,13 @@ export function responsesResponse(response, { onDiagnostic = () => {} } = {}) {
         }
         bytes += chunk.length;
         buffer += decoder.decode(chunk, { stream: true });
-        if (buffer.length > 8 * 1024 * 1024)
-          throw new Error("Oversized Copilot event.");
         let end;
         while ((end = buffer.indexOf("\n")) >= 0) {
           observe(buffer.slice(0, end).trimEnd());
           buffer = buffer.slice(end + 1);
         }
+        if (Buffer.byteLength(buffer) > maxEventBytes)
+          throw new Error("Oversized Copilot event.");
         controller.enqueue(chunk);
         if (pendingFailure) {
           controller.enqueue(pendingFailure);
@@ -121,6 +138,7 @@ export function responsesResponse(response, { onDiagnostic = () => {} } = {}) {
         }
       } catch (error) {
         if (cancelled) return;
+        started.resolve(null);
         const known = [
           "COPILOT_UNEXPECTED_EOF",
           "UND_ERR_SOCKET",
@@ -163,6 +181,7 @@ export function responsesResponse(response, { onDiagnostic = () => {} } = {}) {
     },
     async cancel(reason) {
       cancelled = true;
+      started.resolve(null);
       // Codex may stop reading as soon as it sees the terminal event, before EOF.
       finished.resolve(completed ?? null);
       await reader.cancel(reason);
@@ -174,5 +193,6 @@ export function responsesResponse(response, { onDiagnostic = () => {} } = {}) {
       headers: response.headers,
     }),
     completion: finished.promise,
+    started: started.promise,
   };
 }

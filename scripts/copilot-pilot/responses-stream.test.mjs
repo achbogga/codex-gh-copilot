@@ -2,6 +2,22 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { responsesResponse } from "./responses-stream.mjs";
 
+test("large coalesced Responses chunks are bounded per event and forwarded unchanged", async () => {
+  const padding = (":" + "padding".repeat(20000) + "\n\n").repeat(65);
+  const terminal = {
+    type: "response.completed",
+    response: {
+      id: "large-chunk",
+      usage: { input_tokens: 12, output_tokens: 7 },
+    },
+  };
+  const bytes = padding + `data: ${JSON.stringify(terminal)}\n\n`;
+  assert.ok(Buffer.byteLength(bytes) > 8 * 1024 * 1024);
+  const observed = responsesResponse(new Response(bytes));
+  assert.equal(await observed.response.text(), bytes);
+  assert.deepEqual(await observed.completion, terminal);
+});
+
 for (const type of ["response.failed", "response.incomplete"])
   test(`preserves ${type} instead of overwriting it with a disconnect`, async () => {
     const value = {
