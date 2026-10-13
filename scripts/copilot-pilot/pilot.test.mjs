@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { once } from "node:events";
 import { createServer } from "node:http";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import { Readable } from "node:stream";
 import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
 import { listModels, startBridge } from "./bridge.mjs";
@@ -159,7 +161,7 @@ test("preserves payload and SSE bytes; sets honest user/tool continuation header
   );
 });
 
-test("rejects unauthorized, browser, wrong route, oversized and mismatched requests before upstream", async (t) => {
+test("rejects unauthorized, browser, wrong route and mismatched requests before upstream", async (t) => {
   let count = 0;
   const bridge = await fixture(t, (_req, res) => {
     count++;
@@ -176,7 +178,6 @@ test("rejects unauthorized, browser, wrong route, oversized and mismatched reque
     [`${bridge.url}/unknown`, payload, {}, 404],
     [bridge.url, { ...payload, model: "other" }, {}, 400],
     [bridge.url, { ...payload, stream: false }, {}, 400],
-    [bridge.url, { ...payload, input: "x".repeat(8 * 1024 * 1024) }, {}, 413],
   ];
   for (const [url, body, options, status] of checks) {
     const result = await send(url, body, options);
@@ -186,8 +187,70 @@ test("rejects unauthorized, browser, wrong route, oversized and mismatched reque
   assert.equal(count, 0);
 });
 
+test("forwards history above the old 8 MiB limit and at the 32 MiB boundary without changing bytes", async (t) => {
+  const received = [];
+  const bridge = await fixture(t, async (req, res) => {
+    const hash = createHash("sha256");
+    let bytes = 0;
+    for await (const chunk of req) {
+      bytes += chunk.length;
+      hash.update(chunk);
+    }
+    received.push({ bytes, hash: hash.digest("hex") });
+    res.writeHead(200, { "content-type": "text/event-stream" });
+    res.end(sse([completed]));
+  });
+  const expected = [];
+  const overhead = Buffer.byteLength(JSON.stringify({ ...payload, input: "" }));
+  for (const [bytes, chunked] of [
+    [9 * 1024 * 1024, false],
+    [32 * 1024 * 1024, true],
+  ]) {
+    const body = JSON.stringify({
+      ...payload,
+      input: "x".repeat(bytes - overhead),
+    });
+    expected.push({
+      bytes,
+      hash: createHash("sha256").update(body).digest("hex"),
+    });
+    const result = await send(bridge.url, payload, {
+      body: chunked ? Readable.from([body]) : body,
+      ...(chunked ? { duplex: "half" } : {}),
+    });
+    assert.equal(result.status, 200);
+    assert.equal(await result.text(), sse([completed]));
+  }
+  assert.deepEqual(received, expected);
+});
+
+test("declared and chunked requests over 32 MiB stop before upstream with a native context-limit failure", async (t) => {
+  let count = 0;
+  const bridge = await fixture(t, (_req, res) => {
+    count++;
+    res.end();
+  });
+  const body = JSON.stringify({
+    ...payload,
+    input: "x".repeat(32 * 1024 * 1024),
+  });
+  for (const chunked of [false, true]) {
+    const result = await send(bridge.url, payload, {
+      body: chunked ? Readable.from([body]) : body,
+      ...(chunked ? { duplex: "half" } : {}),
+    });
+    assert.equal(result.status, 200);
+    assert.equal(result.headers.get("content-type"), "text/event-stream");
+    const text = await result.text();
+    assert.match(text, /"code":"context_length_exceeded"/);
+    assert.match(text, /32 MiB/);
+    assert.doesNotMatch(text, /response.completed|upstream-test-secret/);
+  }
+  assert.equal(count, 0);
+});
+
 test("redacts errors and makes no retries on auth, policy, quota or compatibility failures", async (t) => {
-  for (const status of [400, 401, 403, 429, 500]) {
+  for (const status of [400, 401, 403, 413, 429, 500]) {
     let count = 0;
     const bridge = await fixture(t, (_req, res) => {
       count++;
@@ -198,7 +261,13 @@ test("redacts errors and makes no retries on auth, policy, quota or compatibilit
     assert.equal(result.status, status < 500 ? 200 : status);
     assert.equal(result.headers.get("retry-after"), "7");
     const text = await result.text();
-    if (status < 500) assert.match(text, /"code":"invalid_prompt"/);
+    if (status < 500)
+      assert.match(
+        text,
+        status === 413
+          ? /"code":"context_length_exceeded"/
+          : /"code":"invalid_prompt"/,
+      );
     assert.doesNotMatch(text, /upstream-test-secret|private context/);
     assert.equal(count, 1);
   }

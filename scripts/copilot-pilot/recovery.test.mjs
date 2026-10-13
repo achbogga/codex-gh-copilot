@@ -14,6 +14,7 @@ const encode = (events) =>
   Buffer.from(
     events.map((value) => `data: ${JSON.stringify(value)}\n\n`).join(""),
   );
+
 const done = {
   type: "response.completed",
   response: {
@@ -195,3 +196,133 @@ for (const mode of [
       }
     },
   );
+
+test(
+  "native Codex classifies HTTP 413 as full context and compacts on resumed continuation",
+  { skip: !process.env.COPILOT_PILOT_CODEX_BIN, timeout: 40000 },
+  async (t) => {
+    const root = await mkdtemp(join(homedir(), ".copilot-size-recovery-test-"));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const state = join(root, "state");
+    await mkdir(state);
+    const requests = [];
+    const bridge = await startBridge({
+      getToken: async () => "synthetic",
+      localToken: "local",
+      model: "gpt-6.1-sol",
+      transport: async (_url, init) => {
+        requests.push(JSON.parse(init.body));
+        if (requests.length === 1)
+          return new Response("private upstream size error", { status: 413 });
+        const output =
+          requests.length === 2
+            ? "Synthetic compacted progress."
+            : "RECOVERED_OK";
+        return new Response(
+          encode([
+            {
+              type: "response.output_item.done",
+              item: {
+                type: "message",
+                id: "size-check",
+                role: "assistant",
+                content: [{ type: "output_text", text: output }],
+              },
+            },
+            done,
+          ]),
+          { headers: { "content-type": "text/event-stream" } },
+        );
+      },
+    });
+    t.after(() => bridge.close());
+    const run = async (args) => {
+      const invocation = codexInvocation({
+        model: "gpt-6.1-sol",
+        url: bridge.url,
+        localToken: "local",
+        stateDir: state,
+        args: [
+          "--yolo",
+          "-c",
+          'model_reasoning_effort="max"',
+          "-c",
+          "model_context_window=1050000",
+          ...args,
+        ],
+      });
+      const pending = promisify(execFile)(
+        process.env.COPILOT_PILOT_CODEX_BIN,
+        invocation.args,
+        {
+          cwd: root,
+          env: invocation.env,
+          timeout: 30000,
+          maxBuffer: 1024 * 1024,
+        },
+      );
+      pending.child.stdin.end();
+      return pending;
+    };
+    let failure;
+    try {
+      await run([
+        "exec",
+        "--skip-git-repo-check",
+        "--json",
+        "Run the synthetic size recovery check.",
+      ]);
+    } catch (error) {
+      failure = error;
+    }
+    assert.ok(
+      failure,
+      "The oversized request must fail without pretending it completed.",
+    );
+    assert.match(
+      failure.stdout + failure.stderr,
+      /context[_ ](?:window|length)/i,
+    );
+    assert.equal(
+      requests.length,
+      1,
+      "A size rejection must not use stream retries.",
+    );
+    const events = failure.stdout
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    const threadId = events.find(
+      (event) => event.type === "thread.started",
+    ).thread_id;
+    const continued = await run([
+      "exec",
+      "resume",
+      "--skip-git-repo-check",
+      "--json",
+      threadId,
+      "Continue the synthetic size recovery check.",
+    ]);
+    assert.match(continued.stdout, /RECOVERED_OK/);
+    assert.equal(
+      requests.length,
+      3,
+      "Resume must summarize once before continuing inference.",
+    );
+    assert.equal(
+      requests[1].tools?.length ?? 0,
+      0,
+      "Compaction must use the native summary request.",
+    );
+    assert.deepEqual(
+      requests[2].tools,
+      requests[0].tools,
+      "Continuation must preserve the original tool configuration.",
+    );
+    assert.ok(
+      JSON.stringify(requests[2].input).includes(
+        "Synthetic compacted progress.",
+      ),
+    );
+  },
+);

@@ -5,7 +5,11 @@ import { pipeline } from "node:stream/promises";
 import { usesMessages } from "./anthropic-request.mjs";
 
 const upstream = "https://api.githubcopilot.com";
-const maxBody = 8 * 1024 * 1024;
+// Copilot CLI 1.0.74 raised the CAPI Responses request ceiling to 32 MiB.
+// Byte limits are separate from model token limits, especially with encrypted
+// reasoning in long sessions. Keep model discovery's smaller bound independent.
+const maxRequestBody = 32 * 1024 * 1024;
+const maxCatalogBody = 8 * 1024 * 1024;
 
 function fail(response, status, message) {
   response.writeHead(status, { "content-type": "application/json" });
@@ -18,6 +22,18 @@ function failedEvent(message, code = "stream_interrupted") {
   return `\n\nevent: response.failed\ndata: ${JSON.stringify({ type: "response.failed", response: { status: "failed", error: { type: "copilot_pilot_error", code, message } } })}\n\n`;
 }
 
+function failContextLimit(response, message) {
+  // A raw 413 is an unknown HTTP error to Codex and leaves token accounting
+  // below the compaction threshold. This explicit failure marks context full,
+  // so native local compaction can run on the next turn, without stream retries.
+  response.writeHead(200, {
+    "content-type": "text/event-stream",
+    "cache-control": "no-store",
+    "connection": "close",
+  });
+  response.end(failedEvent(message, "context_length_exceeded"));
+}
+
 function headers(token) {
   if (!token || /\s/.test(token)) throw new Error("Invalid credential.");
   return {
@@ -27,12 +43,17 @@ function headers(token) {
   };
 }
 
-async function readBounded(stream) {
+async function readBounded(stream, limit, destroyOnReturn = true) {
   const chunks = [];
   let size = 0;
-  for await (const chunk of stream) {
+  // Breaking an IncomingMessage's default iterator destroys its socket before
+  // we can return the classified size error for chunked uploads.
+  for await (const chunk of stream.iterator({ destroyOnReturn })) {
     size += chunk.length;
-    if (size > maxBody) throw new Error("Body exceeds pilot limit.");
+    if (size > limit)
+      throw Object.assign(new Error("Body exceeds pilot limit."), {
+        code: "PILOT_BODY_TOO_LARGE",
+      });
     chunks.push(chunk);
   }
   return Buffer.concat(chunks);
@@ -56,7 +77,7 @@ export async function listModels(
     );
   }
   const catalog = JSON.parse(
-    await readBounded(Readable.fromWeb(response.body)),
+    await readBounded(Readable.fromWeb(response.body), maxCatalogBody),
   );
   if (!Array.isArray(catalog.data)) throw new Error("Invalid model catalog.");
   return catalog.data.filter(
@@ -108,10 +129,13 @@ export async function startBridge({
         !request.headers["content-type"]?.startsWith("application/json")
       )
         return fail(response, 415, "Expected uncompressed JSON.");
-      if (Number(request.headers["content-length"]) > maxBody) {
-        return fail(response, 413, "Request exceeds the 8 MiB pilot limit.");
+      if (Number(request.headers["content-length"]) > maxRequestBody) {
+        return failContextLimit(
+          response,
+          "Request exceeds Copilot's 32 MiB request limit. Compact the conversation before continuing.",
+        );
       }
-      const body = await readBounded(request);
+      const body = await readBounded(request, maxRequestBody, false);
       const payload = JSON.parse(body);
       if (
         payload?.model !== model ||
@@ -158,6 +182,11 @@ export async function startBridge({
         await result.body?.cancel();
         // Upstream error bodies can echo request data or credentials. Never relay them.
         const status = result.status >= 400 ? result.status : 502;
+        if (status === 413)
+          return failContextLimit(
+            response,
+            "Copilot rejected the request as too large (HTTP 413). Compact the conversation before continuing.",
+          );
         const message = `Copilot returned HTTP ${result.status}; check authentication, policy, model compatibility, or budget.`;
         if (status >= 400 && status < 500) {
           // Native Codex retries unknown HTTP statuses. Encode an explicit
@@ -206,8 +235,13 @@ export async function startBridge({
         }
       }
       await pipeline(Readable.from(stream()), response);
-    } catch {
+    } catch (error) {
       if (response.headersSent) response.destroy();
+      else if (!response.destroyed && error.code === "PILOT_BODY_TOO_LARGE")
+        failContextLimit(
+          response,
+          "Request exceeds Copilot's 32 MiB request limit. Compact the conversation before continuing.",
+        );
       else if (!response.destroyed)
         fail(
           response,

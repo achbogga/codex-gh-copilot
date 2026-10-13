@@ -31,6 +31,8 @@ Later October 9 failures occurred after about 47 and 97 seconds, with reasoning 
 
 Compaction uses Codex's native local summarization through the normal model endpoint. The provider explicitly sets `capabilities.remote_compaction="unsupported"`, since the bridge does not implement the new remote compaction protocol. `model_auto_compact_token_limit_scope="total"` counts the whole context. GPT's 875,900-token and Opus's 828,400-token thresholds retain output headroom; the full context windows and max reasoning defaults are unchanged. Compaction itself can take time and obeys the same inactivity watchdog.
 
+Requests have a separate 32 MiB byte ceiling, matching the [Copilot Responses limit introduced in CLI 1.0.74](https://github.com/github/copilot-cli/issues/4183#issuecomment-5088784470). The previous local 8 MiB cap could block long histories below their token-based compaction threshold, especially with opaque reasoning state. Local size failures and upstream HTTP 413 responses now produce an explicit `context_length_exceeded` failure. Codex marks context full and runs native local compaction before the next turn instead of reconnecting with the same oversized request. Both declared-length and chunked uploads enforce the byte ceiling. Model discovery retains its independent 8 MiB bound.
+
 Restart existing `cxf` and `cxo` processes after upgrading to load the updated adapter and binary. Existing sessions can then be resumed normally.
 
 ### Opus 5.5 option
@@ -112,7 +114,7 @@ In Docker mode, GitHub credentials remain outside the container. A private Unix 
 ## Model transport limits
 
 - ChatGPT-hosted features are not conferred by a Copilot seat. Copilot-specific governance controls are not automatically equivalent to Codex's controls; enterprise approval of this custom client and its data handling remains an organizational question.
-- Access denials and unsupported models fail closed. Inference requests are not retried automatically, upstream HTTP error bodies are suppressed, requests are bounded to 8 MiB, and a disconnected caller cancels inference. TLS verification stays enabled.
+- Access denials and unsupported models fail closed. The adapter forwards each request once; Codex owns the bounded stream recovery described above. Upstream HTTP error bodies are suppressed, inference requests are bounded to 32 MiB, and a disconnected caller cancels inference. Size failures enter Codex's context-limit handling. TLS verification stays enabled.
 
 The SDK transport hook is experimental and pinned to SDK 1.0.19. Its internal completion acknowledgement preserves the real usage/accounting while preventing the runtime from executing Codex tool calls. Successful Responses output reaches Codex unchanged; generic protocol errors can be classified into Responses failure events.
 
@@ -136,6 +138,8 @@ Release reminders appear when launching `codex-copilot`, `cx`, or `cxf` in a ter
 Stop scheduled checks with `systemctl --user disable --now codex-copilot-updates.timer`. To adopt upstream source, first review `git log HEAD..upstream/main`; fetching alone does not update the installed Codex binary.
 
 ## Validation
+
+The October 13 size investigation found about 9.1 MB of serialized response history since the last compaction in the affected session, with the last request using 360,118 input tokens. The old 8 MiB bridge cap explains that local rejection independently of the token window. Boundary checks forward 9 MiB and exactly 32 MiB unchanged, reject declared and chunked uploads above 32 MiB before upstream inference, and redact upstream HTTP 413 bodies. An installed-Codex check verifies that a size rejection is not stream-retried and that resuming the same synthetic session performs native local summarization before continuing.
 
 The October 10 check followed GitHub's [context-window documentation](https://docs.github.com/en/copilot/reference/ai-models/supported-models#models-with-extended-capabilities). The official runtime reported no explicit tier when the adapter omitted it, and reported `long_context` with `max` reasoning when those options were selected. After aligning the SDK session with the Codex request, both GPT-6.1 Sol and Opus 5.5 completed a short live inference check. A live Opus check also exposed Copilot's `[DONE]` SSE trailer, which the Messages translator previously tried to parse as JSON. The translator now accepts that trailer only after a genuine `message_stop`; a premature trailer remains a failed stream. The 13 SDK and streaming checks passed. This confirms the settings are applied; it does not establish that the historical stream failures were caused by tier selection.
 
