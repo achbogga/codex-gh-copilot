@@ -1,7 +1,7 @@
-// Only models whose Messages protocol has been exercised by this adapter.
+// The seat catalog owns protocol selection, rather than a fixed model name.
 export const usesMessages = (model) =>
-  model?.id === "claude-opus-5.5" &&
-  model.supported_endpoints?.includes("/v1/messages");
+  model?.supported_endpoints?.includes("/v1/messages") === true &&
+  !model.supported_endpoints.includes("/responses");
 
 export const thinkingPrefix = "copilot-anthropic-v1:";
 
@@ -102,20 +102,15 @@ export function messagesRequest(payload, model) {
         append(item.role, blocks);
       else throw new Error("Unsupported Anthropic message role.");
     } else if (item.type === "reasoning") {
-      if (!item.encrypted_content?.startsWith(thinkingPrefix))
-        throw new Error(
-          "Start a fresh Opus session; reasoning from another provider cannot be replayed.",
-        );
+      if (!item.encrypted_content?.startsWith(thinkingPrefix)) continue; // Opaque reasoning belongs to its original provider, not the new model.
       const saved = JSON.parse(
         Buffer.from(
           item.encrypted_content.slice(thinkingPrefix.length),
           "base64",
         ).toString(),
       );
-      if (
-        saved.model !== payload.model ||
-        !["thinking", "redacted_thinking"].includes(saved.block?.type)
-      )
+      if (saved.model !== payload.model) continue;
+      if (!["thinking", "redacted_thinking"].includes(saved.block?.type))
         throw new Error("Incompatible Anthropic thinking block.");
       append("assistant", [saved.block]);
     } else if (["function_call", "custom_tool_call"].includes(item.type)) {
@@ -155,8 +150,22 @@ export function messagesRequest(payload, model) {
           model.capabilities.limits.max_output_tokens,
         model.capabilities.limits.max_output_tokens,
       ),
-      thinking: { type: "adaptive" },
-      output_config: { effort: payload.reasoning?.effort ?? "max" },
+      ...(model.capabilities.supports.adaptive_thinking !== false &&
+      model.capabilities.supports.reasoning_effort?.length
+        ? {
+            thinking: { type: "adaptive" },
+            output_config: { effort: payload.reasoning?.effort ?? "max" },
+          }
+        : {
+            thinking: {
+              type: "enabled",
+              budget_tokens: Math.min(
+                model.capabilities.supports.max_thinking_budget ?? 32000,
+                (payload.max_output_tokens ??
+                  model.capabilities.limits.max_output_tokens) - 1,
+              ),
+            },
+          }),
       system,
       messages,
       ...(definitions.length

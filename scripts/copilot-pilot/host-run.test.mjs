@@ -12,7 +12,26 @@ import {
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import test from "node:test";
-import { runHost } from "./host-run.mjs";
+import { runHost, splitHostArguments } from "./host-run.mjs";
+
+test("cxf forwards native commands and preserves both current and previous alias syntax", () => {
+  assert.deepEqual(
+    splitHostArguments(["-m", "grok-4.5", "resume", "thread-id"]),
+    { args: ["-m", "grok-4.5"], forwarded: ["resume", "thread-id"] },
+  );
+  assert.deepEqual(splitHostArguments(["--", "--yolo", "models", "--json"]), {
+    args: [],
+    forwarded: ["--yolo", "models", "--json"],
+  });
+  assert.deepEqual(splitHostArguments(["models", "--json"]), {
+    args: [],
+    forwarded: ["models", "--json"],
+  });
+  assert.deepEqual(
+    splitHostArguments(["-C", "/project", "exec", "--json", "hello"]),
+    { args: ["-C", "/project"], forwarded: ["exec", "--json", "hello"] },
+  );
+});
 
 const model = {
   id: "test-model",

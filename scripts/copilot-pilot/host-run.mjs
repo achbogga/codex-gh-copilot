@@ -9,7 +9,7 @@ import { listModels, startBridge } from "./bridge.mjs";
 import { codexInvocation } from "./run.mjs";
 import { createSdkTransport } from "./sdk-transport.mjs";
 import { runUpdate, updateArguments } from "./update-command.mjs";
-import { modelArguments } from "./model-config.mjs";
+import { catalogArguments, reasoningForModel } from "./model-config.mjs";
 import {
   efficiencyArguments,
   efficiencyCommand,
@@ -18,6 +18,43 @@ import {
 
 // Host mode deliberately gives Codex the invoking user's filesystem and exported
 // environment, including credentials. It does not add a container or sandbox.
+export function splitHostArguments(args) {
+  const valued = new Set([
+    "--directory",
+    "-C",
+    "--model",
+    "-m",
+    "--reasoning",
+    "--codex-bin",
+    "--copilot-bin",
+    "--state-dir",
+    "--network",
+  ]);
+  const switches = new Set([
+    "--allow-git-write",
+    "--check",
+    "--show",
+    "--json",
+    "--help",
+    "-h",
+  ]);
+  for (let index = 0; index < args.length; index++) {
+    const arg = args[index];
+    if (arg === "--")
+      return { args: args.slice(0, index), forwarded: args.slice(index + 1) };
+    if (valued.has(arg)) {
+      index++;
+      continue;
+    }
+    if (arg.includes("=") && valued.has(arg.split("=")[0])) continue;
+    if ((arg.startsWith("-m") || arg.startsWith("-C")) && arg.length > 2)
+      continue;
+    if (switches.has(arg)) continue;
+    return { args: args.slice(0, index), forwarded: args.slice(index) };
+  }
+  return { args, forwarded: [] };
+}
+
 export async function runHost({
   directory = process.cwd(),
   model = "gpt-6.1-sol",
@@ -28,6 +65,8 @@ export async function runHost({
   args = [],
   environment = process.env,
   connect = createSdkTransport,
+  modelsOnly = false,
+  json = false,
 } = {}) {
   const cwd = await realpath(directory);
   const state = resolve(stateDir);
@@ -43,22 +82,41 @@ export async function runHost({
       diagnosticFile: join(state, "stream-diagnostics.jsonl"),
       environment,
     });
-    const selected = (
-      await listModels(async () => "sdk-owned", sdk.transport, {
-        messages: true,
-      })
-    ).find((entry) => entry.id === model);
+    const models = await listModels(async () => "sdk-owned", sdk.transport, {
+      messages: true,
+      runtimeModelIds: sdk.models?.map((entry) => entry.id) ?? [],
+    });
+    if (modelsOnly) {
+      const summary = models.map((entry) => ({
+        id: entry.id,
+        context: entry.capabilities.limits.max_context_window_tokens,
+        reasoning: reasoningForModel(entry) ?? "budgeted thinking",
+      }));
+      console.log(
+        json
+          ? JSON.stringify(summary, null, 2)
+          : [
+              "MODEL                        CONTEXT     DEFAULT REASONING",
+              ...summary.map(
+                (entry) =>
+                  `${entry.id.padEnd(28)} ${String(entry.context).padEnd(11)} ${entry.reasoning}`,
+              ),
+            ].join("\n"),
+      );
+      return 0;
+    }
+    const selected = models.find((entry) => entry.id === model);
     if (!selected)
       throw new Error(
         "The selected Copilot model is not enabled for a supported streaming tool protocol.",
       );
-    if (!selected.capabilities.supports.reasoning_effort?.includes(reasoning))
-      throw new Error("Unsupported reasoning effort for this model.");
+    reasoningForModel(selected, reasoning);
     const localToken = randomBytes(32).toString("hex");
     bridge = await startBridge({
       getToken: async () => "sdk-owned",
       localToken,
       model,
+      models,
       transport: sdk.transport,
     });
     const invocation = codexInvocation({
@@ -75,7 +133,8 @@ export async function runHost({
         )
           ? []
           : ["--yolo"]),
-        ...(await modelArguments(
+        ...(await catalogArguments(
+          models,
           selected,
           reasoning,
           join(transportDir, "models.json"),
@@ -123,13 +182,13 @@ export async function runHost({
 }
 
 async function main() {
-  const separator = process.argv.indexOf("--", 2);
+  const split = splitHostArguments(process.argv.slice(2));
   const { values, positionals } = parseArgs({
-    args: process.argv.slice(2, separator < 0 ? undefined : separator),
+    args: split.args,
     allowPositionals: true,
     options: {
       "directory": { type: "string", short: "C" },
-      "model": { type: "string" },
+      "model": { type: "string", short: "m" },
       "reasoning": { type: "string" },
       "codex-bin": { type: "string" },
       "copilot-bin": { type: "string" },
@@ -139,10 +198,25 @@ async function main() {
       "allow-git-write": { type: "boolean" },
       "check": { type: "boolean" },
       "show": { type: "boolean" },
+      "json": { type: "boolean" },
       "help": { type: "boolean", short: "h" },
     },
   });
-  const forwarded = separator < 0 ? [] : process.argv.slice(separator + 1);
+  const forwarded = split.forwarded;
+  const commands = [...positionals, ...forwarded].filter(
+    (arg) =>
+      !["--yolo", "--dangerously-bypass-approvals-and-sandbox"].includes(arg),
+  );
+  if (commands[0] === "models") {
+    process.exitCode = await runHost({
+      directory: values.directory,
+      copilotBin: values["copilot-bin"],
+      stateDir: values["state-dir"],
+      modelsOnly: true,
+      json: values.json || commands.includes("--json"),
+    });
+    return;
+  }
   const efficiency = efficiencyCommand([...positionals, ...forwarded]);
   if (efficiency !== null) {
     console.log(
@@ -172,7 +246,7 @@ async function main() {
   }
   if (values.help) {
     console.log(
-      "Usage: codex-copilot [-C DIRECTORY] [--model ID] [--reasoning max] [--state-dir PATH] [--codex-bin BINARY] [--copilot-bin BINARY] [-- CODEX_ARGS]\n       cxf update [--check | --show]\n       cxf efficiency [on | off | status]\nRuns Codex directly on the host as your user, with YOLO, full exported environment, home and PATH access. Default: GPT-6.1 Sol/max, full advertised context, and existing Copilot session history. For container isolation use codex-copilot-docker.",
+      "Usage: cxf [-C DIRECTORY] [-m ID] [--reasoning max] [-- CODEX_ARGS]\n       cxf models [--json]\n       cxf update [--check | --show]\n       cxf efficiency [on | off | status]\nUse /model inside Codex to switch between the models advertised by your seat. Each model uses its full context and strongest supported reasoning. Default: GPT-6.1 Sol/max, YOLO, full exported environment, home and PATH access. For container isolation use codex-copilot-docker.",
     );
     return;
   }

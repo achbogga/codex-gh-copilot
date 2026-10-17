@@ -1,10 +1,10 @@
 # Codex with a GitHub Copilot seat
 
-This fork's experimental adapter runs **real Codex**, including Code Mode, its native tool loop, apply_patch, shell commands and session history. The official GitHub Copilot SDK handles the existing CLI login, account routing and model catalog. Its [request handler](https://github.com/github/copilot-sdk/blob/main/nodejs/src/copilotRequestHandler.ts) forwards GPT Responses requests unchanged. For Opus 5.5 it translates Codex's Responses protocol to Anthropic Messages. Only Codex runs the tools; the SDK does not run a second coding agent.
+This fork's experimental adapter runs **real Codex**, including Code Mode, its native tool loop, apply_patch, shell commands and session history. The official GitHub Copilot SDK handles the existing CLI login, account routing and model catalog. Its [request handler](https://github.com/github/copilot-sdk/blob/main/nodejs/src/copilotRequestHandler.ts) forwards native GPT Responses requests, translates Claude requests to Anthropic Messages, and adapts Codex custom tools to function tools for Grok and MAI. The native `/model` picker includes every enabled concrete model advertised for a supported streaming tool protocol. Only Codex runs the tools; the SDK does not run a second coding agent.
 
 ## Run on Linux
 
-Requires Node.js 22+ (tested with 22.23.3), an authenticated `copilot` CLI (tested with 1.0.95), and the installed Codex executable bundle (tested with 0.162.1). Docker is needed only for the optional container launcher.
+Requires Node.js 22+ (tested with 22.23.3), an authenticated `copilot` CLI (tested with 1.0.98), and the installed Codex executable bundle (tested with 0.163.0). Docker is needed only for the optional container launcher.
 
 ```bash
 npm ci --prefix scripts/copilot-pilot --ignore-scripts
@@ -13,7 +13,21 @@ node scripts/copilot-pilot/host-run.mjs -C /path/to/project
 node scripts/copilot-pilot/host-run.mjs -C /path/to/project -- resume --last
 ```
 
-The configured machine has `codex-copilot` and Bash aliases `cx` and `cxf`, all using the host launcher. Both launchers default to GPT-6.1 Sol (`gpt-6.1-sol`), max reasoning, and the full advertised context limit. The enabled Copilot catalog currently advertises 1,050,000 total context tokens, with a 922,000-token input limit and 128,000-token output limit. Auto-compaction retains headroom at 95% of the input limit (875,900 tokens). Limits are read from the provider catalog at launch. For advertised windows of at least one million tokens, the SDK session explicitly selects `contextTier="long_context"`; its `reasoningEffort` follows the Codex request. This uses the official runtime's context-tier selection rather than relying only on Codex's token-window override. `--model`, `--reasoning`, `--state-dir`, `--copilot-bin`, and `--codex-bin` override these choices. The Codex binary must retain its companion executables, including `codex-code-mode-host`. Changes to Rust are unnecessary for this transport integration.
+The configured machine has `codex-copilot` and Bash aliases `cx` and `cxf`, all using the host launcher. Reload the alias and start Codex:
+
+```bash
+source ~/.bashrc
+cxf                       # Use /model to switch inside Codex
+cxf models                # List your seat's models, context and default reasoning
+cxf models --json
+cxf -m claude-sonnet-5.5   # Select the initial model directly
+cxf -m grok-4.7
+cxf resume SESSION_ID
+```
+
+The October 17 seat check advertised 21 concrete models: GPT, Claude, Grok and MAI. Discovery refreshes on each launch. Explicitly disabled models stay excluded; a missing raw policy field is accepted only when the official SDK also lists the model. The seat's `auto` router does not advertise a concrete context window or transport and is not included as a model with invented limits.
+
+The default remains GPT-6.1 Sol (`gpt-6.1-sol`), max reasoning, and the full advertised context limit. Each model has its own context and compaction metadata, so `/model` does not inherit GPT's window when switching to a smaller model. Other models default to their strongest advertised reasoning effort (`max`, `xhigh`, or `high`); Haiku uses its advertised thinking budget instead of an unsupported effort parameter. For GPT-6.1 Sol, the Copilot catalog currently advertises 1,050,000 total context tokens, with a 922,000-token input limit and 128,000-token output limit. Auto-compaction retains headroom at 95% of the input limit (875,900 tokens). Limits are read from the provider catalog at launch. For advertised windows of at least one million tokens, the SDK session explicitly selects `contextTier="long_context"`; its `reasoningEffort` follows the Codex request. This uses the official runtime's context-tier selection rather than relying only on Codex's token-window override. `--model`, `--reasoning`, `--state-dir`, `--copilot-bin`, and `--codex-bin` override these choices. The Codex binary must retain its companion executables, including `codex-code-mode-host`. Changes to Rust are unnecessary for this transport integration.
 
 All launchers explicitly set `features.api_key_model_discovery=false`. Codex 0.161 enables API-key model discovery by default, but this bridge implements Responses rather than Codex's discovery endpoint. The Copilot SDK still checks the seat's enabled model catalog and context limits at every launch. This setting applies to `cxf`, `cxo`, the direct launcher, and Docker; verify it with `cxf features list`.
 
@@ -50,7 +64,7 @@ codex-copilot --model claude-opus-5.5 --reasoning max
 
 `cxf` still defaults to GPT-6.1 Sol. Opus uses the seat's enabled `claude-opus-5.5` model with a 1,000,000-token window and up to 128,000 output tokens. Compaction starts at 828,400 tokens, retaining output space and 5% input headroom. A temporary Codex model catalog sets the actual context cap, so Codex's bundled or unknown-model limits cannot silently reduce the selected model's window. Known GPT metadata retains its bundled instructions and tools with the Copilot catalog's context limits.
 
-The Opus translation supports text, images, function tools, namespaced tools, custom tools (including Code Mode and apply_patch), and tool results. Signed thinking blocks are stored as opaque serialized state in Codex rollouts and replayed unchanged; prompt caching is enabled. Start a fresh session when switching model families. Resume an existing Opus session with `cxo resume SESSION_ID`. Unsupported history items, hosted tools, forced tool choice, and structured output modes fail closed. Custom tools use a JSON string wrapper; their Responses grammar is not enforced by Anthropic. Enterprise model policy, authentication and usage accounting still come from the official Copilot runtime.
+The Claude translation supports text, images, function tools, namespaced tools, custom tools (including Code Mode and apply_patch), and tool results. Signed thinking blocks are stored as opaque serialized state in Codex rollouts and replayed unchanged to the same Claude model; prompt caching is enabled. Switching model families preserves visible conversation and completed tool results, while foreign private reasoning is omitted. Grok and MAI use function-tool wrappers; non-GPT opaque Responses reasoning is marked in saved history and omitted on replay so it cannot be sent to an incompatible model. Grok also rejects its own opaque reasoning when replayed as input. Tool-call IDs remain linked to their completed results. Resume an existing Opus session with `cxo resume SESSION_ID`. Unsupported history items, hosted tools, forced tool choice, and structured output modes fail closed. Custom tools use a JSON string wrapper; their Responses grammar is not enforced by Anthropic. Enterprise model policy, authentication and usage accounting still come from the official Copilot runtime.
 
 ### Adaptive thinking and reasoning effort
 
@@ -64,7 +78,7 @@ Host mode runs Codex directly as the invoking OS user with YOLO enabled: `danger
 
 All exported environment variables, including credentials, are inherited. Codex shell policy uses `inherit="all"` and `ignore_default_excludes=true`. The launcher supplies its own `CODEX_HOME` and local model-bridge token. Conversation history stays in `~/.codex-copilot-pilot/codex-home`, so existing Copilot sessions remain available. Shell startup files and managed policies still apply; unexported variables in another shell are not process environment variables.
 
-`cxf` expands to `codex-copilot -- --yolo`. Reload it with `source ~/.bash_aliases` and restart any already-running Docker session to get host access. The host launcher also accepts the former alias's `--network bridge --allow-git-write` flags for compatibility with existing shells. Model traffic still uses the official Copilot SDK through an authenticated loopback bridge; full host mode does not isolate local credentials from Codex's tools.
+`cxf` expands directly to `codex-copilot`, whose host launcher defaults to YOLO. Reload it with `source ~/.bashrc` and restart any already-running Docker session to get host access. The host launcher also accepts the former alias's `--network bridge --allow-git-write` flags for compatibility with existing shells. Model traffic still uses the official Copilot SDK through an authenticated loopback bridge; full host mode does not isolate local credentials from Codex's tools.
 
 ## SoL-Pi-inspired efficiency
 
@@ -120,7 +134,7 @@ In Docker mode, GitHub credentials remain outside the container. A private Unix 
 - ChatGPT-hosted features are not conferred by a Copilot seat. Copilot-specific governance controls are not automatically equivalent to Codex's controls; enterprise approval of this custom client and its data handling remains an organizational question.
 - Access denials and unsupported models fail closed. The adapter forwards each request once; Codex owns the bounded stream recovery described above. Upstream HTTP error bodies are suppressed, inference requests are bounded to 32 MiB, and a disconnected caller cancels inference. Size failures enter Codex's context-limit handling. TLS verification stays enabled.
 
-The SDK transport hook is experimental and pinned to SDK 1.0.19. Its internal completion acknowledgement preserves the real usage/accounting while preventing the runtime from executing Codex tool calls. Successful Responses output reaches Codex unchanged; generic protocol errors can be classified into Responses failure events.
+The SDK transport hook is experimental and pinned to SDK 1.0.22. Its internal completion acknowledgement preserves the real usage/accounting while preventing the runtime from executing Codex tool calls. Native GPT Responses output reaches Codex unchanged; Grok and MAI tool events are translated to Codex custom-tool events. Generic protocol errors can be classified into Responses failure events.
 
 ## Installation and upstream checks on the configured machine
 
@@ -142,6 +156,8 @@ Release reminders appear when launching `codex-copilot`, `cx`, or `cxf` in a ter
 Stop scheduled checks with `systemctl --user disable --now codex-copilot-updates.timer`. To adopt upstream source, first review `git log HEAD..upstream/main`; fetching alone does not update the installed Codex binary.
 
 ## Validation
+
+The October 17 update merged upstream through `ce0323f2f2d3` and upgraded Codex to 0.163.0, Copilot CLI to 1.0.98 and SDK to 1.0.22. All 21 concrete seat models completed live inference with their strongest supported reasoning settings. The native picker listed all 21 with GPT-6.1 Sol as default. Real same-thread model switches across GPT, Claude, Grok and MAI retained a saved marker and executed shell tools. The recorded context window changed with each model rather than retaining GPT's global override. Both 660-second synthetic full-bridge stream tests and all eight native recovery/compaction checks passed on these versions. Regular unit checks cover the catalog, tool conversion, reasoning provenance, CLI arguments and existing byte/stream limits.
 
 The October 13 size investigation found about 9.1 MB of serialized response history since the last compaction in the affected session, with the last request using 360,118 input tokens. The old 8 MiB bridge cap explains that local rejection independently of the token window. Boundary checks forward 9 MiB and exactly 32 MiB unchanged, reject declared and chunked uploads above 32 MiB before upstream inference, and redact upstream HTTP 413 bodies. An installed-Codex check verifies that a size rejection is not stream-retried and that resuming the same synthetic session performs native local summarization before continuing.
 

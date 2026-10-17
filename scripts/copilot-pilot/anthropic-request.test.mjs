@@ -4,9 +4,8 @@ import { model, payload } from "./anthropic-fixtures.mjs";
 import { messagesRequest } from "./anthropic-request.mjs";
 import { listModels } from "./bridge.mjs";
 
-test("unsupported history, tools, foreign thinking and tool-name collisions fail closed", () => {
+test("unsupported history, tools and tool-name collisions fail closed", () => {
   for (const change of [
-    { input: [{ type: "reasoning", encrypted_content: "foreign" }] },
     { input: [{ type: "compaction", encrypted_content: "opaque" }] },
     { tools: [{ type: "web_search" }] },
     {
@@ -20,6 +19,26 @@ test("unsupported history, tools, foreign thinking and tool-name collisions fail
     assert.throws(() => messagesRequest({ ...payload, ...change }, model));
 });
 
+test("model switches retain visible history while omitting foreign opaque reasoning", () => {
+  const request = messagesRequest(
+    {
+      ...payload,
+      input: [
+        ...payload.input,
+        { type: "reasoning", encrypted_content: "foreign" },
+        { role: "assistant", content: "Saved visible progress." },
+        { role: "user", content: "Continue on Claude." },
+      ],
+    },
+    model,
+  );
+  assert.equal(
+    request.body.messages[1].content[0].text,
+    "Saved visible progress.",
+  );
+  assert.equal(request.body.messages[2].content[0].text, "Continue on Claude.");
+});
+
 test("Messages discovery requires SDK opt-in and enabled policy", async () => {
   const transport = async () =>
     Response.json({
@@ -30,6 +49,45 @@ test("Messages discovery requires SDK opt-in and enabled policy", async () => {
     await listModels(async () => "fake", transport, { messages: true }),
     [model],
   );
+});
+
+test("discovery accepts runtime-authorized policy defaults and still excludes explicit denials", async () => {
+  const allowed = { ...model, id: "claude-sonnet-5", policy: undefined };
+  const denied = {
+    ...model,
+    id: "claude-opus-5",
+    policy: { state: "disabled" },
+  };
+  const transport = async () => Response.json({ data: [allowed, denied] });
+  assert.deepEqual(
+    await listModels(async () => "fake", transport, { messages: true }),
+    [],
+  );
+  const listed = await listModels(async () => "fake", transport, {
+    messages: true,
+    runtimeModelIds: [allowed.id, denied.id],
+  });
+  assert.deepEqual(
+    listed.map((entry) => entry.id),
+    [allowed.id],
+  );
+});
+
+test("Haiku uses its advertised thinking budget without unsupported effort fields", () => {
+  const haiku = {
+    ...model,
+    id: "claude-haiku-4.5",
+    capabilities: {
+      supports: { max_thinking_budget: 32000 },
+      limits: { max_output_tokens: 64000 },
+    },
+  };
+  const request = messagesRequest({ ...payload, model: haiku.id }, haiku);
+  assert.deepEqual(request.body.thinking, {
+    type: "enabled",
+    budget_tokens: 32000,
+  });
+  assert.equal(request.body.output_config, undefined);
 });
 
 test("Messages preserves chronological instructions, images, tool schemas and model settings", () => {

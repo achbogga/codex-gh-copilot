@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createSdkTransport } from "./sdk-transport.mjs";
+import { responsesThinkingPrefix } from "./responses-tools.mjs";
 
 async function fixture(
   t,
@@ -8,6 +9,7 @@ async function fixture(
   replay = false,
   messages = false,
   headerTimeoutMs,
+  modelId = "test-model",
 ) {
   const requests = [],
     acknowledgements = [],
@@ -21,13 +23,18 @@ async function fixture(
             id: "claude-opus-5.5",
             supported_endpoints: ["/v1/messages"],
             capabilities: {
+              supports: { adaptive_thinking: true, reasoning_effort: ["max"] },
               limits: {
                 max_output_tokens: 128000,
                 max_context_window_tokens: 1000000,
               },
             },
           }
-        : { id: "test-model", policy: { state: "enabled" } },
+        : {
+            id: modelId,
+            policy: { state: "enabled" },
+            capabilities: { supports: { reasoning_effort: ["max"] } },
+          },
     ],
   };
   class Client {
@@ -176,6 +183,34 @@ const init = (signal) => ({
     "Authorization": "Bearer must-not-replace-runtime-token",
   },
   signal,
+});
+
+test("a fresh bridge omits saved foreign Responses reasoning when resuming GPT", async (t) => {
+  const sdk = await fixture(
+    t,
+    () =>
+      new Response(
+        'data: {"type":"response.completed","response":{"id":"done","output":[]}}\n\n',
+        { headers: { "content-type": "text/event-stream" } },
+      ),
+    false,
+    false,
+    undefined,
+    "gpt-test",
+  );
+  const history = [
+    {
+      type: "reasoning",
+      encrypted_content: responsesThinkingPrefix + "foreign-opaque-state",
+    },
+    { role: "user", content: "Remember the completed work." },
+  ];
+  const request = init(new AbortController().signal);
+  request.body = JSON.stringify({ model: "gpt-test", input: history });
+  await (
+    await sdk.transport("https://api.githubcopilot.com/responses", request)
+  ).text();
+  assert.deepEqual(JSON.parse(sdk.requests[0].body).input, [history[1]]);
 });
 
 test(

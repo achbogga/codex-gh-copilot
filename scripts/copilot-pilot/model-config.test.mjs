@@ -4,7 +4,56 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { model } from "./anthropic-fixtures.mjs";
-import { modelArguments } from "./model-config.mjs";
+import {
+  modelArguments,
+  catalogArguments,
+  reasoningForModel,
+} from "./model-config.mjs";
+
+test("switchable catalogs keep context and reasoning limits per model without global overrides", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "copilot-switchable-catalog-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const small = {
+    ...model,
+    id: "small-responses-model",
+    supported_endpoints: ["/responses"],
+    capabilities: {
+      supports: {
+        tool_calls: true,
+        streaming: true,
+        reasoning_effort: ["low", "high"],
+      },
+      limits: {
+        max_context_window_tokens: 200000,
+        max_prompt_tokens: 136000,
+        max_output_tokens: 64000,
+      },
+    },
+  };
+  const args = await catalogArguments(
+    [model, small],
+    model,
+    "max",
+    join(dir, "catalog.json"),
+  );
+  assert.ok(
+    !args.some(
+      (arg) =>
+        arg.startsWith("model_context_window=") ||
+        arg.startsWith("model_auto_compact_token_limit="),
+    ),
+  );
+  const entries = JSON.parse(
+    await readFile(join(dir, "catalog.json"), "utf8"),
+  ).models;
+  assert.equal(entries[0].context_window, 1000000);
+  assert.equal(entries[1].context_window, 200000);
+  assert.equal(entries[1].auto_compact_token_limit, 129200);
+  assert.equal(entries[1].default_reasoning_level, "high");
+  assert.equal(entries[0].priority, 0);
+  assert.equal(reasoningForModel(small, "max"), "high");
+  assert.throws(() => reasoningForModel(small, "xhigh"), /Unsupported/);
+});
 
 test("context configuration reserves output space and uses the container catalog path", async (t) => {
   const dir = await mkdtemp(join(tmpdir(), "opus-catalog-test-"));

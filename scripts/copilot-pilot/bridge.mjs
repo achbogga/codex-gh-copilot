@@ -63,7 +63,7 @@ async function readBounded(stream, limit, destroyOnReturn = true) {
 export async function listModels(
   getToken,
   transport = fetch,
-  { messages = false } = {},
+  { messages = false, runtimeModelIds = [] } = {},
 ) {
   const response = await transport(`${upstream}/models`, {
     headers: headers(await getToken()),
@@ -84,7 +84,8 @@ export async function listModels(
     (model) =>
       typeof model?.id === "string" &&
       model.model_picker_enabled === true &&
-      model.policy?.state === "enabled" &&
+      (model.policy?.state === "enabled" ||
+        (!model.policy && runtimeModelIds.includes(model.id))) &&
       (model.supported_endpoints?.includes("/responses") ||
         (messages && usesMessages(model))) &&
       model.capabilities?.supports?.tool_calls === true &&
@@ -96,11 +97,15 @@ export async function startBridge({
   getToken,
   localToken,
   model,
+  models = [model],
   transport = fetch,
   socketPath,
   streamIdleTimeoutMs = 300000,
 }) {
   const expected = Buffer.from(`Bearer ${localToken}`);
+  const allowedModels = new Set(
+    models.map((entry) => (typeof entry === "string" ? entry : entry.id)),
+  );
   const active = new Set();
   const server = createServer(async (request, response) => {
     const controller = new AbortController();
@@ -140,7 +145,7 @@ export async function startBridge({
       const body = await readBounded(request, maxRequestBody, false);
       const payload = JSON.parse(body);
       if (
-        payload?.model !== model ||
+        !allowedModels.has(payload?.model) ||
         payload.stream !== true ||
         !(Array.isArray(payload.input) || typeof payload.input === "string")
       )

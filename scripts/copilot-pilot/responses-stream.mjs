@@ -2,7 +2,10 @@
 // terminal response. Never turn an unexpected EOF into a successful completion.
 const maxEventBytes = 32 * 1024 * 1024;
 
-export function responsesResponse(response, { onDiagnostic = () => {} } = {}) {
+export function responsesResponse(
+  response,
+  { onDiagnostic = () => {}, onReasoning = () => {} } = {},
+) {
   const finished = Promise.withResolvers();
   const started = Promise.withResolvers();
   const reader = response.body.getReader();
@@ -20,6 +23,14 @@ export function responsesResponse(response, { onDiagnostic = () => {} } = {}) {
       throw new Error("Oversized Copilot event.");
     if (!/^data:\s*\{/.test(line)) return;
     const event = JSON.parse(line.slice(5).trim());
+    if (
+      event.type === "response.output_item.done" &&
+      event.item?.type === "reasoning"
+    )
+      onReasoning(event.item);
+    if (event.type === "response.completed")
+      for (const item of event.response?.output ?? [])
+        if (item.type === "reasoning") onReasoning(item);
     if (
       [
         "response.created",

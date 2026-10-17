@@ -3,10 +3,21 @@ import {
   CopilotRequestHandler,
   RuntimeConnection,
 } from "@github/copilot-sdk";
-import { messagesRequest, usesMessages } from "./anthropic-request.mjs";
+import {
+  messagesRequest,
+  usesMessages,
+  thinkingPrefix,
+} from "./anthropic-request.mjs";
+import { reasoningForModel } from "./model-config.mjs";
+import {
+  functionToolsRequest,
+  functionToolsResponse,
+  responsesThinkingPrefix,
+} from "./responses-tools.mjs";
 import { messagesResponse } from "./anthropic-stream.mjs";
 import { responsesResponse } from "./responses-stream.mjs";
 import { appendFileSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { runtimeAcknowledgement } from "./runtime-ack.mjs";
 
 // The official runtime supplies authentication, account routing and model policy.
@@ -37,7 +48,15 @@ export async function createSdkTransport({
     );
   const pending = new Map();
   const tasks = new Set();
+  // Track provenance without copying opaque reasoning or changing GPT streams.
+  // Foreign providers cannot authenticate one another's encrypted state.
+  const reasoningOrigins = new Map();
+  const reasoningKey = (content) =>
+    typeof content === "string" && content.length
+      ? createHash("sha256").update(content).digest("hex")
+      : undefined;
   let catalog;
+  let runtimeModels = [];
   const diagnose = (details) => {
     if (!diagnosticFile) return;
     try {
@@ -94,7 +113,9 @@ export async function createSdkTransport({
           headers,
           body: job.messages
             ? JSON.stringify(job.messages.body)
-            : job.init.body,
+            : job.responsesTools
+              ? JSON.stringify(job.responsesTools.body)
+              : job.init.body,
           signal,
           redirect: "error",
         }),
@@ -144,7 +165,16 @@ export async function createSdkTransport({
         job.resolve(response);
         throw new Error("Copilot Responses request denied.");
       }
+      if (job.responsesTools)
+        response = functionToolsResponse(response, job.responsesTools);
       const observed = responsesResponse(response, {
+        onReasoning: (item) => {
+          const key = reasoningKey(item.encrypted_content);
+          if (!key) return;
+          if (reasoningOrigins.size >= 512)
+            reasoningOrigins.delete(reasoningOrigins.keys().next().value);
+          reasoningOrigins.set(key, job.model);
+        },
         onDiagnostic: (details) =>
           diagnose({
             ...details,
@@ -206,7 +236,8 @@ export async function createSdkTransport({
   });
   try {
     await client.start();
-    await client.listModels();
+    const listed = await client.listModels();
+    if (Array.isArray(listed)) runtimeModels = listed;
   } catch {
     await client.stop();
     throw new Error(
@@ -218,18 +249,58 @@ export async function createSdkTransport({
     throw new Error("Copilot did not return its model catalog.");
   }
   return {
+    models: runtimeModels,
     transport: async (url, init) => {
       if (new URL(url).pathname === "/models") return Response.json(catalog);
       const payload = JSON.parse(init.body);
       const model = catalog.data.find((entry) => entry.id === payload.model);
+      if (!model)
+        throw new Error(
+          "The selected model is not advertised by your Copilot seat.",
+        );
+      const reasoningEffort = reasoningForModel(
+        model,
+        payload.reasoning?.effort ?? "max",
+      );
+      if (payload.reasoning && payload.reasoning.effort !== reasoningEffort) {
+        if (reasoningEffort) payload.reasoning.effort = reasoningEffort;
+        else delete payload.reasoning;
+        init = { ...init, body: JSON.stringify(payload) };
+      }
+      if (!usesMessages(model) && Array.isArray(payload.input)) {
+        const portable = payload.input.filter((item) => {
+          if (item.type !== "reasoning") return true;
+          if (
+            item.encrypted_content?.startsWith(thinkingPrefix) ||
+            item.encrypted_content?.startsWith(responsesThinkingPrefix)
+          )
+            return false;
+          // Grok's Responses endpoint returns opaque reasoning but rejects
+          // replaying it (HTTP 400). Text and completed tool results remain.
+          if (!model.id.startsWith("gpt-")) return false;
+          const origin = reasoningOrigins.get(
+            reasoningKey(item.encrypted_content),
+          );
+          return origin ? origin === model.id : model.id.startsWith("gpt-");
+        });
+        if (portable.length !== payload.input.length) {
+          payload.input = portable;
+          init = { ...init, body: JSON.stringify(payload) };
+        }
+      }
       const messages = usesMessages(model)
         ? messagesRequest(payload, model)
         : undefined;
+      const responsesTools =
+        !messages &&
+        model.supported_endpoints?.includes("/responses") &&
+        !model.id.startsWith("gpt-")
+          ? functionToolsRequest(payload)
+          : undefined;
       const contextTier =
         model?.capabilities?.limits?.max_context_window_tokens >= 1000000
           ? "long_context"
           : undefined;
-      const reasoningEffort = payload.reasoning?.effort;
       const session = await client.createSession({
         model: payload.model,
         contextTier,
@@ -254,6 +325,7 @@ export async function createSdkTransport({
         reasoningEffort,
         startedAt: Date.now(),
         messages,
+        responsesTools,
         started: false,
         controller: new AbortController(),
       };
