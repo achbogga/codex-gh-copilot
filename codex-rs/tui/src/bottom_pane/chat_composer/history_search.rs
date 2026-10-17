@@ -68,7 +68,7 @@ pub(super) struct HistorySearchSession {
     /// Active and completed Vim commands suspended during temporary draft replacement.
     original_vim_state: VimPersistentState,
     /// Footer-owned query text typed or pasted while Ctrl+R search is active.
-    query: String,
+    pub(super) query: String,
     /// User-visible search status used to choose footer hints and composer preview behavior.
     status: HistorySearchStatus,
 }
@@ -431,7 +431,15 @@ impl ChatComposer {
         if !matches!(search.status, HistorySearchStatus::Match) || search.query.is_empty() {
             return Vec::new();
         }
-        Self::case_insensitive_match_ranges(self.draft.textarea.text(), &search.query)
+        let prefix_len = self.draft.prompt_prefix.len();
+        Self::case_insensitive_match_ranges(&self.current_text(), &search.query)
+            .into_iter()
+            .filter_map(|range| {
+                let start = range.start.saturating_sub(prefix_len);
+                let end = range.end.saturating_sub(prefix_len);
+                (start < end).then_some(start..end)
+            })
+            .collect()
     }
 
     fn case_insensitive_match_ranges(text: &str, query: &str) -> Vec<Range<usize>> {

@@ -45,6 +45,7 @@ use crate::client_api::RemoteExecServerConnectArgs;
 use crate::client_api::StdioExecServerCommand;
 use crate::client_api::StdioExecServerConnectArgs;
 use crate::connection::JsonRpcConnection;
+use crate::connection::JsonRpcConnectionEvent;
 use crate::noise_channel::NoiseChannelIdentity;
 use crate::noise_relay::NoiseHarnessConnectionArgs;
 use crate::noise_relay::noise_harness_connection_from_websocket_with_readiness;
@@ -331,6 +332,7 @@ impl ExecServerClient {
     pub(crate) async fn connect_for_transport(
         transport_params: ExecServerTransportParams,
         http_client_factory: HttpClientFactory,
+        started: &mut Option<Instant>,
     ) -> Result<Self, ExecServerError> {
         let (transport_params, deferred_readiness) = match transport_params {
             ExecServerTransportParams::Deferred(deferred) => {
@@ -362,6 +364,7 @@ impl ExecServerClient {
             None
         };
 
+        *started = Some(Instant::now());
         let websocket = match transport_params {
             ExecServerTransportParams::Deferred(_) => {
                 return Err(ExecServerError::Protocol(
@@ -752,7 +755,18 @@ impl ExecServerClient {
             &noise_context.span,
         )
         .await;
-        if let Err(error) = readiness {
+        if let Err(mut error) = readiness {
+            // Before readiness, the transport reports the reason through the
+            // connection event channel, but no RpcClient is reading it yet.
+            if matches!(error, ExecServerError::Disconnected(_))
+                && let Ok(JsonRpcConnectionEvent::Disconnected {
+                    reason: Some(reason),
+                }) = connection.connection.incoming_rx.try_recv()
+            {
+                error = ExecServerError::Disconnected(format!(
+                    "Noise harness handshake failed before connection became ready: {reason}"
+                ));
+            }
             // Unlike the normal connect path, the connection has not reached
             // RpcClient yet, so its Drop implementation cannot abort the
             // transport task for us.

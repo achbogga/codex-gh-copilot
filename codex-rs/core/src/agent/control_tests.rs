@@ -21,8 +21,10 @@ use crate::agent_communication::AgentCommunicationKind;
 use crate::config::AgentRoleConfig;
 use crate::config::Config;
 use crate::config::ConfigBuilder;
+use crate::context::BaseInstructionsFragment;
 use crate::context::ContextualUserFragment;
 use crate::context::ManagedDeveloperInstructions;
+use crate::context::ModelInstructions;
 use crate::context::MultiAgentRoleInstructions;
 use crate::context::SubagentNotification;
 use crate::context::world_state::IncrementalToolsHint;
@@ -47,6 +49,7 @@ use codex_history::ResumedHistory;
 use codex_history::RolloutItem;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
+use codex_models_manager::model_info::model_info_from_slug;
 use codex_protocol::AgentPath;
 use codex_protocol::ResponseItemId;
 use codex_protocol::capabilities::CapabilityRootLocation;
@@ -74,6 +77,7 @@ use codex_protocol::models::InternalChatMessageMetadataPassthrough;
 use codex_protocol::models::MessagePhase;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::openai_models::ModelsResponse;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EnvironmentConfigState;
@@ -97,6 +101,7 @@ use codex_protocol::protocol::TurnEnvironmentSelection;
 use codex_protocol::protocol::TurnEnvironmentSelections;
 use codex_protocol::protocol::TurnStartedEvent;
 use codex_protocol::protocol::WorldStateItem;
+use codex_protocol_test_support::ContentItemTestExt;
 use codex_thread_store::ArchiveThreadParams;
 use codex_thread_store::InMemoryThreadStore;
 use codex_thread_store::LocalThreadStore;
@@ -196,6 +201,8 @@ fn rollout_response_item(item: ResponseItem) -> RolloutItem {
 
 fn user_message(text: &str) -> ResponseItem {
     ResponseItem::Message {
+        status: None,
+        encrypted_content: None,
         id: None,
         role: "user".to_string(),
         content: vec![ContentItem::InputText {
@@ -208,9 +215,13 @@ fn user_message(text: &str) -> ResponseItem {
 
 fn assistant_message(text: &str, phase: Option<MessagePhase>) -> ResponseItem {
     ResponseItem::Message {
+        status: None,
+        encrypted_content: None,
         id: None,
         role: "assistant".to_string(),
         content: vec![ContentItem::OutputText {
+            annotations: None,
+            logprobs: None,
             text: text.to_string(),
         }],
         phase,
@@ -237,6 +248,8 @@ fn register_session_root_skips_threads_with_explicit_parent() {
 
 fn spawn_agent_call(call_id: &str) -> ResponseItem {
     ResponseItem::FunctionCall {
+        status: None,
+        encrypted_content: None,
         id: None,
         name: "spawn_agent".to_string(),
         namespace: None,
@@ -354,7 +367,7 @@ fn has_subagent_notification<'a>(
             return false;
         }
         content.iter().any(|content_item| match content_item {
-            ContentItem::InputText { text } | ContentItem::OutputText { text } => {
+            ContentItem::InputText { text } | ContentItem::OutputText { text, .. } => {
                 SubagentNotification::matches_text(text)
             }
             ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => false,
@@ -372,7 +385,7 @@ fn history_contains_text<'a>(
             return false;
         };
         content.iter().any(|content_item| match content_item {
-            ContentItem::InputText { text } | ContentItem::OutputText { text } => {
+            ContentItem::InputText { text } | ContentItem::OutputText { text, .. } => {
                 text.contains(needle)
             }
             ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => false,
@@ -415,7 +428,7 @@ fn history_contains_assistant_inter_agent_communication<'a>(
             return false;
         }
         content.iter().any(|content_item| match content_item {
-            ContentItem::OutputText { text } => {
+            ContentItem::OutputText { text, .. } => {
                 serde_json::from_str::<InterAgentCommunication>(text)
                     .ok()
                     .as_ref()
@@ -810,6 +823,69 @@ async fn spawn_failure_context_preserves_shutdown_during_child_startup() {
         .wait()
         .await
         .expect("spawn releases its membership");
+}
+
+#[tokio::test]
+async fn cancelled_spawn_after_input_admission_discards_child() {
+    let harness = AgentControlHarness::new().await;
+    let state = harness.control.runtime.upgrade().expect("live manager");
+    let parent_id = ThreadId::new();
+    let mut spawn = harness.control.spawn(SpawnRequest {
+        caller: parent_id,
+        config: harness.config.clone(),
+        input: AgentInput::UserInput(text_input("child task")),
+        source: SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id: parent_id,
+            depth: 1,
+            agent_path: None,
+            agent_nickname: None,
+            agent_role: None,
+        }),
+        options: SpawnAgentOptions::default(),
+    });
+    let child = poll_fn(|cx| {
+        assert!(spawn.as_mut().poll(cx).is_pending());
+        let threads = state.threads.try_read().expect("uncontended manager");
+        // On this single-thread runtime the session loop cannot consume the first
+        // input until this poll returns. Leave spawn waiting for its admission reply.
+        match threads.values().find(|thread| !thread.io.tx_sub.is_empty()) {
+            Some(child) => Poll::Ready(Arc::clone(child)),
+            None => Poll::Pending,
+        }
+    })
+    .await;
+    let child_id = child.session.thread_id();
+    // This no-op goes through the same FIFO submission loop. Its receipt proves the
+    // earlier input has been admitted, without polling the spawn future again.
+    child
+        .update_thread_settings(ThreadSettingsOverrides::default())
+        .await
+        .expect("input admission completed before the settings barrier");
+    {
+        // Only the final status lookup now needs the manager lock. Cancel there,
+        // after input admission but before the backend can return its receipt.
+        let _threads = state.threads.write().await;
+        assert!(
+            spawn
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending()
+        );
+        drop(spawn);
+    }
+    assert!(
+        harness.control.get_agent_metadata(child_id).is_none(),
+        "cancelled spawn must not leave an accepted child registered"
+    );
+    child.wait_until_terminated().await;
+    assert_thread_not_loaded(&harness.manager, child_id).await;
+    harness
+        .control
+        .runtime
+        .request_shutdown()
+        .wait()
+        .await
+        .expect("provisional cleanup releases tree membership");
 }
 
 #[tokio::test]
@@ -2307,6 +2383,8 @@ async fn spawn_agent_fork_from_paginated_parent_uses_model_context_prefix(
         .session
         .persist_rollout_items(&[
             rollout_response_item(ResponseItem::Message {
+                status: None,
+                encrypted_content: None,
                 id: None,
                 role: "developer".to_string(),
                 content: vec![ContentItem::InputText {
@@ -2742,6 +2820,12 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
     let managed_fragment = "<managed_developer_instructions>\nParent developer instructions.\n</managed_developer_instructions>";
     let persistent_fragment =
         "<persistent_mode>\nParent developer instructions.\n</persistent_mode>";
+    let replacement_fragment = ModelInstructions {
+        model: None,
+        instructions: Some("Updated model instructions.".to_string()),
+    }
+    .render()
+    .expect_text();
     let harness = AgentControlHarness::new().await;
     let mut parent_config = harness.config.clone();
     let _ = parent_config.features.enable(Feature::MultiAgentV2);
@@ -2816,6 +2900,8 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
             turn_context.as_ref(), turn_context.model_info(),
             &[
                 ResponseItem::Message {
+                    status: None,
+                    encrypted_content: None,
                     id: None,
                     role: "developer".to_string(),
                     content: vec![ContentItem::InputText {
@@ -2825,6 +2911,8 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
                     internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::Message {
+                    status: None,
+                    encrypted_content: None,
                     id: None,
                     role: "developer".to_string(),
                     content: vec![ContentItem::InputText {
@@ -2834,6 +2922,8 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
                     internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::Message {
+                    status: None,
+                    encrypted_content: None,
                     id: None,
                     role: "developer".to_string(),
                     content: vec![
@@ -2854,6 +2944,9 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
                         ContentItem::InputText {
                             text: persistent_fragment.to_string(),
                         },
+                        ContentItem::InputText {
+                            text: replacement_fragment.clone(),
+                        },
                     ],
                     phase: None,
                     internal_chat_message_metadata_passthrough: Some(
@@ -2864,6 +2957,7 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
                                 ContentItemKind("generic.developer_policy".to_string()),
                                 ContentItemKind("managed_config.developer_instructions".to_string()),
                                 ContentItemKind("persistent_mode.instructions".to_string()),
+                                ContentItemKind("model.instructions".to_string()),
                             ]),
                             ..Default::default()
                         },
@@ -2987,6 +3081,8 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
         .cloned()
         .expect("parent final answer should be recorded");
     let mut expected_developer_message = ResponseItem::Message {
+        status: None,
+        encrypted_content: None,
         id: None,
         role: "developer".to_string(),
         content: vec![
@@ -3003,6 +3099,9 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
             ContentItem::InputText {
                 text: persistent_fragment.to_string(),
             },
+            ContentItem::InputText {
+                text: replacement_fragment,
+            },
         ],
         phase: None,
         internal_chat_message_metadata_passthrough: Some(
@@ -3012,6 +3111,7 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
                     ContentItemKind("generic.developer_policy".to_string()),
                     ContentItemKind("managed_config.developer_instructions".to_string()),
                     ContentItemKind("persistent_mode.instructions".to_string()),
+                    ContentItemKind("model.instructions".to_string()),
                 ]),
                 ..Default::default()
             },
@@ -3188,12 +3288,16 @@ async fn spawn_agent_fork_strips_parent_usage_hints_from_compacted_history(marke
         role: "developer".to_string(),
         tools: vec![serde_json::json!({"type": "function", "name": "compacted_tool"})],
     };
-    let tools_update = ContextualUserFragment::into(IncrementalToolsHint);
+    let tools_update = ContextualUserFragment::into(IncrementalToolsHint(
+        codex_prompts::ResolvedIncrementalToolMessages::default().tool_update_hint,
+    ));
     let replacement_history = vec![
         tools_update.clone(),
         tool_declarations.clone(),
         ContextualUserFragment::into(crate::context::GuardianApprovedAction::new("parent-private-release".to_owned())),
         ResponseItem::Message {
+            status: None,
+            encrypted_content: None,
             id: None,
             role: "user".to_string(),
             content: vec![ContentItem::InputText {
@@ -3205,6 +3309,8 @@ async fn spawn_agent_fork_strips_parent_usage_hints_from_compacted_history(marke
         ContextualUserFragment::into(catalog_role("Catalog parent root guidance.")),
         parent_task.to_model_input_item(),
         ResponseItem::Message {
+            status: None,
+            encrypted_content: None,
             id: None,
             role: "developer".to_string(),
             content: vec![ContentItem::InputText {
@@ -3219,6 +3325,8 @@ async fn spawn_agent_fork_strips_parent_usage_hints_from_compacted_history(marke
             ),
         },
         ResponseItem::Message {
+            status: None,
+            encrypted_content: None,
             id: None,
             role: "developer".to_string(),
             content: vec![
@@ -3449,6 +3557,8 @@ async fn spawn_agent_full_fork_restores_instructions_after_compaction_discards_p
     let parent_spawn_call_id = "spawn-call-compacted-stale-instructions".to_string();
     let replacement_history = vec![
         ResponseItem::Message {
+            status: None,
+            encrypted_content: None,
             id: None,
             role: "user".to_string(),
             content: vec![ContentItem::InputText {
@@ -3458,6 +3568,8 @@ async fn spawn_agent_full_fork_restores_instructions_after_compaction_discards_p
             internal_chat_message_metadata_passthrough: None,
         },
         ResponseItem::Message {
+            status: None,
+            encrypted_content: None,
             id: None,
             role: "developer".to_string(),
             content: vec![ContentItem::InputText {
@@ -3481,6 +3593,8 @@ async fn spawn_agent_full_fork_restores_instructions_after_compaction_discards_p
         .session
         .persist_rollout_items(&[
             rollout_response_item(ResponseItem::Message {
+                status: None,
+                encrypted_content: None,
                 id: None,
                 role: "developer".to_string(),
                 content: vec![ContentItem::InputText {
@@ -3594,9 +3708,16 @@ async fn spawn_agent_full_fork_legacy_compaction_rebuilds_child_instructions_onc
             Some("Parent developer instructions."),
         ),
     ] {
-        let harness = AgentControlHarness::new().await;
+        let mut harness = AgentControlHarness::new().await;
         let mut parent_config = harness.config.clone();
         let _ = parent_config.features.enable(Feature::MultiAgentV2);
+        let _ = parent_config.features.enable(Feature::IncrementalTools);
+        let mut model = model_info_from_slug("gpt-5.5");
+        model.use_responses_lite = true;
+        parent_config.model_catalog = Some(ModelsResponse {
+            models: vec![model],
+        });
+        parent_config.base_instructions = Some("Current model instructions.".to_string());
         parent_config.developer_instructions = parent_developer_instructions.map(str::to_string);
         let mut requirements = parent_config.config_layer_stack.requirements().clone();
         requirements.additional_developer_instructions = Some(codex_config::Sourced::new(
@@ -3615,6 +3736,28 @@ async fn spawn_agent_full_fork_legacy_compaction_rebuilds_child_instructions_onc
             requirements_toml,
         )
         .expect("managed requirements stack");
+        let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("dummy"));
+        harness.manager = ThreadManager::new(
+            &parent_config,
+            auth_manager.clone(),
+            crate::thread_manager::build_models_manager(&parent_config, auth_manager),
+            crate::CodexAppsToolsCache::default(),
+            SessionSource::Exec,
+            Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+            empty_extension_registry(),
+            Arc::new(crate::test_support::EmptyUserInstructionsProvider),
+            /*analytics_events_client*/ None,
+            crate::thread_manager::passthrough_image_store(),
+            crate::thread_manager::thread_store_from_config(
+                &parent_config,
+                harness.state_db.clone(),
+            ),
+            crate::thread_manager::local_agent_graph_store_from_state_db(harness.state_db.as_ref()),
+            uuid::Uuid::new_v4().to_string(),
+            /*attestation_provider*/ None,
+            /*external_time_provider*/ None,
+        );
+        harness.control = harness.manager.agent_control();
         let mut child_config = parent_config.clone();
         child_config.multi_agent_v2.preserve_fork_prefix = preserve_fork_prefix;
         child_config.developer_instructions = Some("Child developer instructions.".to_string());
@@ -3634,6 +3777,8 @@ async fn spawn_agent_full_fork_legacy_compaction_rebuilds_child_instructions_onc
             None => "spawn-call-legacy-compact-without-parent",
         };
         let parent_user_message = ResponseItem::Message {
+            status: None,
+            encrypted_content: None,
             id: None,
             role: "user".to_string(),
             content: vec![ContentItem::InputText {
@@ -3681,6 +3826,8 @@ async fn spawn_agent_full_fork_legacy_compaction_rebuilds_child_instructions_onc
         ];
         if let Some(instructions) = parent_developer_instructions {
             rollout_items.push(rollout_response_item(ResponseItem::Message {
+                status: None,
+                encrypted_content: None,
                 id: None,
                 role: "developer".to_string(),
                 content: vec![ContentItem::InputText {
@@ -3691,6 +3838,8 @@ async fn spawn_agent_full_fork_legacy_compaction_rebuilds_child_instructions_onc
             }));
         }
         rollout_items.push(rollout_response_item(ResponseItem::Message {
+            status: None,
+            encrypted_content: None,
             id: None,
             role: "developer".to_string(),
             content: vec![ContentItem::InputText {
@@ -3699,8 +3848,19 @@ async fn spawn_agent_full_fork_legacy_compaction_rebuilds_child_instructions_onc
             phase: None,
             internal_chat_message_metadata_passthrough: None,
         }));
+        rollout_items.extend([
+            rollout_response_item(ContextualUserFragment::into(BaseInstructionsFragment(
+                "Original model instructions.".to_string(),
+            ))),
+            rollout_response_item(ContextualUserFragment::into(ModelInstructions {
+                model: None,
+                instructions: Some("Updated model instructions.".to_string()),
+            })),
+        ]);
         rollout_items.push(rollout_response_item(ContextualUserFragment::into(
-            IncrementalToolsHint,
+            IncrementalToolsHint(
+                codex_prompts::ResolvedIncrementalToolMessages::default().tool_update_hint,
+            ),
         )));
         rollout_items.push(rollout_response_item(ResponseItem::AdditionalTools {
             id: None,
@@ -3803,7 +3963,11 @@ async fn spawn_agent_full_fork_legacy_compaction_rebuilds_child_instructions_onc
         let history = child_thread.session.clone_history().await;
         let mut instruction_count = 0;
         let mut managed_instructions = Vec::new();
+        let mut model_instructions = Vec::new();
         for item in history.raw_items() {
+            if let Some(base) = BaseInstructionsFragment::text_from_item(item) {
+                model_instructions.push(base);
+            }
             let ResponseItem::Message { role, content, .. } = item else {
                 continue;
             };
@@ -3813,6 +3977,9 @@ async fn spawn_agent_full_fork_legacy_compaction_rebuilds_child_instructions_onc
             for content_item in content {
                 if let ContentItem::InputText { text } = content_item {
                     instruction_count += usize::from(text == "Child developer instructions.");
+                    if ModelInstructions::matches_text(text) {
+                        model_instructions.push(text.as_str());
+                    }
                     if ManagedDeveloperInstructions::matches_text(text) {
                         managed_instructions.push(text.as_str());
                     }
@@ -3820,9 +3987,13 @@ async fn spawn_agent_full_fork_legacy_compaction_rebuilds_child_instructions_onc
             }
         }
         assert_eq!(
-            (instruction_count, managed_instructions),
-            (1, vec![current_managed_fragment.as_str()]),
-            "{case}: canonical context reconstruction must keep only the current child and managed developer instructions"
+            (instruction_count, managed_instructions, model_instructions),
+            (
+                1,
+                vec![current_managed_fragment.as_str()],
+                vec!["Current model instructions."],
+            ),
+            "{case}: canonical context reconstruction must keep only the current child, managed, and model instructions"
         );
 
         let _ = harness

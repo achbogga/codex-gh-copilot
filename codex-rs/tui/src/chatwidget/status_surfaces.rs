@@ -8,12 +8,12 @@ use crate::bottom_pane::status_line_from_segments;
 use crate::branch_summary;
 use crate::chatwidget::limit_label_for_window;
 use crate::chatwidget::rate_limits::get_limits_duration;
-use crate::iterm_session_status::ItermSessionStatus;
 use crate::legacy_core::config::Config;
 use crate::model_catalog::LUNA_RESERVE_MODEL;
 use crate::status::format_credit_micros;
 use crate::status::format_estimated_usd_micros;
 use crate::status::format_tokens_compact;
+use crate::terminal_program_status::ProgramStatus;
 use codex_app_server_protocol::AskForApproval;
 use codex_config::ConfigLayerSource;
 use codex_config::os_host_name;
@@ -322,18 +322,38 @@ impl ChatWidget {
         self.bottom_pane.terminal_title_requires_action()
     }
 
-    pub(super) fn desired_iterm_session_status(&self) -> ItermSessionStatus {
-        if self.terminal_title_requires_action() {
-            ItermSessionStatus::Waiting
-        } else if self.bottom_pane.is_task_running() || !self.unified_exec_processes.is_empty() {
-            ItermSessionStatus::Working
+    /// Reports the displayed thread's actual state independently of terminal
+    /// title/notification settings. Replays never produce an unseen result.
+    pub(crate) fn desired_program_status(&self) -> ProgramStatus {
+        if let Some(kind) = self.bottom_pane.program_status_blocked_kind() {
+            ProgramStatus::Blocked(kind)
+        } else if self.bottom_pane.is_task_running()
+            || self.is_user_turn_pending_or_running()
+            || !self.unified_exec_processes.is_empty()
+            || (self.status_state.program_status_after_turn == ProgramStatus::Done
+                && self
+                    .current_goal_status
+                    .as_ref()
+                    .is_some_and(GoalStatusState::is_active))
+        {
+            ProgramStatus::Working
         } else {
-            ItermSessionStatus::Idle
+            self.status_state.program_status_after_turn
         }
     }
 
-    pub(super) fn iterm_session_detail(&self, status: ItermSessionStatus) -> Option<&str> {
-        (status == ItermSessionStatus::Working && self.bottom_pane.is_task_running())
+    pub(crate) fn acknowledge_program_status(&mut self) {
+        if matches!(
+            self.desired_program_status(),
+            ProgramStatus::Done | ProgramStatus::Error
+        ) {
+            self.status_state.program_status_after_turn = ProgramStatus::Idle;
+            self.request_redraw();
+        }
+    }
+
+    pub(super) fn iterm_session_detail(&self, status: ProgramStatus) -> Option<&str> {
+        (status == ProgramStatus::Working && self.bottom_pane.is_task_running())
             .then_some(self.status_state.current_status.header.as_str())
             .filter(|detail| *detail != "Working")
     }

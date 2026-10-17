@@ -612,7 +612,7 @@ async fn configured_pet_load_is_deferred_until_after_construction() {
         .unwrap();
     assert_matches!(
         event,
-        AppEvent::ConfiguredPetLoaded { pet_id, result } => {
+        AppEvent::ConfiguredPetLoaded { pet_id, result, .. } => {
             assert_eq!(pet_id, crate::pets::DEFAULT_PET_ID);
             assert!(result.unwrap().is_some());
         }
@@ -2261,6 +2261,37 @@ async fn ctrl_c_interrupt_pauses_active_goal_turn() {
 
     next_interrupt_op(&mut op_rx);
     assert_goal_paused_event(&mut rx, thread_id);
+}
+
+#[tokio::test]
+async fn program_status_stays_working_when_input_acknowledges_an_active_goal() {
+    use crate::terminal_program_status::ProgramStatus;
+
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let thread_id = start_active_goal_turn(&mut chat);
+    let mut statuses = vec![chat.desired_program_status()];
+    chat.on_task_complete(
+        /*last_agent_message*/ None, /*completion*/ None, /*from_replay*/ false,
+    );
+    statuses.push(chat.desired_program_status());
+    // App acknowledges input before the composer handles a non-interrupting key.
+    chat.acknowledge_program_status();
+    chat.handle_key_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+    statuses.push(chat.desired_program_status());
+    update_thread_goal(&mut chat, thread_id, AppThreadGoalStatus::Complete);
+    statuses.push(chat.desired_program_status());
+    chat.acknowledge_program_status();
+    statuses.push(chat.desired_program_status());
+    assert_eq!(
+        statuses,
+        [
+            ProgramStatus::Working,
+            ProgramStatus::Working,
+            ProgramStatus::Working,
+            ProgramStatus::Done,
+            ProgramStatus::Idle,
+        ]
+    );
 }
 
 #[tokio::test]

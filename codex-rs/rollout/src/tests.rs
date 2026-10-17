@@ -227,12 +227,17 @@ async fn filesystem_lookup_distinguishes_thread_ids_from_rollout_ids() {
         "sessions/2025/01/04/rollout-{reverted_ts}-{thread_uuid}_{rollout_uuid}.jsonl"
     ));
     fs::rename(reverted_source, reverted_path.as_path()).unwrap();
+    let subsequent_rollout_uuid = Uuid::from_u128(403);
+    let subsequent_path = home.join(format!(
+        "sessions/2025/01/04/rollout-{reverted_ts}-{thread_uuid}_{subsequent_rollout_uuid}.jsonl"
+    ));
+    fs::copy(&reverted_path, &subsequent_path).unwrap();
 
     assert_eq!(
         find_thread_path_by_id_str(home, &thread_uuid.to_string(), /*state_db_ctx*/ None)
             .await
             .unwrap(),
-        Some(reverted_path.clone())
+        Some(subsequent_path)
     );
     assert_eq!(
         find_rollout_path_by_rollout_id(home, thread_id_from_uuid(rollout_uuid))
@@ -1453,6 +1458,8 @@ async fn read_head_for_summary_omits_harness_metadata() {
     let temp = TempDir::new().unwrap();
     let rollout_path = temp.path().join("rollout.jsonl");
     let response_item = ResponseItem::Message {
+        status: None,
+        encrypted_content: None,
         id: None,
         role: "user".to_string(),
         content: vec![ContentItem::InputText {
@@ -1606,9 +1613,13 @@ async fn test_updated_at_uses_file_mtime() -> Result<()> {
             timestamp: format!("{ts}-{idx:02}"),
             ordinal: None,
             item: RolloutItem::ResponseItem(ResponseItemEnvelope::new(ResponseItem::Message {
+                status: None,
+                encrypted_content: None,
                 id: None,
                 role: "assistant".into(),
                 content: vec![ContentItem::OutputText {
+                    annotations: None,
+                    logprobs: None,
                     text: format!("reply-{idx}"),
                 }],
                 phase: None,
