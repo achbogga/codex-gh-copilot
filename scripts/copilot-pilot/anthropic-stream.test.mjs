@@ -94,6 +94,58 @@ function response(values, { doneMarker = false } = {}) {
   );
 }
 
+test("Claude collaboration calls use native plaintext message delivery", async () => {
+  const request = messagesRequest(
+    {
+      ...payload,
+      tools: [
+        {
+          type: "namespace",
+          name: "collaboration",
+          tools: [
+            {
+              type: "function",
+              name: "send_message",
+              parameters: {
+                type: "object",
+                properties: {
+                  target: { type: "string" },
+                  message: { type: "string" },
+                },
+              },
+            },
+          ],
+        },
+      ],
+    },
+    model,
+  );
+  const translated = messagesResponse(
+    response(
+      events([
+        {
+          type: "tool_use",
+          id: "task-call",
+          name: "collaboration__send_message",
+          input: { target: "child", message: "Read marker.txt" },
+        },
+      ]),
+    ),
+    request,
+  );
+  const stream = await translated.response.text();
+  const completed = stream
+    .split("\n")
+    .filter((line) => line.startsWith("data:"))
+    .map((line) => JSON.parse(line.slice(6)))
+    .at(-1);
+  const call = completed.response.output[0];
+  assert.equal(call.namespace, "collaboration");
+  assert.deepEqual(call.encrypted_function_args, []);
+  assert.equal(JSON.parse(call.arguments).message, "Read marker.txt");
+  assert.equal(call.call_id, "task-call");
+});
+
 test("Messages stream replays signed thinking, namespaced tools and parallel results without an SDK tool loop", async () => {
   const translated = messagesResponse(
     response(events()),

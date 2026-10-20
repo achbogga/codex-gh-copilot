@@ -152,6 +152,7 @@ export function responsesResponse(
         started.resolve(null);
         const known = [
           "COPILOT_UNEXPECTED_EOF",
+          "COPILOT_ENCRYPTED_AGENT_MESSAGE",
           "UND_ERR_SOCKET",
           "UND_ERR_BODY_TIMEOUT",
           "ECONNRESET",

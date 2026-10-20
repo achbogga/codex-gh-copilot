@@ -1,3 +1,5 @@
+import { portableAgentMessage } from "./agent-messages.mjs";
+
 // The seat catalog owns protocol selection, rather than a fixed model name.
 export const usesMessages = (model) =>
   model?.supported_endpoints?.includes("/v1/messages") === true &&
@@ -81,7 +83,8 @@ export function messagesRequest(payload, model) {
     typeof payload.input === "string"
       ? [{ role: "user", content: payload.input }]
       : payload.input;
-  for (const item of input) {
+  for (const saved of input) {
+    const item = portableAgentMessage(saved);
     if (item.type === "message" || (!item.type && item.role)) {
       const blocks = content(item.content);
       if (["developer", "system"].includes(item.role)) {

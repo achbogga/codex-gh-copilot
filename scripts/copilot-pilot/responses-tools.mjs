@@ -1,4 +1,5 @@
-import { Readable } from "node:stream";
+import { mapResponseEvents } from "./responses-events.mjs";
+import { portableAgentMessage, plaintextAgentCall } from "./agent-messages.mjs";
 
 // Keep provenance in saved rollouts as well as in the current bridge process.
 // Grok rejects its opaque reasoning on input, even on the same model.
@@ -40,7 +41,8 @@ export function functionToolsRequest(payload) {
       : [add(tool)],
   );
   const input = Array.isArray(payload.input)
-    ? payload.input.map((item) => {
+    ? payload.input.map((saved) => {
+        const item = portableAgentMessage(saved);
         if (item.type === "custom_tool_call_output") {
           const { id, ...copy } = item;
           return { ...copy, type: "function_call_output" };
@@ -95,7 +97,7 @@ export function functionToolsResponse(response, request) {
       name: tool.name,
       ...(tool.namespace ? { namespace: tool.namespace } : {}),
     };
-    if (tool.type !== "custom") return copy;
+    if (tool.type !== "custom") return plaintextAgentCall(copy);
     let input = "";
     if (done) {
       input = JSON.parse(value.arguments).input;
@@ -133,33 +135,5 @@ export function functionToolsResponse(response, request) {
       };
     return event;
   };
-  async function* stream() {
-    const decoder = new TextDecoder();
-    let buffer = "";
-    const line = (value) =>
-      value.startsWith("event:")
-        ? ""
-        : value.startsWith("data:") && value.slice(5).trim().startsWith("{")
-          ? `data: ${JSON.stringify(adapt(JSON.parse(value.slice(5))))}\n`
-          : value + "\n";
-    for await (const chunk of response.body) {
-      buffer += decoder.decode(chunk, { stream: true });
-      let end;
-      while ((end = buffer.indexOf("\n")) >= 0) {
-        const value = buffer.slice(0, end);
-        buffer = buffer.slice(end + 1);
-        if (Buffer.byteLength(value) > 32 * 1024 * 1024)
-          throw new Error("Oversized Responses event.");
-        yield Buffer.from(line(value));
-      }
-      if (Buffer.byteLength(buffer) > 32 * 1024 * 1024)
-        throw new Error("Oversized Responses event.");
-    }
-    buffer += decoder.decode();
-    if (buffer) yield Buffer.from(line(buffer));
-  }
-  return new Response(Readable.toWeb(Readable.from(stream())), {
-    status: response.status,
-    headers: response.headers,
-  });
+  return mapResponseEvents(response, adapt, { dropEventNames: true });
 }

@@ -19,6 +19,10 @@ import { responsesResponse } from "./responses-stream.mjs";
 import { appendFileSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { runtimeAcknowledgement } from "./runtime-ack.mjs";
+import {
+  portableAgentTools,
+  portableAgentResponse,
+} from "./agent-messages.mjs";
 
 // The official runtime supplies authentication, account routing and model policy.
 // Its request handler carries native Responses or translated Messages payloads
@@ -167,6 +171,7 @@ export async function createSdkTransport({
       }
       if (job.responsesTools)
         response = functionToolsResponse(response, job.responsesTools);
+      else if (job.portableAgents) response = portableAgentResponse(response);
       const observed = responsesResponse(response, {
         onReasoning: (item) => {
           const key = reasoningKey(item.encrypted_content);
@@ -252,7 +257,10 @@ export async function createSdkTransport({
     models: runtimeModels,
     transport: async (url, init) => {
       if (new URL(url).pathname === "/models") return Response.json(catalog);
-      const payload = JSON.parse(init.body);
+      const original = JSON.parse(init.body);
+      const payload = portableAgentTools(original);
+      const portableAgents = payload !== original;
+      if (portableAgents) init = { ...init, body: JSON.stringify(payload) };
       const model = catalog.data.find((entry) => entry.id === payload.model);
       if (!model)
         throw new Error(
@@ -288,15 +296,27 @@ export async function createSdkTransport({
           init = { ...init, body: JSON.stringify(payload) };
         }
       }
-      const messages = usesMessages(model)
-        ? messagesRequest(payload, model)
-        : undefined;
-      const responsesTools =
-        !messages &&
-        model.supported_endpoints?.includes("/responses") &&
-        !model.id.startsWith("gpt-")
-          ? functionToolsRequest(payload)
+      let messages, responsesTools;
+      try {
+        messages = usesMessages(model)
+          ? messagesRequest(payload, model)
           : undefined;
+        responsesTools =
+          !messages &&
+          model.supported_endpoints?.includes("/responses") &&
+          !model.id.startsWith("gpt-")
+            ? functionToolsRequest(payload)
+            : undefined;
+      } catch (error) {
+        if (error.code === "COPILOT_ENCRYPTED_AGENT_MESSAGE")
+          diagnose({
+            code: error.code,
+            model: payload.model,
+            request_bytes: Buffer.byteLength(init.body),
+            reasoning_effort: reasoningEffort ?? "default",
+          });
+        throw error;
+      }
       const contextTier =
         model?.capabilities?.limits?.max_context_window_tokens >= 1000000
           ? "long_context"
@@ -326,6 +346,7 @@ export async function createSdkTransport({
         startedAt: Date.now(),
         messages,
         responsesTools,
+        portableAgents,
         started: false,
         controller: new AbortController(),
       };

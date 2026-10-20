@@ -1,5 +1,6 @@
 import { Readable } from "node:stream";
 import { thinkingPrefix } from "./anthropic-request.mjs";
+import { plaintextAgentCall } from "./agent-messages.mjs";
 
 const maxEventBytes = 32 * 1024 * 1024;
 const maxContentBytes = 32 * 1024 * 1024;
@@ -89,7 +90,7 @@ export function messagesResponse(response, request) {
             else if (block.type === "tool_use") {
               const tool = request.tools.get(block.name);
               if (!tool) throw new Error("Anthropic returned an unknown tool.");
-              item = {
+              item = plaintextAgentCall({
                 id,
                 type:
                   tool.type === "custom" ? "custom_tool_call" : "function_call",
@@ -97,7 +98,7 @@ export function messagesResponse(response, request) {
                 name: tool.name,
                 ...(tool.namespace ? { namespace: tool.namespace } : {}),
                 ...(tool.type === "custom" ? { input: "" } : { arguments: "" }),
-              };
+              });
             } else
               throw new Error(
                 `Unsupported Anthropic output block: ${block.type}`,

@@ -3,6 +3,7 @@ import { createServer } from "node:http";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { usesMessages } from "./anthropic-request.mjs";
+import { encryptedAgentError } from "./agent-messages.mjs";
 
 const upstream = "https://api.githubcopilot.com";
 // Copilot CLI 1.0.74 raised the CAPI Responses request ceiling to 32 MiB.
@@ -234,6 +235,12 @@ export async function startBridge({
           // Report a real failure, never fabricate response.completed or replay
           // a partially executed tool call. Suppress upstream error payloads.
           if (!response.destroyed) {
+            if (error.code === "COPILOT_ENCRYPTED_AGENT_MESSAGE") {
+              yield Buffer.from(
+                failedEvent(encryptedAgentError, "invalid_prompt"),
+              );
+              return;
+            }
             const message = controller.signal.aborted
               ? `Copilot stream inactive for ${streamIdleTimeoutMs} ms.`
               : `Copilot stream ended before completion${["COPILOT_UNEXPECTED_EOF", "UND_ERR_SOCKET", "UND_ERR_BODY_TIMEOUT", "ECONNRESET", "ETIMEDOUT", "ABORT_ERR", "INVALID_SSE_JSON", "STREAM_READ_ERROR"].includes(error.code) ? ` (${error.code})` : ""}.`;
@@ -244,7 +251,16 @@ export async function startBridge({
       await pipeline(Readable.from(stream()), response);
     } catch (error) {
       if (response.headersSent) response.destroy();
-      else if (!response.destroyed && error.code === "PILOT_BODY_TOO_LARGE")
+      else if (
+        !response.destroyed &&
+        error.code === "COPILOT_ENCRYPTED_AGENT_MESSAGE"
+      ) {
+        response.writeHead(200, {
+          "content-type": "text/event-stream",
+          "cache-control": "no-store",
+        });
+        response.end(failedEvent(encryptedAgentError, "invalid_prompt"));
+      } else if (!response.destroyed && error.code === "PILOT_BODY_TOO_LARGE")
         failContextLimit(
           response,
           "Request exceeds Copilot's 32 MiB request limit. Compact the conversation before continuing.",

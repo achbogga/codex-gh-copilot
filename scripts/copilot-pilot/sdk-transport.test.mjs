@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createSdkTransport } from "./sdk-transport.mjs";
 import { responsesThinkingPrefix } from "./responses-tools.mjs";
 
@@ -10,6 +13,7 @@ async function fixture(
   messages = false,
   headerTimeoutMs,
   modelId = "test-model",
+  diagnosticFile,
 ) {
   const requests = [],
     acknowledgements = [],
@@ -146,6 +150,7 @@ async function fixture(
   }
   const sdk = await createSdkTransport({
     Client,
+    diagnosticFile,
     forward: async (request) => {
       if (request.method === "GET") return Response.json(catalog);
       requests.push({
@@ -183,6 +188,112 @@ const init = (signal) => ({
     "Authorization": "Bearer must-not-replace-runtime-token",
   },
   signal,
+});
+
+test("encrypted agent tasks are rejected before SDK inference with metadata-only diagnostics", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "copilot-agent-diagnostics-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const file = join(root, "diagnostics.jsonl");
+  const sdk = await fixture(
+    t,
+    () => {
+      throw new Error("Inference must not start.");
+    },
+    false,
+    true,
+    undefined,
+    "unused",
+    file,
+  );
+  const request = init(new AbortController().signal);
+  request.body = JSON.stringify({
+    model: "claude-opus-5.5",
+    input: [
+      {
+        type: "agent_message",
+        author: "/root",
+        recipient: "/root/opus",
+        content: [
+          {
+            type: "encrypted_content",
+            encrypted_content: "PRIVATE_TASK_CIPHERTEXT",
+          },
+        ],
+      },
+    ],
+  });
+  await assert.rejects(
+    sdk.transport("https://api.githubcopilot.com/responses", request),
+    { code: "COPILOT_ENCRYPTED_AGENT_MESSAGE" },
+  );
+  assert.equal(sdk.requests.length, 0);
+  assert.equal(sdk.sessions.length, 0);
+  const text = await readFile(file, "utf8");
+  assert.equal(JSON.parse(text).code, "COPILOT_ENCRYPTED_AGENT_MESSAGE");
+  assert.doesNotMatch(
+    text,
+    /PRIVATE_TASK_CIPHERTEXT|encrypted_content|instructions/i,
+  );
+});
+
+test("SDK requests portable collaboration schemas and retains real accounting without running agent tools", async (t) => {
+  const call = {
+    type: "function_call",
+    namespace: "collaboration",
+    name: "spawn_agent",
+    call_id: "child-task",
+    arguments: '{"message":"Read marker.txt"}',
+  };
+  const completed = {
+    type: "response.completed",
+    response: {
+      id: "task",
+      output: [call],
+      usage: { input_tokens: 25, output_tokens: 7 },
+    },
+    copilot_usage: { total_nano_aiu: 42 },
+  };
+  const sdk = await fixture(
+    t,
+    () =>
+      new Response(`data: ${JSON.stringify(completed)}\n\n`, {
+        headers: { "content-type": "text/event-stream" },
+      }),
+  );
+  const request = init(new AbortController().signal);
+  request.body = JSON.stringify({
+    model: "test-model",
+    tools: [
+      {
+        type: "namespace",
+        name: "collaboration",
+        tools: [
+          {
+            type: "function",
+            name: "spawn_agent",
+            parameters: {
+              type: "object",
+              properties: { message: { type: "string", encrypted: true } },
+            },
+          },
+        ],
+      },
+    ],
+    input: "Read marker.txt",
+  });
+  const text = await (
+    await sdk.transport("https://api.githubcopilot.com/responses", request)
+  ).text();
+  const result = JSON.parse(text.slice(6));
+  assert.deepEqual(result.response.output[0].encrypted_function_args, []);
+  assert.equal(
+    JSON.parse(sdk.requests[0].body).tools[0].tools[0].parameters.properties
+      .message.encrypted,
+    undefined,
+  );
+  await sdk.close();
+  assert.equal(sdk.requests.length, 1);
+  assert.equal(sdk.acknowledgements[0].copilot_usage.total_nano_aiu, 42);
 });
 
 test("a fresh bridge omits saved foreign Responses reasoning when resuming GPT", async (t) => {

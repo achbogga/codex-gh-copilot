@@ -47,6 +47,53 @@ test("Responses compatibility preserves raw custom input, call IDs and tool resu
   assert.equal(request.body.input[1].output, "saved output");
 });
 
+test("non-GPT Responses translates plaintext agent history and marks collaboration calls as plaintext", async () => {
+  const request = functionToolsRequest({
+    ...payload,
+    input: [
+      {
+        type: "agent_message",
+        author: "/root",
+        recipient: "/root/grok",
+        content: [{ type: "input_text", text: "Read marker.txt" }],
+      },
+    ],
+    tools: [
+      {
+        type: "namespace",
+        name: "collaboration",
+        tools: [
+          {
+            type: "function",
+            name: "send_message",
+            parameters: { type: "object" },
+          },
+        ],
+      },
+    ],
+  });
+  assert.equal(request.body.input[0].type, "message");
+  assert.equal(request.body.input[0].content[1].text, "Read marker.txt");
+  const event = {
+    type: "response.output_item.done",
+    item: {
+      type: "function_call",
+      id: "fc_message",
+      name: "collaboration__send_message",
+      call_id: "message-call",
+      arguments: '{"target":"child","message":"Task result"}',
+    },
+  };
+  const body = await functionToolsResponse(
+    new Response(`data: ${JSON.stringify(event)}\n\n`),
+    request,
+  ).text();
+  const call = JSON.parse(body.slice(6)).item;
+  assert.equal(call.namespace, "collaboration");
+  assert.deepEqual(call.encrypted_function_args, []);
+  assert.equal(call.call_id, "message-call");
+});
+
 test("Responses compatibility emits only complete validated custom calls and preserves terminal accounting", async () => {
   const request = functionToolsRequest(payload);
   const call = {

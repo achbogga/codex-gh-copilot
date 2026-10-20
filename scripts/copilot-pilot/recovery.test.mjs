@@ -9,6 +9,7 @@ import test from "node:test";
 import { startBridge } from "./bridge.mjs";
 import { responsesResponse } from "./responses-stream.mjs";
 import { codexInvocation } from "./run.mjs";
+import { portableAgentMessage } from "./agent-messages.mjs";
 
 const encode = (events) =>
   Buffer.from(
@@ -43,6 +44,7 @@ for (const mode of [
   "http-denied",
   "quota-denied",
   "generic-denied",
+  "encrypted-agent-denied",
 ])
   test(
     `native Codex stream recovery: ${mode}`,
@@ -59,6 +61,18 @@ for (const mode of [
         model: "gpt-6.1-sol",
         transport: async (_url, init) => {
           requests.push(JSON.parse(init.body));
+          if (mode === "encrypted-agent-denied")
+            portableAgentMessage({
+              type: "agent_message",
+              author: "/root",
+              recipient: "/root/opus",
+              content: [
+                {
+                  type: "encrypted_content",
+                  encrypted_content: "private-task-ciphertext",
+                },
+              ],
+            });
           if (mode === "http-denied")
             return new Response("private upstream denial", { status: 403 });
           let body;
