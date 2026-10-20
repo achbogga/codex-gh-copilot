@@ -26,6 +26,7 @@ use startup::should_share_codex_apps_tools_cache;
 pub(crate) use tool_catalog::BindingCatalogRevision;
 pub use tool_catalog::tool_is_model_visible;
 
+use codex_config::McpServerAuth;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -69,6 +70,8 @@ use codex_diagnostics::Gauge;
 use codex_diagnostics::GaugeGuard;
 use codex_otel::auth_storage::AuthStorageOriginator;
 use codex_protocol::mcp::CallToolResult;
+use codex_protocol::mcp::ClientMcpExtensions;
+use codex_protocol::mcp::ENTERPRISE_MANAGED_AUTHORIZATION_EXTENSION_ID;
 use codex_protocol::mcp::McpServerInfo;
 use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
@@ -207,7 +210,8 @@ impl McpServerView {
             || match self.startup_readiness {
                 McpStartupReadiness::Connection => !tools.is_empty(),
                 McpStartupReadiness::Catalog => tools.iter().any(|tool| {
-                    self.tool_filter.allows(&tool.tool.name) && tool_is_model_visible(tool)
+                    self.tool_filter.allows(&tool.tool.name)
+                        && (self.connection.startup_is_dormant() || tool_is_model_visible(tool))
                 }),
             }
     }
@@ -278,6 +282,7 @@ impl McpConnectionSet {
     /// Creates an MCP connection manager. Threadless callers can pass no `tx_event`; startup
     /// notifications are then skipped and interactive elicitations are declined.
     pub async fn new(
+        ema_auth: Option<crate::ema_auth::EmaAuthContext>,
         previous: Option<&Self>,
         publication_gate: McpPublicationGate,
         input: McpRuntimeInput,
@@ -406,6 +411,26 @@ impl McpConnectionSet {
                     })
             } else {
                 default_protocol_mode
+            };
+            let uses_ema_auth =
+                config.xaa_enabled && matches!(configured_config.auth, McpServerAuth::EmaAuth);
+            let protocol_mode = if uses_ema_auth {
+                crate::McpProtocolMode::V20260728
+            } else {
+                protocol_mode
+            };
+            let client_mcp_extensions = if uses_ema_auth {
+                ClientMcpExtensions::new(
+                    client_mcp_extensions
+                        .iter()
+                        .map(|(id, settings)| (id.to_string(), settings.clone()))
+                        .chain(std::iter::once((
+                            ENTERPRISE_MANAGED_AUTHORIZATION_EXTENSION_ID.to_string(),
+                            serde_json::json!({}),
+                        ))),
+                )
+            } else {
+                client_mcp_extensions
             };
             let configured_tool_filter = ToolFilter::from_config(&configured_config);
             let startup_timeout = configured_config
@@ -642,6 +667,7 @@ impl McpConnectionSet {
             let cancel_token = startup_cancellation_token.child_token();
             let mut tool_catalog_cache_context = if server_name == CODEX_APPS_MCP_SERVER_NAME
                 || server.requires_read_only_mcp_tools()
+                || matches!(configured_config.auth, McpServerAuth::EmaAuth)
             {
                 None
             } else if let Ok(environment) = resolved_environment.as_ref() {
@@ -665,6 +691,7 @@ impl McpConnectionSet {
             }
             let has_runtime_auth = runtime_auth_provider.is_some();
             let async_managed_client = AsyncManagedClient::new(
+                ema_auth.clone(),
                 server_name.clone(),
                 startup_submit_id.clone(),
                 server,
@@ -700,10 +727,9 @@ impl McpConnectionSet {
                     .as_ref()
                     .and_then(McpToolCatalogCacheContext::current_tools)
                     .is_some_and(|tools| {
-                        tools.into_iter().any(|tool| {
-                            configured_tool_filter.allows(&tool.tool.name)
-                                && tool_is_model_visible(&tool)
-                        })
+                        tools
+                            .into_iter()
+                            .any(|tool| configured_tool_filter.allows(&tool.tool.name))
                     });
             let (startup_trigger, startup_receiver) = if defer_startup {
                 let (trigger, receiver) = watch::channel(false);
@@ -763,7 +789,11 @@ impl McpConnectionSet {
                 }
                 if let Some(tx_event) = tx_event.as_ref() {
                     let auth_state = match &outcome {
-                        Err(error) if error.is_authentication_required() && !has_runtime_auth => {
+                        Err(error)
+                            if error.is_authentication_required()
+                                && !has_runtime_auth
+                                && !matches!(configured_config.auth, McpServerAuth::EmaAuth) =>
+                        {
                             match &configured_config.transport {
                                 McpServerTransportConfig::StreamableHttp {
                                     url,
@@ -1036,18 +1066,13 @@ impl McpConnectionSet {
         }
     }
 
-    /// Invoke the tool indicated by the (server, tool) pair.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn call_tool(
+    /// Rejects invalid host calls before they can start a server or capture attribution.
+    pub(crate) fn validate_tool_call(
         &self,
         server: &str,
         tool: &str,
         environment_id: Option<&str>,
-        arguments: Option<serde_json::Value>,
-        mut meta: Option<serde_json::Value>,
-        requested_timeout: Option<Duration>,
-        wait_for_server: bool,
-    ) -> Result<CallToolResult> {
+    ) -> Result<()> {
         let view = self
             .servers
             .get(server)
@@ -1065,6 +1090,23 @@ impl McpConnectionSet {
                 "tool '{tool}' is disabled for MCP server '{server}'"
             ));
         }
+        Ok(())
+    }
+
+    /// Invoke the tool indicated by the (server, tool) pair.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn call_tool(
+        &self,
+        server: &str,
+        tool: &str,
+        environment_id: Option<&str>,
+        arguments: Option<serde_json::Value>,
+        mut meta: Option<serde_json::Value>,
+        requested_timeout: Option<Duration>,
+        wait_for_server: bool,
+    ) -> Result<CallToolResult> {
+        self.validate_tool_call(server, tool, environment_id)?;
+        let view = &self.servers[server];
         let client = if wait_for_server {
             view.connection
                 .client()

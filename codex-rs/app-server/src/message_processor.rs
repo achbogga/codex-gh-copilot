@@ -72,6 +72,7 @@ use codex_app_server_protocol::JSONRPCErrorError;
 use codex_app_server_protocol::JSONRPCNotification;
 use codex_app_server_protocol::JSONRPCRequest;
 use codex_app_server_protocol::JSONRPCResponse;
+use codex_app_server_protocol::ThreadSampleCancelResponse;
 use codex_app_server_protocol::UserVerificationCancelResponse;
 use codex_app_server_protocol::experimental_required_message;
 use codex_arg0::Arg0DispatchPaths;
@@ -329,6 +330,7 @@ impl MessageProcessor {
         let extension_event_sink =
             app_server_extension_event_sink(outgoing.clone(), thread_state_manager.clone());
         let mut queue_service = None;
+        let sample_responses = Arc::new(crate::thread_sample::SampleResponseRegistry::default());
         let thread_manager = Arc::new_cyclic(|thread_manager| {
             queue_service = queue_store.map(|queue| {
                 Arc::new(QueuedItemService::new(
@@ -347,6 +349,7 @@ impl MessageProcessor {
                 thread_extensions(
                     config.as_ref(),
                     ThreadExtensionDependencies {
+                        sample_responses: Arc::clone(&sample_responses),
                         event_sink: Arc::clone(&extension_event_sink),
                         auth_manager: auth_manager.clone(),
                         state_db: state_db.clone(),
@@ -535,6 +538,7 @@ impl MessageProcessor {
             Arc::clone(&skills_watcher),
             turn_cost_worker.as_ref().map(TurnCostWorker::handle),
             config_warnings,
+            sample_responses,
         );
         let turn_processor = TurnRequestProcessor::new(
             auth_manager,
@@ -1005,7 +1009,8 @@ impl MessageProcessor {
             | ClientRequest::TurnSettingsUpdate { .. }
             | ClientRequest::ThreadDelete { .. }
             | ClientRequest::ThreadArchive { .. } => (Some(self.turn_admission.admit()?), false),
-            ClientRequest::TurnStart { .. }
+            ClientRequest::ThreadSample { .. }
+            | ClientRequest::TurnStart { .. }
             | ClientRequest::TurnSteer { .. }
             | ClientRequest::ReviewStart { .. }
             | ClientRequest::ThreadCompactStart { .. }
@@ -1334,6 +1339,20 @@ impl MessageProcessor {
                         client_mcp_extensions.clone(),
                     )
                     .await
+            }
+            ClientRequest::ThreadSample { params, .. } => self
+                .thread_processor
+                .thread_sample(params, Arc::clone(&session.rpc_gate), request_context)
+                .await
+                .map(|response| Some(response.into())),
+            ClientRequest::ThreadSampleCancel { params, .. } => {
+                self.outgoing
+                    .cancel_thread_sample_request(&ConnectionRequestId {
+                        connection_id,
+                        request_id: params.request_id,
+                    })
+                    .await;
+                Ok(Some(ThreadSampleCancelResponse {}.into()))
             }
             ClientRequest::ThreadArchive { params, .. } => {
                 self.thread_processor

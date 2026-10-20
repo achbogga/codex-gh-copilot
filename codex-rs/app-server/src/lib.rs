@@ -53,6 +53,7 @@ use codex_app_server_protocol::JSONRPCMessage;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::TextPosition as AppTextPosition;
 use codex_app_server_protocol::TextRange as AppTextRange;
+use codex_app_server_transport::WebSocketCompression;
 use codex_app_server_transport::daemon_recovery_file_path;
 use codex_config::ConfigLayerSource;
 use codex_config::ConfigLoadError;
@@ -103,6 +104,10 @@ mod code_mode_host;
 mod codex_home_metrics;
 mod command_exec;
 mod config_layer;
+mod startup_config;
+pub use startup_config::StartupConfigArgs;
+pub use startup_config::print_startup_config;
+
 mod config_manager;
 mod config_manager_service;
 mod connection_cleanup;
@@ -137,6 +142,7 @@ mod request_processors;
 mod request_serialization;
 mod server_request_error;
 mod skills_watcher;
+mod thread_sample;
 mod thread_state;
 mod thread_status;
 mod transport;
@@ -545,22 +551,12 @@ pub async fn run_main_with_transport_options(
         arg0_paths.clone(),
         Arc::new(NoopThreadConfigLoader),
     );
-    let bootstrap_config = config_manager
-        .load_startup_config(startup_cwd.clone())
-        .await?
-        .config;
-    let bootstrap_auth =
-        AuthManager::shared_from_config(&bootstrap_config, /*enable_codex_api_key_env*/ false)
-            .await
-            .map_err(std::io::Error::other)?;
-    config_manager.replace_cloud_config_bundle_loader(
-        bootstrap_auth,
-        bootstrap_config.chatgpt_base_url.clone(),
-        bootstrap_config.http_client_factory(),
-    );
+    let startup = config_manager
+        .load_cloud_startup_config(startup_cwd.clone())
+        .await?;
     let mut config_warnings = Vec::new();
     let mut plugin_startup_config = PluginStartupConfig::Current;
-    let config = match config_manager.load_latest_config(startup_cwd.clone()).await {
+    let config = match startup.config {
         Ok(config) => config,
         Err(err) if is_unsupported_untrusted_approval_policy_error(&err) => {
             return Err(err);
@@ -792,6 +788,14 @@ pub async fn run_main_with_transport_options(
     let remote_control_shutdown_token = transport_shutdown_token.child_token();
     let mut transport_accept_handles = Vec::<JoinHandle<()>>::new();
 
+    let websocket_compression = if config
+        .features
+        .enabled(Feature::AppServerWebSocketCompression)
+    {
+        WebSocketCompression::Zstd
+    } else {
+        WebSocketCompression::Plain
+    };
     let single_client_mode = matches!(&transport, AppServerTransport::Stdio);
     let graceful_signal_restart_enabled =
         runtime_options.install_shutdown_signal_handler && !single_client_mode;
@@ -822,6 +826,7 @@ pub async fn run_main_with_transport_options(
                 } else {
                     DaemonShutdownAccess::Disabled
                 },
+                websocket_compression,
             )
             .await?;
             transport_accept_handles.push(accept_handle);
@@ -832,6 +837,7 @@ pub async fn run_main_with_transport_options(
                 transport_event_tx.clone(),
                 transport_shutdown_token.clone(),
                 policy_from_settings(&auth)?,
+                websocket_compression,
             )
             .await?;
             transport_accept_handles.push(accept_handle);

@@ -101,7 +101,7 @@ pub enum Feature {
     ApiKeyCyberAccessPrograms,
     /// Enable Daybreak controls and automatic access-program selection in CLI clients.
     CliDaybreak,
-    /// Deprecated no-op; use `tui.fullscreen_transcript` instead.
+    /// Removed no-op; use `tui.fullscreen_transcript` instead.
     TranscriptV2,
     // Stable.
     /// Enable the default shell tool.
@@ -117,6 +117,8 @@ pub enum Feature {
 
     /// Automatically start the shared local daemon for eligible interactive launches.
     DaemonAutoStart,
+    /// Enable negotiated zstd compression for app-server WebSocket and UDS connections.
+    AppServerWebSocketCompression,
 
     // Experimental
     /// Advertise enabled environment-backed tools and their shell parameters before the
@@ -230,11 +232,15 @@ pub enum Feature {
     ModelCatalogInContext,
     /// Inherit client-defined dynamic tools in fresh V2 subagents.
     MultiAgentV2DynamicTools,
+    /// Inherit configured thread environments instead of temporary turn selections.
+    SubagentThreadEnvironments,
     /// Use each subagent model's default context window and auto-compaction threshold.
     SubagentDefaultContextLimits,
     /// Keep sampling through reasoning and commentary boundaries when agent mail arrives.
     /// Pending mail is delivered at the next normal input boundary instead.
     DeferMailboxPreemption,
+    /// Allow agent messages to wake idle root sessions after a completed turn.
+    WakeOnAgentMessages,
     /// Preempt responses and yield foreground code-mode observations on new user input.
     InstantInterrupt,
     /// Enable shared discussion tools for an agent tree.
@@ -1038,9 +1044,15 @@ pub const FEATURES: &[FeatureSpec] = &[
         default_enabled: true,
     },
     FeatureSpec {
+        id: Feature::AppServerWebSocketCompression,
+        key: "app_server_websocket_compression",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
         id: Feature::TranscriptV2,
         key: "transcript_v2",
-        stage: Stage::Deprecated,
+        stage: Stage::Removed,
         default_enabled: false,
     },
     // Stable features.
@@ -1503,6 +1515,12 @@ pub const FEATURES: &[FeatureSpec] = &[
         default_enabled: false,
     },
     FeatureSpec {
+        id: Feature::SubagentThreadEnvironments,
+        key: "subagent_thread_environments",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
         id: Feature::SubagentDefaultContextLimits,
         key: "subagent_default_context_limits",
         stage: Stage::UnderDevelopment,
@@ -1511,6 +1529,12 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::DeferMailboxPreemption,
         key: "defer_mailbox_preemption",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
+        id: Feature::WakeOnAgentMessages,
+        key: "wake_on_agent_messages",
         stage: Stage::UnderDevelopment,
         default_enabled: false,
     },
@@ -1607,8 +1631,8 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::IncrementalTools,
         key: "incremental_tools",
-        stage: Stage::UnderDevelopment,
-        default_enabled: false,
+        stage: Stage::Stable,
+        default_enabled: true,
     },
     FeatureSpec {
         id: Feature::NonPrefixedMcpToolNames,
