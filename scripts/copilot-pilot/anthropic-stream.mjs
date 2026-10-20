@@ -5,7 +5,7 @@ import { plaintextAgentCall } from "./agent-messages.mjs";
 const maxEventBytes = 32 * 1024 * 1024;
 const maxContentBytes = 32 * 1024 * 1024;
 
-export function messagesResponse(response, request) {
+export function messagesResponse(response, request, { onDiagnostic } = {}) {
   const finished = Promise.withResolvers();
   const started = Promise.withResolvers();
   const encode = (event) => Buffer.from(`data: ${JSON.stringify(event)}\n\n`);
@@ -16,7 +16,9 @@ export function messagesResponse(response, request) {
       partial = "",
       buffer = "",
       contentBytes = 0,
-      stopped = false;
+      stopped = false,
+      receivedEvents = 0,
+      lastEvent;
     const output = [],
       decoder = new TextDecoder();
     const event = (type, data = {}) => encode({ type, ...data });
@@ -44,6 +46,8 @@ export function messagesResponse(response, request) {
             continue;
           }
           const value = JSON.parse(data);
+          receivedEvents++;
+          lastEvent = value.type;
           if (value.copilot_usage && message)
             message.copilot_usage = value.copilot_usage;
           if (value.type === "error") {
@@ -146,7 +150,11 @@ export function messagesResponse(response, request) {
               item.encrypted_content =
                 thinkingPrefix +
                 Buffer.from(
-                  JSON.stringify({ model: request.body.model, block }),
+                  JSON.stringify({
+                    model: request.body.model,
+                    message_id: message.id,
+                    block,
+                  }),
                 ).toString("base64");
             yield itemEvent("response.output_item.done");
             output.push(item);
@@ -215,6 +223,56 @@ export function messagesResponse(response, request) {
           throw new Error("Anthropic event exceeds 32 MiB.");
       }
       if (!stopped) throw new Error("Incomplete Anthropic event stream.");
+    } catch (error) {
+      try {
+        onDiagnostic?.({
+          code: "ANTHROPIC_STREAM_FAILED",
+          received_events: receivedEvents,
+          last_event: [
+            "message_start",
+            "content_block_start",
+            "content_block_delta",
+            "content_block_stop",
+            "message_delta",
+            "message_stop",
+            "error",
+            "ping",
+          ].includes(lastEvent)
+            ? lastEvent
+            : "unknown",
+          failure:
+            error.message === "Anthropic returned an unknown tool."
+              ? "unknown_tool"
+              : error.message === "Invalid custom tool input."
+                ? "invalid_custom_input"
+                : "incomplete_or_invalid_stream",
+          block_type: [
+            "tool_use",
+            "thinking",
+            "redacted_thinking",
+            "text",
+          ].includes(block?.type)
+            ? block.type
+            : "unknown",
+          ...(block?.type === "tool_use" &&
+          /^[a-zA-Z0-9_.-]{1,128}$/.test(block.name)
+            ? { tool_name: block.name }
+            : {}),
+          stop_reason: [
+            "end_turn",
+            "tool_use",
+            "stop_sequence",
+            "refusal",
+            "max_tokens",
+            "pause_turn",
+            "model_context_window_exceeded",
+          ].includes(message?.stop_reason)
+            ? message.stop_reason
+            : "unknown",
+          output_bytes: contentBytes,
+        });
+      } catch {} // Metadata-only diagnostics cannot interrupt inference.
+      throw error;
     } finally {
       started.resolve(null);
       finished.resolve(null);

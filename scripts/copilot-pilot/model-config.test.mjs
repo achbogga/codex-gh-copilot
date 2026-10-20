@@ -52,7 +52,12 @@ test("switchable catalogs keep context and reasoning limits per model without gl
   assert.equal(entries[1].default_reasoning_level, "high");
   assert.equal(entries[0].priority, 0);
   assert.equal(reasoningForModel(small, "max"), "high");
-  assert.throws(() => reasoningForModel(small, "xhigh"), /Unsupported/);
+  assert.equal(reasoningForModel(small, "xhigh"), "high");
+  assert.equal(reasoningForModel(small, "none"), "high");
+  assert.throws(() => reasoningForModel(small, "adaptive"), /Unsupported/);
+  assert.equal(entries[0].comp_hash, entries[1].comp_hash);
+  assert.equal(entries[0].tool_mode, "code_mode");
+  assert.equal(entries[1].tool_mode, "code_mode");
 });
 
 test("context configuration reserves output space and uses the container catalog path", async (t) => {

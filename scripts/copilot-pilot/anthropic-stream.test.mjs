@@ -94,6 +94,33 @@ function response(values, { doneMarker = false } = {}) {
   );
 }
 
+test("Messages failure diagnostics identify malformed tool calls without prompt, arguments or thinking content", async () => {
+  const diagnostics = [];
+  const translated = messagesResponse(
+    response(
+      events([
+        {
+          type: "tool_use",
+          id: "bad-call",
+          name: "unadvertised_tool",
+          input: { secret: "PRIVATE_TOOL_ARGUMENTS" },
+        },
+      ]),
+    ),
+    messagesRequest(payload, model),
+    { onDiagnostic: (value) => diagnostics.push(value) },
+  );
+  await assert.rejects(translated.response.text(), /unknown tool/);
+  assert.equal(await translated.completion, null);
+  assert.equal(diagnostics[0].code, "ANTHROPIC_STREAM_FAILED");
+  assert.equal(diagnostics[0].failure, "unknown_tool");
+  assert.equal(diagnostics[0].tool_name, "unadvertised_tool");
+  assert.doesNotMatch(
+    JSON.stringify(diagnostics),
+    /PRIVATE_TOOL_ARGUMENTS|signed-opaque-data|Fix the file/,
+  );
+});
+
 test("Claude collaboration calls use native plaintext message delivery", async () => {
   const request = messagesRequest(
     {

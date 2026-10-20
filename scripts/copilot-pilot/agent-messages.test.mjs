@@ -97,6 +97,39 @@ test("plaintext calls select the native plaintext delivery path without changing
   );
 });
 
+test("Responses Lite embedded tools use portable collaboration and replay native plaintext calls", () => {
+  const embedded = {
+    type: "additional_tools",
+    id: "at_native",
+    role: "developer",
+    tools: [definition],
+  };
+  const input = [embedded, { ...call, encrypted_function_args: [] }];
+  const converted = portableAgentTools({ input });
+  assert.equal(converted.input[0].id, embedded.id);
+  assert.equal(converted.input[0].tools[0].name, agentWireNamespace);
+  assert.equal(
+    converted.input[0].tools[0].tools[0].parameters.properties.message
+      .encrypted,
+    undefined,
+  );
+  assert.equal(converted.input[1].namespace, agentWireNamespace);
+  assert.equal(
+    input[0].tools[0].tools[0].parameters.properties.message.encrypted,
+    true,
+  );
+  assert.equal(input[1].namespace, "collaboration");
+  assert.throws(
+    () =>
+      portableAgentTools({
+        input: [
+          { ...embedded, tools: [{ ...definition, name: agentWireNamespace }] },
+        ],
+      }),
+    /already in use/,
+  );
+});
+
 test("GPT streams retain ordinary bytes while portable task calls and accounting survive fragmented UTF-8", async () => {
   const ordinary =
     'event: response.in_progress\r\ndata: {"type":"response.in_progress","text":"café"}\r\n\r\n';

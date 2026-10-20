@@ -25,11 +25,23 @@ cxf -m grok-4.7
 cxf resume SESSION_ID
 ```
 
-The October 17 seat check advertised 21 concrete models: GPT, Claude, Grok and MAI. Discovery refreshes on each launch. Explicitly disabled models stay excluded; a missing raw policy field is accepted only when the official SDK also lists the model. The seat's `auto` router does not advertise a concrete context window or transport and is not included as a model with invented limits.
+The October 20 seat check advertised 16 concrete models: GPT, Claude, Grok and MAI. The earlier October 17 catalog contained 21; models removed by the provider are not invented or re-enabled locally. Discovery refreshes on each launch. Explicitly disabled models stay excluded; a missing raw policy field is accepted only when the official SDK also lists the model. The seat's `auto` router does not advertise a concrete context window or transport and is not included as a model with invented limits.
 
 The default remains GPT-6.1 Sol (`gpt-6.1-sol`), max reasoning, and the full advertised context limit. Each model has its own context and compaction metadata, so `/model` does not inherit GPT's window when switching to a smaller model. Other models default to their strongest advertised reasoning effort (`max`, `xhigh`, or `high`); Haiku uses its advertised thinking budget instead of an unsupported effort parameter. For GPT-6.1 Sol, the Copilot catalog currently advertises 1,050,000 total context tokens, with a 922,000-token input limit and 128,000-token output limit. Auto-compaction retains headroom at 95% of the input limit (875,900 tokens). Limits are read from the provider catalog at launch. For advertised windows of at least one million tokens, the SDK session explicitly selects `contextTier="long_context"`; its `reasoningEffort` follows the Codex request. This uses the official runtime's context-tier selection rather than relying only on Codex's token-window override. `--model`, `--reasoning`, `--state-dir`, `--copilot-bin`, and `--codex-bin` override these choices. The Codex binary must retain its companion executables, including `codex-code-mode-host`. Changes to Rust are unnecessary for this transport integration.
 
 All launchers explicitly set `features.api_key_model_discovery=false`. Codex 0.161 enables API-key model discovery by default, but this bridge implements Responses rather than Codex's discovery endpoint. The Copilot SDK still checks the seat's enabled model catalog and context limits at every launch. This setting applies to `cxf`, `cxo`, the direct launcher, and Docker; verify it with `cxf features list`.
+
+### Native session switching
+
+Use `/model` in an existing `cxf` session. Visible conversation, structured native tool calls and results, call/result IDs, filesystem changes and native session storage remain available to the destination. A normal switch retains the original history rather than replacing it with a handoff summary. Each model receives its own advertised context window and supported reasoning settings. Claude, Grok and MAI can use native direct tools alongside Code Mode, so a direct shell or patch call in an earlier model's history does not force the next model into a different tool convention.
+
+Opaque reasoning is stored with durable model ownership in native rollouts. New GPT reasoning uses the `copilot-model-state-v3:` envelope: a small model tag surrounding unchanged provider bytes, not new encryption or a decryption key. The original bytes are restored only to the originating GPT model, including after a bridge restart or a switch away and back. Claude signed thinking retains its exact block and response boundary and is replayed only to the originating Claude model. Thinking-only responses remain separate; merging them would invalidate provider signatures. Foreign private reasoning stays archived and is omitted from incompatible wire requests. Old raw GPT ciphertext without a durable owner is also retained on disk and omitted on the wire rather than guessing its owner after restart. Grok rejects replay of its own opaque reasoning, so it remains archived while visible history continues normally.
+
+The adapter normalizes provider-specific optional tool item IDs only in outgoing GPT requests; `call_id`, arguments and results remain linked and the native archive is unchanged. Collaboration schemas are adapted in both standard Responses tools and newer GPT Responses Lite `additional_tools` declarations.
+
+If a conversation is too large for a smaller destination, installed Codex compacts it using the **source model before switching**. Models with equal total windows can also have different input allowances or output reserves. For those native compaction requests, the adapter uses saved model ownership to keep summarization with an authorized source that has the larger input budget. It preserves the native request, summary and accounting; no extra model call or tool loop is added. Unknown ownership never selects a guessed model. The complete raw conversation remains in native session storage, while the smaller model receives the checkpoint and subsequent history. A smaller window cannot hold an arbitrarily larger raw conversation; no encryption adapter can change that limit. Sessions created before this format may receive a one-time source-model compaction during migration.
+
+Provider-private state is not portable across model keys/accounts, and provider refusals are never retried or bypassed. In the October 20 live checks, `claude-opus-5` repeatedly declined its own saved test conversation even when old private reasoning was omitted in a controlled probe; other models could continue that conversation. Its presence in the seat catalog is not a guarantee that every history is accepted. Large-context probes also observed provider HTTP 503 `model_overloaded` and an upstream EOF; advertised maximum windows are configured, but remote capacity and uninterrupted inference cannot be guaranteed.
 
 ### Streaming and compaction
 
@@ -41,7 +53,7 @@ Successful HTTP response cleanup does not cancel a pending runtime acknowledgeme
 
 A provider `response.failed` or `response.incomplete` event is preserved instead of being replaced by a generic disconnect. An `interrupted` response uses Codex's native continuation protocol and retains its real accounting. Generic provider error events are classified for Codex; unknown generic rejections stop without retrying.
 
-Responses failures write metadata to `CODEX_HOME/stream-diagnostics.jsonl`: time, model, context tier, reasoning effort, request size, elapsed milliseconds, event/byte counts, allowlisted error codes and which cancellation signal fired. Prompts, tool outputs, credentials, raw error messages and reasoning content are excluded. The private log stops appending at 1 MiB; move it aside to start a fresh log. Diagnostics failure never interrupts inference.
+Responses and Messages stream failures write metadata to `CODEX_HOME/stream-diagnostics.jsonl`: time, model, context tier, reasoning effort, request size, elapsed milliseconds, event/byte counts, allowlisted error codes and which cancellation signal fired. Messages diagnostics also identify the last protocol event, block type, stop reason and a malformed tool name when applicable. Prompts, tool outputs, credentials, raw error messages and reasoning content are excluded. The private log stops appending at 1 MiB; move it aside to start a fresh log. Diagnostics failure never interrupts inference.
 
 The October 9 investigation found two GPT requests interrupted almost exactly 300 seconds after the preceding tool result, with about 265k and 388k input tokens. The original bridge timer and SDK `sendAndWait` each imposed a five-minute total limit. These limits predated the API-key discovery change; they have been replaced with inactivity and session-lifecycle handling. The Copilot provider uses HTTP streaming with WebSockets disabled. The separate `websocket closed by server before response.completed` message from regular Codex is outside this bridge.
 
@@ -142,7 +154,7 @@ In Docker mode, GitHub credentials remain outside the container. A private Unix 
 - ChatGPT-hosted features are not conferred by a Copilot seat. Copilot-specific governance controls are not automatically equivalent to Codex's controls; enterprise approval of this custom client and its data handling remains an organizational question.
 - Access denials and unsupported models fail closed. The adapter forwards each request once; Codex owns the bounded stream recovery described above. Upstream HTTP error bodies are suppressed, inference requests are bounded to 32 MiB, and a disconnected caller cancels inference. Size failures enter Codex's context-limit handling. TLS verification stays enabled.
 
-The SDK transport hook is experimental and pinned to SDK 1.0.22. Its internal completion acknowledgement preserves the real usage/accounting while preventing the runtime from executing Codex tool calls. Native GPT Responses output reaches Codex unchanged except for portable collaboration calls and their namespace/plaintext metadata; Grok and MAI tool events are translated to Codex custom-tool events. Generic protocol errors can be classified into Responses failure events.
+The SDK transport hook is experimental and pinned to SDK 1.0.22. Its internal completion acknowledgement preserves the real usage/accounting while preventing the runtime from executing Codex tool calls. Native GPT Responses output retains its content and accounting, with portable collaboration metadata and durable ownership around opaque reasoning; Grok and MAI tool events are translated to Codex custom-tool events. Generic protocol errors can be classified into Responses failure events.
 
 ## Installation and upstream checks on the configured machine
 
@@ -164,6 +176,34 @@ Release reminders appear when launching `codex-copilot`, `cx`, or `cxf` in a ter
 Stop scheduled checks with `systemctl --user disable --now codex-copilot-updates.timer`. To adopt upstream source, first review `git log HEAD..upstream/main`; fetching alone does not update the installed Codex binary.
 
 ## Validation
+
+The October 20 switching checks ran on Codex 0.163.0, Copilot CLI 1.0.100 and SDK 1.0.22. The [machine-readable report](validation-2026-10-20.json) contains all transition results, model limits and unresolved provider failures.
+
+| Check | Result |
+| --- | --- |
+| Live native switching, including exact retained tool history, shell use and patched files | 249/256 passed; all seven remaining cases were explicit `claude-opus-5` provider refusals |
+| Synthetic near-limit matrix through the installed native engine | 256/256 passed, including 104 compactions with source affinity checked |
+| Real-provider compaction across unequal input budgets | 2/2 passed; only the native client's reported token counts were simulated |
+| Fresh-process resume, switch away, switch back | 15/16 models passed all three stages; Opus 5 declined the resumed conversation |
+| Advertised reasoning configurations | All 76 accepted by real inference; marker compliance is reported separately |
+| Physical large-context requests | 10/16 completed at about 93–94% of input allowance; nine retrieved both markers; the other GPT requests encountered upstream overload or EOF |
+| Regular checks | 82 Node checks, nine native recovery/size checks and seven updater checks passed; 11 opt-in checks skipped in the regular Node run |
+
+The provider failures remain visible. These results establish the tested native session/tool compatibility; they do not guarantee that every provider accepts every conversation or maximum-size request.
+
+The opt-in model matrix uses the installed native Codex app-server, the official Copilot runtime and generated test files. Each source reads a private random marker with a shell tool and applies a real patch. Every destination forks that native session, reads a new marker with a native shell tool, recalls the old marker and verifies the patched artifact. It checks structured call/result history and the destination's native context metadata. The synthetic mode replaces only model inference, reports near-window token usage and exercises source-model compaction through the same native tool engine; it is not a real capacity measurement. Both modes cover the current catalog's 16 × 16 transitions. `--live --near-limit` uses real model inference but simulates near-limit usage only for the isolated native test client; the SDK retains genuine accounting. It checks real signed-state and compaction compatibility without constructing a huge prompt. The restart check starts fresh native and runtime processes, resumes generated sessions and switches away and back. Separate capability checks exercise every advertised reasoning level; `--context` sends generated input near advertised limits and can consume substantial seat credits. Reports distinguish API acceptance from marker retrieval or model refusals. Refusals, overloads and failed attempts are retained rather than silently retried until green.
+
+```bash
+export COPILOT_PILOT_CODEX_BIN=/absolute/path/to/native/codex
+export COPILOT_PILOT_RUNTIME_BIN=/absolute/path/to/copilot
+node scripts/copilot-pilot/model-switch-check.mjs --live --out /private/new-matrix --jobs 3
+node scripts/copilot-pilot/model-switch-check.mjs --synthetic --out /private/new-compaction-matrix --jobs 4
+node scripts/copilot-pilot/model-capabilities-check.mjs --live --reasoning --out /private/new-reasoning-check
+# Optional, substantially larger real requests:
+node scripts/copilot-pilot/model-capabilities-check.mjs --live --context --out /private/new-context-check
+```
+
+These checks never start subagents, execute tools through the SDK or modify existing user sessions. Restart tests require an explicitly supplied manifest of generated test sessions, including their native state directories, thread IDs, artifact paths and expected generated markers.
 
 The October 20 maintenance synchronized upstream source and installed verified Copilot CLI 1.0.100. Codex 0.163.0 and SDK 1.0.22 remained the latest stable versions. Before the fix, a fresh Opus shell-tool check succeeded while the recorded Opus agent threads repeatedly failed with generic local HTTP 502 errors. The `agent_message` incompatibility was reproduced directly. After the fix, installed Codex resumed a synthetic Opus session containing a plaintext agent task, read its hidden task marker, used shell commands, and applied a real patch. Live GPT, Opus and Grok protocol checks emitted plaintext collaboration calls while preserving exact task text and real accounting, without executing agent tools. Opus 5 and Opus 4.8 also resumed that test conversation and used shell tools. All 69 regular Node checks, nine native recovery/compaction checks and seven updater checks passed. These include namespace restoration, non-GPT tool conversion, encrypted-task rejection and metadata-only diagnostics. Encrypted-task rejections stop after one native request. Both 660-second synthetic full-bridge stream tests passed on Copilot CLI 1.0.100, each with one backend request, one runtime request, an accepted accounting acknowledgement and no reconnects.
 

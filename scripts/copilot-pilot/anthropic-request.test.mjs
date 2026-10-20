@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { model, payload } from "./anthropic-fixtures.mjs";
-import { messagesRequest } from "./anthropic-request.mjs";
+import { messagesRequest, thinkingPrefix } from "./anthropic-request.mjs";
 import { listModels } from "./bridge.mjs";
 
 test("unsupported history, tools and tool-name collisions fail closed", () => {
@@ -37,6 +37,97 @@ test("model switches retain visible history while omitting foreign opaque reason
     "Saved visible progress.",
   );
   assert.equal(request.body.messages[2].content[0].text, "Continue on Claude.");
+});
+
+test("native assistant continuations retain complete history without unsupported prefill", () => {
+  const input = [
+    ...payload.input,
+    { role: "assistant", content: "Visible work from the previous model." },
+  ];
+  const translated = messagesRequest({ ...payload, input }, model);
+  assert.equal(
+    translated.body.messages.at(-2).content[0].text,
+    input.at(-1).content,
+  );
+  assert.equal(translated.body.messages.at(-1).role, "user");
+  assert.match(
+    translated.body.messages.at(-1).content[0].text,
+    /Continue the pending task/,
+  );
+  assert.equal(input.length, payload.input.length + 1);
+});
+
+test("Code Mode models receive output-printing instructions alongside native tool definitions", () => {
+  const request = messagesRequest(
+    {
+      ...payload,
+      tools: [{ type: "custom", name: "exec", description: "Run JavaScript" }],
+    },
+    model,
+  );
+  assert.match(
+    request.body.system.at(-1).text,
+    /text\(await tools.exec_command/,
+  );
+  assert.equal(request.body.tools[0].name, "exec");
+});
+
+test("separate signed thinking responses retain provider boundaries across native history and restart", () => {
+  for (const legacy of [false, true]) {
+    const reasoning = (id, signature) => ({
+      id: `${id}_0`,
+      type: "reasoning",
+      encrypted_content:
+        thinkingPrefix +
+        Buffer.from(
+          JSON.stringify({
+            model: model.id,
+            ...(legacy ? {} : { message_id: id }),
+            block: { type: "thinking", thinking: "", signature },
+          }),
+        ).toString("base64"),
+    });
+    const input = [
+      ...payload.input,
+      reasoning("msg_first", "first-signed-block"),
+      reasoning("msg_second", "second-signed-block"),
+      {
+        type: "function_call",
+        id: "msg_second_1",
+        call_id: "call_native",
+        namespace: "functions",
+        name: "shell",
+        arguments: '{"cmd":"pwd"}',
+      },
+      {
+        type: "function_call_output",
+        call_id: "call_native",
+        output: "workspace",
+      },
+    ];
+    const request = messagesRequest(
+      { ...payload, input: JSON.parse(JSON.stringify(input)) },
+      model,
+    );
+    assert.deepEqual(
+      request.body.messages.map((m) => m.role),
+      ["user", "assistant", "user", "assistant", "user"],
+    );
+    assert.equal(
+      request.body.messages[1].content[0].signature,
+      "first-signed-block",
+    );
+    assert.equal(
+      request.body.messages[3].content[0].signature,
+      "second-signed-block",
+    );
+    assert.equal(request.body.messages[3].content[1].tool_use_id, undefined);
+    assert.equal(request.body.messages[3].content[1].id, "call_native");
+    assert.equal(
+      request.body.messages[4].content[0].tool_use_id,
+      "call_native",
+    );
+  }
 });
 
 test("Messages discovery requires SDK opt-in and enabled policy", async () => {

@@ -1,5 +1,6 @@
 import { mapResponseEvents } from "./responses-events.mjs";
 import { portableAgentMessage, plaintextAgentCall } from "./agent-messages.mjs";
+import { sealModelState } from "./model-state.mjs";
 
 // Keep provenance in saved rollouts as well as in the current bridge process.
 // Grok rejects its opaque reasoning on input, even on the same model.
@@ -84,10 +85,7 @@ export function functionToolsResponse(response, request) {
   const itemTools = new Map();
   const item = (value, done) => {
     if (value?.type === "reasoning" && value.encrypted_content)
-      return {
-        ...value,
-        encrypted_content: responsesThinkingPrefix + value.encrypted_content,
-      };
+      return sealModelState(value, request.body.model);
     if (value?.type !== "function_call") return value;
     const tool = request.tools.get(value.name);
     if (!tool) throw new Error("Unknown Responses output tool.");

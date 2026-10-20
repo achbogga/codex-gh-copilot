@@ -17,8 +17,14 @@ import {
 import { messagesResponse } from "./anthropic-stream.mjs";
 import { responsesResponse } from "./responses-stream.mjs";
 import { appendFileSync, statSync } from "node:fs";
-import { createHash } from "node:crypto";
 import { runtimeAcknowledgement } from "./runtime-ack.mjs";
+import {
+  restoreModelState,
+  modelStateResponse,
+  modelStatePrefix,
+  responseHistoryItem,
+  compactionModel,
+} from "./model-state.mjs";
 import {
   portableAgentTools,
   portableAgentResponse,
@@ -52,13 +58,6 @@ export async function createSdkTransport({
     );
   const pending = new Map();
   const tasks = new Set();
-  // Track provenance without copying opaque reasoning or changing GPT streams.
-  // Foreign providers cannot authenticate one another's encrypted state.
-  const reasoningOrigins = new Map();
-  const reasoningKey = (content) =>
-    typeof content === "string" && content.length
-      ? createHash("sha256").update(content).digest("hex")
-      : undefined;
   let catalog;
   let runtimeModels = [];
   const diagnose = (details) => {
@@ -148,7 +147,15 @@ export async function createSdkTransport({
           !response.headers.get("content-type")?.startsWith("text/event-stream")
         )
           throw new Error("Expected an Anthropic event stream.");
-        const translated = messagesResponse(response, job.messages);
+        const translated = messagesResponse(response, job.messages, {
+          onDiagnostic: (details) =>
+            diagnose({
+              ...details,
+              model: job.model,
+              request_bytes: Buffer.byteLength(job.init.body),
+              elapsed_ms: Date.now() - job.startedAt,
+            }),
+        });
         job.resolve(translated.response);
         const runtime = runtimeAcknowledgement(
           translated.started,
@@ -172,14 +179,9 @@ export async function createSdkTransport({
       if (job.responsesTools)
         response = functionToolsResponse(response, job.responsesTools);
       else if (job.portableAgents) response = portableAgentResponse(response);
+      if (job.model.startsWith("gpt-"))
+        response = modelStateResponse(response, job.model);
       const observed = responsesResponse(response, {
-        onReasoning: (item) => {
-          const key = reasoningKey(item.encrypted_content);
-          if (!key) return;
-          if (reasoningOrigins.size >= 512)
-            reasoningOrigins.delete(reasoningOrigins.keys().next().value);
-          reasoningOrigins.set(key, job.model);
-        },
         onDiagnostic: (details) =>
           diagnose({
             ...details,
@@ -258,14 +260,32 @@ export async function createSdkTransport({
     transport: async (url, init) => {
       if (new URL(url).pathname === "/models") return Response.json(catalog);
       const original = JSON.parse(init.body);
-      const payload = portableAgentTools(original);
+      let payload = portableAgentTools(original);
       const portableAgents = payload !== original;
       if (portableAgents) init = { ...init, body: JSON.stringify(payload) };
-      const model = catalog.data.find((entry) => entry.id === payload.model);
+      const model = compactionModel(
+        payload,
+        catalog.data.filter(
+          (entry) =>
+            entry.id === payload.model ||
+            entry.policy?.state === "enabled" ||
+            (entry.policy?.state === undefined &&
+              runtimeModels.some((m) => m.id === entry.id)),
+        ),
+      );
       if (!model)
         throw new Error(
           "The selected model is not advertised by your Copilot seat.",
         );
+      if (model.id !== payload.model) {
+        diagnose({
+          code: "SOURCE_MODEL_COMPACTION",
+          model: model.id,
+          destination_model: payload.model,
+        });
+        payload = { ...payload, model: model.id };
+        init = { ...init, body: JSON.stringify(payload) };
+      }
       const reasoningEffort = reasoningForModel(
         model,
         payload.reasoning?.effort ?? "max",
@@ -276,22 +296,44 @@ export async function createSdkTransport({
         init = { ...init, body: JSON.stringify(payload) };
       }
       if (!usesMessages(model) && Array.isArray(payload.input)) {
-        const portable = payload.input.filter((item) => {
-          if (item.type !== "reasoning") return true;
+        let changed = false;
+        const portable = payload.input.flatMap((saved) => {
+          if (saved.type !== "reasoning") {
+            const item = model.id.startsWith("gpt-")
+              ? responseHistoryItem(saved)
+              : saved;
+            if (item !== saved) changed = true;
+            return [item];
+          }
+          const item = restoreModelState(saved, model.id);
+          if (item !== saved) changed = true;
+          if (!item) return [];
           if (
             item.encrypted_content?.startsWith(thinkingPrefix) ||
             item.encrypted_content?.startsWith(responsesThinkingPrefix)
-          )
-            return false;
+          ) {
+            changed = true;
+            return [];
+          }
           // Grok's Responses endpoint returns opaque reasoning but rejects
           // replaying it (HTTP 400). Text and completed tool results remain.
-          if (!model.id.startsWith("gpt-")) return false;
-          const origin = reasoningOrigins.get(
-            reasoningKey(item.encrypted_content),
-          );
-          return origin ? origin === model.id : model.id.startsWith("gpt-");
+          if (!model.id.startsWith("gpt-")) {
+            changed = true;
+            return [];
+          }
+          // Old raw GPT ciphertext has no durable owner. Preserve it on disk,
+          // but never guess a provider/model after a bridge restart. New state
+          // carries ownership and is restored byte-for-byte above.
+          if (
+            item.encrypted_content &&
+            !saved.encrypted_content.startsWith(modelStatePrefix)
+          ) {
+            changed = true;
+            return [];
+          }
+          return [item];
         });
-        if (portable.length !== payload.input.length) {
+        if (changed) {
           payload.input = portable;
           init = { ...init, body: JSON.stringify(payload) };
         }

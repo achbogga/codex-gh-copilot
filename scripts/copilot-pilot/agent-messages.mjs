@@ -31,8 +31,16 @@ export function portableAgentMessage(item) {
 // cannot carry a task to Claude/Grok/MAI; no keys or policy checks are bypassed.
 export function portableAgentTools(payload) {
   let changed = false;
+  const declarations = [
+    ...(payload.tools ?? []),
+    ...(Array.isArray(payload.input)
+      ? payload.input.flatMap((item) =>
+          item.type === "additional_tools" ? item.tools : [],
+        )
+      : []),
+  ];
   if (
-    payload.tools?.some(
+    declarations.some(
       (tool) => tool.type === "namespace" && tool.name === agentWireNamespace,
     )
   )
@@ -57,7 +65,7 @@ export function portableAgentTools(payload) {
       },
     };
   };
-  const tools = payload.tools?.map((tool) => {
+  const adaptDefinition = (tool) => {
     if (tool.type !== "namespace") return adapt(tool, tool.namespace);
     if (tool.name === "collaboration") changed = true;
     return {
@@ -67,17 +75,25 @@ export function portableAgentTools(payload) {
       name: tool.name === "collaboration" ? agentWireNamespace : tool.name,
       tools: tool.tools.map((child) => adapt(child, tool.name)),
     };
-  });
-  if (!changed) return payload;
-  const input = Array.isArray(payload.input)
+  };
+  const tools = payload.tools?.map(adaptDefinition);
+  const declarationsInput = Array.isArray(payload.input)
     ? payload.input.map((item) =>
+        item.type === "additional_tools"
+          ? { ...item, tools: item.tools.map(adaptDefinition) }
+          : item,
+      )
+    : payload.input;
+  if (!changed) return payload;
+  const input = Array.isArray(declarationsInput)
+    ? declarationsInput.map((item) =>
         item.type === "function_call" &&
         item.namespace === "collaboration" &&
         !item.encrypted_function_args?.length
           ? { ...item, namespace: agentWireNamespace }
           : item,
       )
-    : payload.input;
+    : declarationsInput;
   return { ...payload, tools, input };
 }
 

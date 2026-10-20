@@ -5,6 +5,7 @@ import {
   functionToolsResponse,
   responsesThinkingPrefix,
 } from "./responses-tools.mjs";
+import { modelStatePrefix } from "./model-state.mjs";
 
 const input = 'text(await tools.exec_command({cmd:"cat café.txt"}));';
 const payload = {
@@ -177,6 +178,6 @@ test("non-GPT opaque reasoning retains provider provenance in saved history", as
   ).text();
   assert.equal(
     JSON.parse(adapted.slice(6)).item.encrypted_content,
-    responsesThinkingPrefix + "opaque-provider-state",
+    modelStatePrefix + payload.model + "\nopaque-provider-state",
   );
 });

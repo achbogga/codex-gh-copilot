@@ -6,6 +6,10 @@ export const usesMessages = (model) =>
   !model.supported_endpoints.includes("/responses");
 
 export const thinkingPrefix = "copilot-anthropic-v1:";
+const continuation = {
+  type: "text",
+  text: "Continue the pending task from the conversation above. Return the visible answer or the required tool call.",
+};
 
 function toolName(name, namespace) {
   const value = namespace ? `${namespace}__${name}` : name;
@@ -79,6 +83,23 @@ export function messagesRequest(payload, model) {
     if (messages.at(-1)?.role === role) messages.at(-1).content.push(...blocks);
     else messages.push({ role, content: blocks });
   };
+  let assistantMessageId;
+  const assistantBoundary = (id) => {
+    if (
+      id &&
+      assistantMessageId &&
+      id !== assistantMessageId &&
+      messages.at(-1)?.role === "assistant"
+    )
+      append("user", [{ ...continuation }]);
+    if (id) assistantMessageId = id;
+  };
+  // Native history stores each block separately. Reconstruct provider message
+  // boundaries as well as their signed bytes, including thinking-only turns.
+  const providerMessageId = (item) =>
+    /^msg_.+_\d+$/.test(item.id ?? "")
+      ? item.id.replace(/_\d+$/, "")
+      : undefined;
   const input =
     typeof payload.input === "string"
       ? [{ role: "user", content: payload.input }]
@@ -101,9 +122,11 @@ export function messagesRequest(payload, model) {
               };
             }),
           );
-      } else if (["user", "assistant"].includes(item.role))
+      } else if (["user", "assistant"].includes(item.role)) {
+        if (item.role === "assistant")
+          assistantBoundary(providerMessageId(item));
         append(item.role, blocks);
-      else throw new Error("Unsupported Anthropic message role.");
+      } else throw new Error("Unsupported Anthropic message role.");
     } else if (item.type === "reasoning") {
       if (!item.encrypted_content?.startsWith(thinkingPrefix)) continue; // Opaque reasoning belongs to its original provider, not the new model.
       const saved = JSON.parse(
@@ -115,8 +138,10 @@ export function messagesRequest(payload, model) {
       if (saved.model !== payload.model) continue;
       if (!["thinking", "redacted_thinking"].includes(saved.block?.type))
         throw new Error("Incompatible Anthropic thinking block.");
+      assistantBoundary(saved.message_id ?? providerMessageId(item));
       append("assistant", [saved.block]);
     } else if (["function_call", "custom_tool_call"].includes(item.type)) {
+      assistantBoundary(providerMessageId(item));
       append("assistant", [
         {
           type: "tool_use",
@@ -140,6 +165,20 @@ export function messagesRequest(payload, model) {
       ]);
     } else throw new Error(`Unsupported Anthropic history item: ${item.type}`);
   }
+  // Native sampling may continue after an assistant-only reasoning response.
+  // Messages models reject assistant prefill; retain that response and supply
+  // the user continuation required by their protocol instead of losing state.
+  if (messages.at(-1)?.role === "assistant")
+    append("user", [{ ...continuation }]);
+  if (
+    [...tools.values()].some(
+      (tool) => tool.type === "custom" && tool.name === "exec",
+    )
+  )
+    system.push({
+      type: "text",
+      text: "Native Code Mode tool I/O: functions.exec accepts JavaScript, not shell syntax. Call only tools advertised in this request. Inside functions.exec, use text(await tools.exec_command(...)) to print shell results, and text(await tools.apply_patch(patchString)) to apply a patch. Awaiting a tool alone does not print its result. An empty Script completed Output is not evidence that files are empty when the script did not call text(). Direct native tools are also available when advertised. Preserve and use the complete visible session, including prior tool calls and results.",
+    });
   if (payload.tool_choice && !["auto", "none"].includes(payload.tool_choice))
     throw new Error("Opus 5.5 supports auto or none tool choice.");
   return {

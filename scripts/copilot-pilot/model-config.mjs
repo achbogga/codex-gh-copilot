@@ -1,11 +1,26 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { usesMessages } from "./anthropic-request.mjs";
 
+export function modelInputLimit(model) {
+  const limits = model.capabilities?.limits ?? {};
+  return Math.min(
+    limits.max_prompt_tokens ?? Infinity,
+    (limits.max_context_window_tokens ?? Infinity) -
+      (limits.max_output_tokens ?? 0),
+  );
+}
+
 export function reasoningForModel(model, requested = "max") {
   const supported = model.capabilities?.supports?.reasoning_effort ?? [];
   if (!supported.length) return undefined;
   if (supported.includes(requested)) return requested;
-  if (requested === "max")
+  // Native model switching/compaction can carry the other model's effort.
+  // Normalize known levels to the destination's strongest supported level.
+  if (
+    ["max", "xhigh", "high", "medium", "low", "minimal", "none"].includes(
+      requested,
+    )
+  )
     return ["max", "xhigh", "high", "medium", "low", "minimal", "none"].find(
       (effort) => supported.includes(effort),
     );
@@ -38,7 +53,9 @@ export async function catalogArguments(
         support_verbosity: false,
         supports_reasoning_summary_parameter: false,
         apply_patch_tool_type: "freeform",
-        tool_mode: "code_mode_only",
+        // Expose native direct tools alongside Code Mode. Providers trained on
+        // shell/patch tools can then continue either native tool history format.
+        tool_mode: "code_mode",
         truncation_policy: { mode: "tokens", limit: 10000 },
         experimental_supported_tools: [],
         model_messages: { instructions_template: prompt },
@@ -46,6 +63,10 @@ export async function catalogArguments(
       slug: model.id,
       display_name: model.name ?? model.id,
       description: `${model.name ?? model.id} through GitHub Copilot`,
+      // Our adapters preserve a common visible session format. Keep full history
+      // on normal switches; native Codex uses the source model when a smaller
+      // destination needs compaction. This also migrates old GPT hash "3000".
+      comp_hash: "copilot-pilot/portable-session-v3",
       default_reasoning_level: reasoningForModel(model) ?? null,
       supported_reasoning_levels: efforts.map((effort) => ({
         effort,
@@ -62,12 +83,7 @@ export async function catalogArguments(
       default_service_tier: null,
       context_window: limits.max_context_window_tokens,
       max_context_window: limits.max_context_window_tokens,
-      auto_compact_token_limit: Math.floor(
-        Math.min(
-          limits.max_prompt_tokens,
-          limits.max_context_window_tokens - (limits.max_output_tokens ?? 0),
-        ) * 0.95,
-      ),
+      auto_compact_token_limit: Math.floor(modelInputLimit(model) * 0.95),
       effective_context_window_percent: 95,
       input_modalities: model.capabilities.supports.vision
         ? ["text", "image"]
@@ -94,12 +110,7 @@ export async function modelArguments(
   visibleCatalogPath = catalogPath,
 ) {
   const limits = model.capabilities.limits;
-  const compact = Math.floor(
-    Math.min(
-      limits.max_prompt_tokens,
-      limits.max_context_window_tokens - (limits.max_output_tokens ?? 0),
-    ) * 0.95,
-  );
+  const compact = Math.floor(modelInputLimit(model) * 0.95);
   const args = [
     "-c",
     `model_reasoning_effort=${JSON.stringify(reasoning)}`,
@@ -131,7 +142,7 @@ export async function modelArguments(
       support_verbosity: false,
       supports_reasoning_summary_parameter: false,
       apply_patch_tool_type: "freeform",
-      tool_mode: "code_mode_only",
+      tool_mode: "code_mode",
       truncation_policy: { mode: "tokens", limit: 10000 },
       context_window: limits.max_context_window_tokens,
       max_context_window: limits.max_context_window_tokens,

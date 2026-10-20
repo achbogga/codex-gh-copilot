@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createSdkTransport } from "./sdk-transport.mjs";
 import { responsesThinkingPrefix } from "./responses-tools.mjs";
+import { sealModelState } from "./model-state.mjs";
 
 async function fixture(
   t,
@@ -14,6 +15,7 @@ async function fixture(
   headerTimeoutMs,
   modelId = "test-model",
   diagnosticFile,
+  catalogModels,
 ) {
   const requests = [],
     acknowledgements = [],
@@ -21,7 +23,7 @@ async function fixture(
     responseStarts = [],
     runtimeEvents = [];
   const catalog = {
-    data: [
+    data: catalogModels ?? [
       messages
         ? {
             id: "claude-opus-5.5",
@@ -322,6 +324,150 @@ test("a fresh bridge omits saved foreign Responses reasoning when resuming GPT",
     await sdk.transport("https://api.githubcopilot.com/responses", request)
   ).text();
   assert.deepEqual(JSON.parse(sdk.requests[0].body).input, [history[1]]);
+});
+
+test("a fresh SDK restores only owned GPT ciphertext, retaining exact native tools and visible history", async (t) => {
+  const sdk = await fixture(
+    t,
+    () =>
+      new Response(
+        'data: {"type":"response.completed","response":{"id":"done","output":[]}}\n\n',
+        { headers: { "content-type": "text/event-stream" } },
+      ),
+    false,
+    false,
+    undefined,
+    "gpt-test",
+  );
+  const own = { type: "reasoning", encrypted_content: "own-original-bytes" };
+  const foreign = {
+    type: "reasoning",
+    encrypted_content: "foreign-original-bytes",
+  };
+  const call = {
+    type: "custom_tool_call",
+    id: "msg_claude_1",
+    call_id: "native-link",
+    name: "exec",
+    input: "text(1)",
+  };
+  const result = {
+    type: "custom_tool_call_output",
+    call_id: call.call_id,
+    output: "1",
+  };
+  const user = {
+    role: "user",
+    content: "Continue with complete session history.",
+  };
+  const input = JSON.parse(
+    JSON.stringify([
+      sealModelState(own, "gpt-test"),
+      sealModelState(foreign, "gpt-other"),
+      foreign,
+      call,
+      result,
+      user,
+    ]),
+  );
+  const request = init(new AbortController().signal);
+  request.body = JSON.stringify({ model: "gpt-test", input });
+  await (
+    await sdk.transport("https://api.githubcopilot.com/responses", request)
+  ).text();
+  const { id, ...portableCall } = call;
+  assert.deepEqual(JSON.parse(sdk.requests[0].body).input, [
+    own,
+    portableCall,
+    result,
+    user,
+  ]);
+  assert.equal(
+    input[0].encrypted_content,
+    sealModelState(own, "gpt-test").encrypted_content,
+  );
+  assert.equal(input[3].id, call.id);
+});
+
+test("native compaction uses the authorized source's larger input budget with one real accounted request", async (t) => {
+  const models = [
+    {
+      id: "gpt-destination",
+      policy: { state: "enabled" },
+      capabilities: {
+        supports: { reasoning_effort: ["max"] },
+        limits: {
+          max_context_window_tokens: 1000000,
+          max_prompt_tokens: 872000,
+        },
+      },
+    },
+    {
+      id: "gpt-source",
+      policy: { state: "enabled" },
+      capabilities: {
+        supports: { reasoning_effort: ["high"] },
+        limits: {
+          max_context_window_tokens: 1000000,
+          max_prompt_tokens: 936000,
+        },
+      },
+    },
+  ];
+  const done = {
+    type: "response.completed",
+    response: {
+      id: "compacted",
+      output: [],
+      usage: { input_tokens: 888000, output_tokens: 100 },
+    },
+  };
+  const sdk = await fixture(
+    t,
+    () =>
+      new Response(`data: ${JSON.stringify(done)}\n\n`, {
+        headers: { "content-type": "text/event-stream" },
+      }),
+    false,
+    false,
+    undefined,
+    models[0].id,
+    undefined,
+    models,
+  );
+  const original = {
+    model: models[0].id,
+    client_metadata: {
+      "x-codex-turn-metadata": JSON.stringify({ request_kind: "compaction" }),
+    },
+    reasoning: { effort: "max" },
+    input: [
+      sealModelState(
+        { type: "reasoning", encrypted_content: "exact-source-bytes" },
+        models[1].id,
+      ),
+      { role: "user", content: "Native compact prompt" },
+    ],
+  };
+  const request = init(new AbortController().signal);
+  request.body = JSON.stringify(original);
+  await (
+    await sdk.transport("https://api.githubcopilot.com/responses", request)
+  ).text();
+  await sdk.close();
+  assert.deepEqual(sdk.sessions, [
+    {
+      model: models[1].id,
+      contextTier: "long_context",
+      reasoningEffort: "high",
+    },
+  ]);
+  assert.equal(sdk.requests.length, 1);
+  const actual = JSON.parse(sdk.requests[0].body);
+  assert.equal(actual.model, models[1].id);
+  assert.equal(actual.input[0].encrypted_content, "exact-source-bytes");
+  assert.equal(original.model, models[0].id);
+  assert.deepEqual(sdk.acknowledgements[0].usage, done.response.usage);
 });
 
 test(
