@@ -10,6 +10,7 @@ import { startBridge } from "./bridge.mjs";
 import { responsesResponse } from "./responses-stream.mjs";
 import { codexInvocation } from "./run.mjs";
 import { portableAgentMessage } from "./agent-messages.mjs";
+import { requestError } from "./request-errors.mjs";
 
 const encode = (events) =>
   Buffer.from(
@@ -45,22 +46,44 @@ for (const mode of [
   "quota-denied",
   "generic-denied",
   "encrypted-agent-denied",
+  "early-connection",
+  "local-storage-denied",
+  "runtime-endpoint-denied",
 ])
   test(
     `native Codex stream recovery: ${mode}`,
     { skip: !process.env.COPILOT_PILOT_CODEX_BIN, timeout: 40000 },
     async (t) => {
       const root = await mkdtemp(join(homedir(), ".copilot-recovery-test-"));
-      t.after(() => rm(root, { recursive: true, force: true }));
+      let bridge;
+      t.after(async () => {
+        await bridge?.close();
+        await rm(root, {
+          recursive: true,
+          force: true,
+          maxRetries: 5,
+          retryDelay: 100,
+        });
+      });
       const state = join(root, "state");
       await mkdir(state);
       const requests = [];
-      const bridge = await startBridge({
+      bridge = await startBridge({
         getToken: async () => "synthetic",
         localToken: "local",
         model: "gpt-6.1-sol",
         transport: async (_url, init) => {
           requests.push(JSON.parse(init.body));
+          if (mode === "early-connection" && requests.length === 1)
+            throw new TypeError("PRIVATE_CONNECTION_DETAIL", {
+              cause: Object.assign(new Error("PRIVATE_TOKEN"), {
+                code: "ECONNRESET",
+              }),
+            });
+          if (mode === "local-storage-denied")
+            throw Object.assign(new Error("PRIVATE_PATH"), { code: "ENOSPC" });
+          if (mode === "runtime-endpoint-denied")
+            throw requestError("COPILOT_RUNTIME_ENDPOINT");
           if (mode === "encrypted-agent-denied")
             portableAgentMessage({
               type: "agent_message",
@@ -152,7 +175,6 @@ for (const mode of [
           ).response;
         },
       });
-      t.after(() => bridge.close());
       const invocation = codexInvocation({
         model: "gpt-6.1-sol",
         url: bridge.url,
@@ -196,7 +218,7 @@ for (const mode of [
         mode === "exhausted" ? 4 : mode.endsWith("denied") ? 1 : 2,
         text,
       );
-      assert.doesNotMatch(text, /private upstream denial/);
+      assert.doesNotMatch(text, /private upstream denial|PRIVATE_/);
       if (!failed) assert.match(output.stdout, /RECOVERED_OK/);
       if (mode === "after-tool") {
         assert.equal(await readFile(join(root, "counter.txt"), "utf8"), "once");
@@ -216,11 +238,20 @@ test(
   { skip: !process.env.COPILOT_PILOT_CODEX_BIN, timeout: 40000 },
   async (t) => {
     const root = await mkdtemp(join(homedir(), ".copilot-size-recovery-test-"));
-    t.after(() => rm(root, { recursive: true, force: true }));
+    let bridge;
+    t.after(async () => {
+      await bridge?.close();
+      await rm(root, {
+        recursive: true,
+        force: true,
+        maxRetries: 5,
+        retryDelay: 100,
+      });
+    });
     const state = join(root, "state");
     await mkdir(state);
     const requests = [];
-    const bridge = await startBridge({
+    bridge = await startBridge({
       getToken: async () => "synthetic",
       localToken: "local",
       model: "gpt-6.1-sol",
@@ -249,7 +280,6 @@ test(
         );
       },
     });
-    t.after(() => bridge.close());
     const run = async (args) => {
       const invocation = codexInvocation({
         model: "gpt-6.1-sol",

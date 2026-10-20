@@ -280,8 +280,84 @@ test("does not follow upstream redirects", async (t) => {
     res.writeHead(307, { location: "http://127.0.0.1:1/steal" });
     res.end();
   });
-  assert.equal((await send(bridge.url)).status, 502);
+  const result = await send(bridge.url);
+  assert.equal(result.status, 200);
+  assert.match(await result.text(), /"code":"invalid_prompt"/);
   assert.equal(count, 1);
+});
+
+test("malformed JSON fails as a client request, without logging its contents or calling upstream", async (t) => {
+  let count = 0;
+  const diagnostics = [];
+  const bridge = await fixture(
+    t,
+    () => {
+      count++;
+    },
+    {
+      onDiagnostic: (entry) => diagnostics.push(entry),
+    },
+  );
+  const result = await send(bridge.url, payload, {
+    body: '{"input":"PRIVATE_PROMPT"',
+  });
+  assert.equal(result.status, 400);
+  assert.match(await result.text(), /COPILOT_INVALID_JSON/);
+  assert.equal(count, 0);
+  assert.equal(diagnostics.at(-1).code, "COPILOT_INVALID_JSON");
+  assert.equal(diagnostics.at(-1).bridge_port, new URL(bridge.url).port * 1);
+  assert.doesNotMatch(JSON.stringify(diagnostics), /PRIVATE_PROMPT/);
+});
+
+test("classified early errors retain a safe cause and only connection failures are retryable", async (t) => {
+  for (const [code, status] of [
+    ["ECONNRESET", 502],
+    ["ENOSPC", 200],
+    ["CERT_HAS_EXPIRED", 200],
+  ]) {
+    let count = 0;
+    const diagnostics = [];
+    const bridge = await fixture(t, () => {}, {
+      transport: async () => {
+        count++;
+        throw new TypeError("PRIVATE_PROMPT Bearer SECRET", {
+          cause: Object.assign(new Error("PRIVATE_REASONING"), { code }),
+        });
+      },
+      onDiagnostic: (entry) => diagnostics.push(entry),
+    });
+    const result = await send(bridge.url);
+    assert.equal(result.status, status);
+    const text = await result.text();
+    assert.match(text, new RegExp(code));
+    if (status === 200) assert.match(text, /"code":"invalid_prompt"/);
+    assert.equal(count, 1);
+    assert.equal(diagnostics.at(-1).code, code);
+    assert.doesNotMatch(
+      text + JSON.stringify(diagnostics),
+      /PRIVATE_|SECRET|response.completed/,
+    );
+  }
+});
+
+test("a cancelled error body cannot replace a real HTTP denial with a generic 502", async (t) => {
+  const bridge = await fixture(t, () => {}, {
+    transport: async () =>
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.error(new Error("PRIVATE_UPSTREAM_ERROR"));
+          },
+        }),
+        { status: 403 },
+      ),
+  });
+  const result = await send(bridge.url);
+  assert.equal(result.status, 200);
+  const text = await result.text();
+  assert.match(text, /HTTP 403/);
+  assert.match(text, /"code":"invalid_prompt"/);
+  assert.doesNotMatch(text, /PRIVATE_UPSTREAM_ERROR|502|response.completed/);
 });
 
 test(

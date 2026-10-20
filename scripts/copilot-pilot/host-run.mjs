@@ -118,6 +118,7 @@ export async function runHost({
       model,
       models,
       transport: sdk.transport,
+      onDiagnostic: sdk.diagnose,
     });
     const invocation = codexInvocation({
       model,

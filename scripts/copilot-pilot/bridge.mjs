@@ -4,6 +4,7 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { usesMessages } from "./anthropic-request.mjs";
 import { encryptedAgentError } from "./agent-messages.mjs";
+import { requestError, requestFailure } from "./request-errors.mjs";
 
 const upstream = "https://api.githubcopilot.com";
 // Copilot CLI 1.0.74 raised the CAPI Responses request ceiling to 32 MiB.
@@ -72,7 +73,7 @@ export async function listModels(
     signal: AbortSignal.timeout(15000),
   });
   if (!response.ok) {
-    await response.body?.cancel();
+    await response.body?.cancel().catch(() => {});
     throw new Error(
       `Copilot model discovery returned HTTP ${response.status}.`,
     );
@@ -102,13 +103,25 @@ export async function startBridge({
   transport = fetch,
   socketPath,
   streamIdleTimeoutMs = 300000,
+  onDiagnostic = () => {},
 }) {
   const expected = Buffer.from(`Bearer ${localToken}`);
   const allowedModels = new Set(
     models.map((entry) => (typeof entry === "string" ? entry : entry.id)),
   );
   const active = new Set();
+  const diagnose = (details) => {
+    try {
+      onDiagnostic({
+        bridge_port: socketPath ? 8787 : server.address()?.port,
+        ...details,
+      });
+    } catch {} // Diagnostic I/O must not change the response.
+  };
   const server = createServer(async (request, response) => {
+    const startedAt = Date.now();
+    let requestBytes = 0,
+      requestModel;
     const controller = new AbortController();
     active.add(controller);
     // A long, active max-reasoning response must not hit a total-duration cap.
@@ -144,7 +157,13 @@ export async function startBridge({
         );
       }
       const body = await readBounded(request, maxRequestBody, false);
-      const payload = JSON.parse(body);
+      requestBytes = body.byteLength;
+      let payload;
+      try {
+        payload = JSON.parse(body);
+      } catch (error) {
+        throw requestError("COPILOT_INVALID_JSON", error);
+      }
       if (
         !allowedModels.has(payload?.model) ||
         payload.stream !== true ||
@@ -155,6 +174,7 @@ export async function startBridge({
           400,
           "Expected the selected model, input, and stream=true.",
         );
+      requestModel = payload.model;
       const last = Array.isArray(payload.input) ? payload.input.at(-1) : null;
       const initiator =
         typeof payload.input === "string" || last?.role === "user"
@@ -185,9 +205,17 @@ export async function startBridge({
       });
       activity();
       if (!result.ok) {
+        diagnose({
+          code: "COPILOT_HTTP_ERROR",
+          stage: "bridge",
+          model: requestModel,
+          upstream_status: result.status,
+          request_bytes: requestBytes,
+          elapsed_ms: Date.now() - startedAt,
+        });
         const retryAfter = result.headers.get("retry-after");
         if (retryAfter) response.setHeader("retry-after", retryAfter);
-        await result.body?.cancel();
+        await result.body?.cancel().catch(() => {});
         // Upstream error bodies can echo request data or credentials. Never relay them.
         const status = result.status >= 400 ? result.status : 502;
         if (status === 413)
@@ -215,7 +243,7 @@ export async function startBridge({
       if (
         !result.headers.get("content-type")?.startsWith("text/event-stream")
       ) {
-        await result.body?.cancel();
+        await result.body?.cancel().catch(() => {});
         return fail(response, 502, "Expected a Responses event stream.");
       }
       response.writeHead(200, {
@@ -250,6 +278,16 @@ export async function startBridge({
       }
       await pipeline(Readable.from(stream()), response);
     } catch (error) {
+      const failure = requestFailure(error);
+      diagnose({
+        code: failure.code,
+        stage: "bridge",
+        ...(requestModel ? { model: requestModel } : {}),
+        request_bytes: requestBytes,
+        elapsed_ms: Date.now() - startedAt,
+        headers_sent: response.headersSent,
+        caller_closed: response.destroyed,
+      });
       if (response.headersSent) response.destroy();
       else if (
         !response.destroyed &&
@@ -265,14 +303,26 @@ export async function startBridge({
           response,
           "Request exceeds Copilot's 32 MiB request limit. Compact the conversation before continuing.",
         );
-      else if (!response.destroyed)
-        fail(
-          response,
-          502,
-          controller.signal.aborted
-            ? `Copilot request inactive for ${streamIdleTimeoutMs} ms.`
-            : "Pilot request failed; check credentials, JSON, size, TLS, and connectivity.",
-        );
+      else if (!response.destroyed) {
+        const message = controller.signal.aborted
+          ? `Copilot request inactive for ${streamIdleTimeoutMs} ms.`
+          : failure.message.includes(failure.code)
+            ? failure.message
+            : `${failure.message} (${failure.code})`;
+        if (
+          controller.signal.aborted ||
+          failure.retryable ||
+          failure.status === 400
+        )
+          fail(response, failure.status, message);
+        else {
+          response.writeHead(200, {
+            "content-type": "text/event-stream",
+            "cache-control": "no-store",
+          });
+          response.end(failedEvent(message, "invalid_prompt"));
+        }
+      }
     } finally {
       clearTimeout(timer);
       active.delete(controller);
@@ -284,6 +334,7 @@ export async function startBridge({
     if (socketPath) server.listen(socketPath, resolve);
     else server.listen(0, "127.0.0.1", resolve);
   });
+  diagnose({ code: "BRIDGE_STARTED" });
   return {
     url: `http://127.0.0.1:${socketPath ? 8787 : server.address().port}/v1`,
     close: async () => {

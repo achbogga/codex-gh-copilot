@@ -16,6 +16,7 @@ async function fixture(
   modelId = "test-model",
   diagnosticFile,
   catalogModels,
+  failure = {},
 ) {
   const requests = [],
     acknowledgements = [],
@@ -56,6 +57,7 @@ async function fixture(
       );
     }
     async createSession(options) {
+      if (failure.create) throw failure.create;
       assert.deepEqual(options.availableTools, []);
       assert.equal(options.streaming, true);
       assert.equal(
@@ -81,10 +83,15 @@ async function fixture(
         abort: async () => controller.abort(),
         disconnect: async () => {},
         send: async () => {
+          if (failure.send) throw failure.send;
+          if (failure.event) {
+            listener?.({ type: "session.error", data: failure.event });
+            return;
+          }
           const send = () =>
             this.handler.sendRequest(
               new Request(
-                `https://api.enterprise.githubcopilot.com/${messages ? "v1/messages" : "responses"}`,
+                `https://api.enterprise.githubcopilot.com${failure.path ?? (messages ? "/v1/messages" : "/responses")}`,
                 {
                   method: "POST",
                   body: "original SDK payload",
@@ -202,6 +209,108 @@ const init = (signal) => ({
   },
   signal,
 });
+
+test("the first provider connection error survives SDK error handling and cleans up its transport session", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "copilot-first-error-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const file = join(root, "diagnostics.jsonl");
+  const sdk = await fixture(
+    t,
+    () => {
+      throw new TypeError("PRIVATE_REQUEST", {
+        cause: Object.assign(new Error("PRIVATE_TOKEN"), {
+          code: "ECONNRESET",
+        }),
+      });
+    },
+    false,
+    false,
+    undefined,
+    "test-model",
+    file,
+  );
+  await assert.rejects(
+    sdk.transport(
+      "https://api.githubcopilot.com/responses",
+      init(new AbortController().signal),
+    ),
+    { code: "ECONNRESET" },
+  );
+  await sdk.close();
+  assert.equal(sdk.requests.length, 1);
+  assert.deepEqual(sdk.deletedSessions, ["test-session"]);
+  const text = await readFile(file, "utf8");
+  const diagnostics = text.trim().split("\n").map(JSON.parse);
+  assert.equal(diagnostics[0].code, "ECONNRESET");
+  assert.equal(diagnostics[0].stage, "runtime_request");
+  assert.equal(diagnostics[0].response_returned, false);
+  assert.doesNotMatch(text, /PRIVATE_|additional runtime|authorization/i);
+});
+
+for (const [failure, expected, stage] of [
+  [
+    { create: new Error("session.create ENOSPC PRIVATE_DATA") },
+    "ENOSPC",
+    "session_create",
+  ],
+  [
+    { send: Object.assign(new Error("PRIVATE_DATA"), { code: "EPIPE" }) },
+    "EPIPE",
+    "session_send",
+  ],
+  [
+    { event: { errorType: "authentication", message: "PRIVATE_TOKEN" } },
+    "COPILOT_SDK_AUTHENTICATION",
+    "runtime_event",
+  ],
+  [
+    { event: { errorType: "quota", message: "PRIVATE_BUDGET" } },
+    "COPILOT_SDK_QUOTA",
+    "runtime_event",
+  ],
+  [
+    { path: "/chat/completions" },
+    "COPILOT_RUNTIME_ENDPOINT",
+    "runtime_request",
+  ],
+])
+  test(`early ${stage} failure preserves ${expected} without a provider request`, async (t) => {
+    const root = await mkdtemp(join(tmpdir(), "copilot-early-error-"));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const file = join(root, "diagnostics.jsonl");
+    const sdk = await fixture(
+      t,
+      () => {
+        throw new Error("Must not infer.");
+      },
+      false,
+      false,
+      undefined,
+      "test-model",
+      file,
+      undefined,
+      failure,
+    );
+    await assert.rejects(
+      sdk.transport(
+        "https://api.githubcopilot.com/responses",
+        init(new AbortController().signal),
+      ),
+      { code: expected },
+    );
+    await sdk.close();
+    assert.equal(sdk.requests.length, 0);
+    assert.deepEqual(
+      sdk.deletedSessions,
+      failure.create ? [] : ["test-session"],
+    );
+    const text = await readFile(file, "utf8");
+    const diagnostics = text.trim().split("\n").map(JSON.parse);
+    assert.ok(
+      diagnostics.some((d) => d.code === expected && d.stage === stage),
+    );
+    assert.doesNotMatch(text, /PRIVATE_|authorization|runtime-owned-token/);
+  });
 
 test("encrypted agent tasks are rejected before SDK inference with metadata-only diagnostics", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "copilot-agent-diagnostics-"));

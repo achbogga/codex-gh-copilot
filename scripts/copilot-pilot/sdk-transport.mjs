@@ -29,6 +29,7 @@ import {
   portableAgentTools,
   portableAgentResponse,
 } from "./agent-messages.mjs";
+import { requestError, runtimeError } from "./request-errors.mjs";
 
 // The official runtime supplies authentication, account routing and model policy.
 // Its request handler carries native Responses or translated Messages payloads
@@ -72,20 +73,36 @@ export async function createSdkTransport({
       if (size < 1024 * 1024)
         appendFileSync(
           diagnosticFile,
-          JSON.stringify({ time: new Date().toISOString(), ...details }) + "\n",
+          JSON.stringify({
+            time: new Date().toISOString(),
+            process_id: process.pid,
+            ...details,
+          }) + "\n",
           { mode: 0o600 },
         );
     } catch {} // Diagnostics must never interrupt inference.
   };
   class Handler extends CopilotRequestHandler {
     async sendRequest(request, context) {
+      const job = pending.get(context.sessionId);
+      try {
+        return await this.forwardRequest(request, context);
+      } catch (error) {
+        // The runtime retries handler failures internally. Preserve the first
+        // cause immediately, before its retry hits the one-POST guard and masks
+        // a DNS/socket/TLS failure as "additional runtime inference request".
+        if (job && !job.responseReturned) job.fail(error, "runtime_request");
+        throw runtimeError(error);
+      }
+    }
+    async forwardRequest(request, context) {
       const url = new URL(request.url);
       if (
         !/^https:\/\/api(?:\.(?:enterprise|business|individual))?\.githubcopilot\.com$/.test(
           url.origin,
         )
       )
-        throw new Error("Unexpected Copilot runtime endpoint.");
+        throw requestError("COPILOT_RUNTIME_ORIGIN");
       if (request.method === "GET" && url.pathname === "/models") {
         const response = await forward(
           new Request(request, { redirect: "error", signal: context.signal }),
@@ -94,12 +111,32 @@ export async function createSdkTransport({
         return response;
       }
       const job = pending.get(context.sessionId);
-      if (
-        !job ||
-        url.pathname !== (job.messages ? "/v1/messages" : "/responses") ||
-        job.started
-      )
-        throw new Error("Unexpected additional runtime inference request.");
+      const guard = !job
+        ? "COPILOT_RUNTIME_SESSION"
+        : url.pathname !== (job.messages ? "/v1/messages" : "/responses")
+          ? "COPILOT_RUNTIME_ENDPOINT"
+          : job.started
+            ? "COPILOT_RUNTIME_EXTRA_REQUEST"
+            : undefined;
+      if (guard) {
+        diagnose({
+          code: guard,
+          stage: "runtime_request",
+          ...(job ? { model: job.model } : {}),
+          runtime_path: [
+            "/responses",
+            "/v1/messages",
+            "/chat/completions",
+            "/responses/lite",
+          ].includes(url.pathname)
+            ? url.pathname
+            : "other",
+          runtime_agent: Boolean(context.agentId),
+          request_started: job?.started ?? false,
+          response_returned: job?.responseReturned ?? false,
+        });
+        throw requestError(guard);
+      }
       job.started = true;
       job.sdkSignal = context.signal;
       const headers = new Headers(request.headers);
@@ -110,20 +147,32 @@ export async function createSdkTransport({
         job.init.signal,
         job.controller.signal,
       ]);
-      let response = await forward(
-        new Request(url, {
-          method: "POST",
-          headers,
-          body: job.messages
-            ? JSON.stringify(job.messages.body)
-            : job.responsesTools
-              ? JSON.stringify(job.responsesTools.body)
-              : job.init.body,
-          signal,
-          redirect: "error",
-        }),
-      );
+      let response;
+      try {
+        response = await forward(
+          new Request(url, {
+            method: "POST",
+            headers,
+            body: job.messages
+              ? JSON.stringify(job.messages.body)
+              : job.responsesTools
+                ? JSON.stringify(job.responsesTools.body)
+                : job.init.body,
+            signal,
+            redirect: "error",
+          }),
+        );
+      } catch (error) {
+        throw runtimeError(error, "COPILOT_FORWARD_FAILED");
+      }
       job.init.onActivity?.();
+      if (
+        response.ok &&
+        !response.headers.get("content-type")?.startsWith("text/event-stream")
+      ) {
+        await response.body?.cancel().catch(() => {});
+        throw requestError("COPILOT_RUNTIME_CONTENT_TYPE");
+      }
       if (response.ok && response.body) {
         response = new Response(
           response.body.pipeThrough(
@@ -140,13 +189,9 @@ export async function createSdkTransport({
       }
       if (job.messages) {
         if (!response.ok) {
-          job.resolve(response);
+          job.respond(response);
           throw new Error("Copilot Anthropic request denied.");
         }
-        if (
-          !response.headers.get("content-type")?.startsWith("text/event-stream")
-        )
-          throw new Error("Expected an Anthropic event stream.");
         const translated = messagesResponse(response, job.messages, {
           onDiagnostic: (details) =>
             diagnose({
@@ -156,7 +201,7 @@ export async function createSdkTransport({
               elapsed_ms: Date.now() - job.startedAt,
             }),
         });
-        job.resolve(translated.response);
+        job.respond(translated.response);
         const runtime = runtimeAcknowledgement(
           translated.started,
           translated.completion.then((acknowledgement) => {
@@ -173,7 +218,7 @@ export async function createSdkTransport({
         return runtime.response;
       }
       if (!response.ok) {
-        job.resolve(response);
+        job.respond(response);
         throw new Error("Copilot Responses request denied.");
       }
       if (job.responsesTools)
@@ -195,7 +240,7 @@ export async function createSdkTransport({
             session_cancelled: job.controller.signal.aborted,
           }),
       });
-      job.resolve(observed.response);
+      job.respond(observed.response);
       const completion = observed.completion.then((completed) => {
         if (!completed)
           throw new Error("Copilot Responses stream did not complete.");
@@ -257,10 +302,17 @@ export async function createSdkTransport({
   }
   return {
     models: runtimeModels,
+    diagnose,
     transport: async (url, init) => {
       if (new URL(url).pathname === "/models") return Response.json(catalog);
       const original = JSON.parse(init.body);
-      let payload = portableAgentTools(original);
+      let payload;
+      try {
+        payload = portableAgentTools(original);
+      } catch (error) {
+        if (error.code === "COPILOT_ENCRYPTED_AGENT_MESSAGE") throw error;
+        throw requestError("COPILOT_INVALID_HISTORY", error);
+      }
       const portableAgents = payload !== original;
       if (portableAgents) init = { ...init, body: JSON.stringify(payload) };
       const model = compactionModel(
@@ -273,10 +325,7 @@ export async function createSdkTransport({
               runtimeModels.some((m) => m.id === entry.id)),
         ),
       );
-      if (!model)
-        throw new Error(
-          "The selected model is not advertised by your Copilot seat.",
-        );
+      if (!model) throw requestError("COPILOT_MODEL_UNAVAILABLE");
       if (model.id !== payload.model) {
         diagnose({
           code: "SOURCE_MODEL_COMPACTION",
@@ -286,10 +335,15 @@ export async function createSdkTransport({
         payload = { ...payload, model: model.id };
         init = { ...init, body: JSON.stringify(payload) };
       }
-      const reasoningEffort = reasoningForModel(
-        model,
-        payload.reasoning?.effort ?? "max",
-      );
+      let reasoningEffort;
+      try {
+        reasoningEffort = reasoningForModel(
+          model,
+          payload.reasoning?.effort ?? "max",
+        );
+      } catch (error) {
+        throw requestError("COPILOT_REASONING_UNSUPPORTED", error);
+      }
       if (payload.reasoning && payload.reasoning.effort !== reasoningEffort) {
         if (reasoningEffort) payload.reasoning.effort = reasoningEffort;
         else delete payload.reasoning;
@@ -357,29 +411,42 @@ export async function createSdkTransport({
             request_bytes: Buffer.byteLength(init.body),
             reasoning_effort: reasoningEffort ?? "default",
           });
-        throw error;
+        if (error.code === "COPILOT_ENCRYPTED_AGENT_MESSAGE") throw error;
+        throw requestError("COPILOT_INVALID_HISTORY", error);
       }
       const contextTier =
         model?.capabilities?.limits?.max_context_window_tokens >= 1000000
           ? "long_context"
           : undefined;
-      const session = await client.createSession({
-        model: payload.model,
-        contextTier,
-        reasoningEffort,
-        streaming: true,
-        availableTools: [],
-        onPermissionRequest: async () => ({
-          kind: "reject",
-          feedback: "Only the native Codex harness may execute tools.",
-        }),
-        capi: { enableWebSocketResponses: false },
-        infiniteSessions: { enabled: false },
-        systemMessage: {
-          mode: "replace",
-          content: "The request handler forwards inference to Codex.",
-        },
-      });
+      let session;
+      try {
+        session = await client.createSession({
+          model: payload.model,
+          contextTier,
+          reasoningEffort,
+          streaming: true,
+          availableTools: [],
+          onPermissionRequest: async () => ({
+            kind: "reject",
+            feedback: "Only the native Codex harness may execute tools.",
+          }),
+          capi: { enableWebSocketResponses: false },
+          infiniteSessions: { enabled: false },
+          systemMessage: {
+            mode: "replace",
+            content: "The request handler forwards inference to Codex.",
+          },
+        });
+      } catch (error) {
+        const failure = runtimeError(error, "COPILOT_SDK_CREATE_FAILED");
+        diagnose({
+          code: failure.code,
+          stage: "session_create",
+          model: payload.model,
+          request_bytes: Buffer.byteLength(init.body),
+        });
+        throw failure;
+      }
       const job = {
         ...Promise.withResolvers(),
         init,
@@ -397,6 +464,30 @@ export async function createSdkTransport({
       // sendAndWait has a total-duration deadline. Let the bridge's inactivity
       // watchdog and explicit cancellation govern long, active requests instead.
       const outcome = Promise.withResolvers();
+      job.respond = (response) => {
+        job.responseReturned = true;
+        job.resolve(response);
+      };
+      job.fail = (error, stage) => {
+        if (!job.failure) {
+          job.failure = runtimeError(error);
+          diagnose({
+            code: job.failure.code,
+            stage,
+            model: job.model,
+            request_bytes: Buffer.byteLength(job.init.body),
+            elapsed_ms: Date.now() - job.startedAt,
+            request_started: job.started,
+            response_returned: job.responseReturned ?? false,
+          });
+        }
+        job.reject(job.failure);
+        if (!job.completed) {
+          job.controller.abort();
+          void session.abort().catch(() => {});
+        }
+        outcome.resolve(false);
+      };
       const unsubscribe = session.on((event) => {
         if (event.agentId) return;
         if (event.type === "session.error") {
@@ -422,8 +513,7 @@ export async function createSdkTransport({
             caller_cancelled: job.init.signal.aborted,
             session_cancelled: job.controller.signal.aborted,
           });
-          job.controller.abort();
-          outcome.resolve(false);
+          job.fail(runtimeError(event.data), "runtime_event");
         }
         if (event.type === "session.idle" && event.data?.mode !== "autopilot")
           outcome.resolve(true);
@@ -433,7 +523,7 @@ export async function createSdkTransport({
         // the runtime to finish receiving real accounting for that completed
         // request instead of cancelling its acknowledgement during cleanup.
         if (job.completed && !force) return;
-        job.reject(new Error("Codex request cancelled."));
+        job.reject(requestError("COPILOT_REQUEST_CANCELLED"));
         job.controller.abort();
         outcome.resolve(false);
         void session.abort().catch(() => {});
@@ -445,14 +535,10 @@ export async function createSdkTransport({
       const task = outcome.promise
         .then((success) => {
           if (!success)
-            job.reject(new Error("Copilot runtime request failed."));
+            job.reject(job.failure ?? requestError("COPILOT_SDK_QUERY_FAILED"));
         })
         .finally(async () => {
-          job.reject(
-            new Error(
-              "Copilot runtime finished without returning an inference response.",
-            ),
-          );
+          job.reject(job.failure ?? requestError("COPILOT_NO_RESPONSE"));
           init.signal.removeEventListener("abort", abort);
           unsubscribe();
           job.controller.abort();
@@ -474,7 +560,14 @@ export async function createSdkTransport({
       if (!init.signal.aborted)
         void session
           .send({ prompt: "Forward the pending Codex request." })
-          .catch(() => outcome.resolve(false));
+          .catch((error) => {
+            if (!job.responseReturned)
+              job.fail(
+                runtimeError(error, "COPILOT_SDK_SEND_FAILED"),
+                "session_send",
+              );
+            else outcome.resolve(false);
+          });
       return job.promise;
     },
     close: async () => {

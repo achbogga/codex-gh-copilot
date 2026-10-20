@@ -1,0 +1,166 @@
+{
+  "recorded_at": "2026-10-20T19:55:14.811391+00:00",
+  "base_commit": "96b83aded0f5784fe8855dd34cd0315319a7878f",
+  "scope": "Early Copilot bridge failures reported as generic local HTTP 502.",
+  "incident_observations": {
+    "reported_bridge_port": 45651,
+    "observed_bridge_process_id": 34776,
+    "observed_bridge_started_utc": "2026-10-19T19:48:14Z",
+    "existing_process_predates_october_20_adapter_fixes": true,
+    "running_copilot_runtime_version": "1.0.98",
+    "installed_copilot_runtime_version": "1.0.100",
+    "original_exception_for_reported_request": "Unknown; the old bridge discarded its first exception and its diagnostics do not reliably correlate every failure to a port.",
+    "related_errors_in_shared_runtime_state": "Unexpected additional runtime inference request after runtime retries; this does not independently establish the original cause of the reported request.",
+    "existing_user_processes_restarted_or_modified": false,
+    "user_rollout_read_only_audit": {
+      "native_rollout_bytes": 27914117,
+      "compactions": 3,
+      "encrypted_agent_messages_found": 0
+    }
+  },
+  "changes": [
+    "Preserve the first provider connection error before SDK retries can mask it with the one-inference guard.",
+    "Classify session creation, submission, runtime event and protocol failures without exposing raw error messages.",
+    "Keep bounded native recovery for transient connections; stop deterministic denials, local storage/permission and TLS failures.",
+    "Keep upstream HTTP denials when cancelling an already-failed response body.",
+    "Return HTTP 400 for malformed JSON; retain 32 MiB context-limit handling and native compaction.",
+    "Record process IDs, bridge ports, stages, allowlisted paths and HTTP statuses in metadata-only diagnostics."
+  ],
+  "validation": {
+    "regular_node_tests": {
+      "passed": 100,
+      "failed": 0,
+      "opt_in_skipped": 15,
+      "log": "/tmp/copilot-502-all-tests.tap"
+    },
+    "native_and_official_runtime_tests": {
+      "passed": 16,
+      "failed": 0,
+      "skipped": 0,
+      "active_stream_ms": 5000,
+      "log": "/tmp/copilot-502-native-tests.tap",
+      "coverage": [
+        "bounded early-connection and mid-stream recovery",
+        "no duplicate tool execution",
+        "non-retryable local storage and runtime endpoint errors",
+        "authentication/policy/quota denials",
+        "413 compaction and resumed continuation",
+        "first connection errno through official runtime",
+        "failed and completed SDK session cleanup",
+        "Responses and Messages accounting"
+      ]
+    },
+    "live_native_switches": {
+      "artifacts": "/mnt/av-data/cache/copilot-502-verified-vjp5m9v3",
+      "expected_pairs": 2,
+      "passed_pairs": 2,
+      "failed_pairs": 0,
+      "results": [
+        {
+          "kind": "source",
+          "source": "gpt-6.1-sol",
+          "passed": true,
+          "history": true,
+          "patch": true,
+          "inference": [
+            {
+              "requested_model": "gpt-6.1-sol",
+              "served_model": "gpt-6.1-sol"
+            },
+            {
+              "requested_model": "gpt-6.1-sol",
+              "served_model": "gpt-6.1-sol"
+            },
+            {
+              "requested_model": "gpt-6.1-sol",
+              "served_model": "gpt-6.1-sol"
+            },
+            {
+              "requested_model": "gpt-6.1-sol",
+              "served_model": "gpt-6.1-sol"
+            }
+          ]
+        },
+        {
+          "kind": "pair",
+          "source": "gpt-6.1-sol",
+          "target": "claude-opus-5.5",
+          "passed": true,
+          "history": true,
+          "tools": true,
+          "patched_files": true,
+          "full_history": true,
+          "context_window": 950000,
+          "request_count": 2,
+          "native_claude_thinking_blocks_forwarded": 0,
+          "native_gpt_reasoning_items_forwarded": 0,
+          "inference": [
+            {
+              "requested_model": "claude-opus-5.5",
+              "served_model": "claude-opus-5-5"
+            },
+            {
+              "requested_model": "claude-opus-5.5",
+              "served_model": "claude-opus-5-5"
+            }
+          ]
+        },
+        {
+          "kind": "pair",
+          "source": "gpt-6.1-sol",
+          "target": "gpt-5.6-luna",
+          "passed": true,
+          "history": true,
+          "tools": true,
+          "patched_files": true,
+          "full_history": true,
+          "context_window": 997500,
+          "request_count": 2,
+          "native_claude_thinking_blocks_forwarded": 0,
+          "native_gpt_reasoning_items_forwarded": 1,
+          "inference": [
+            {
+              "requested_model": "gpt-5.6-luna",
+              "served_model": "gpt-5.6-luna"
+            },
+            {
+              "requested_model": "gpt-5.6-luna",
+              "served_model": "gpt-5.6-luna"
+            }
+          ]
+        }
+      ]
+    },
+    "live_luna_reasoning_controls": {
+      "artifacts": "/mnt/av-data/cache/copilot-early-failure-X6OTip",
+      "results": [
+        {
+          "requested_model": "gpt-5.6-luna",
+          "requested_effort": "low",
+          "served_model": "gpt-5.6-luna",
+          "terminal": "response.completed",
+          "marker_verified": true
+        },
+        {
+          "requested_model": "gpt-5.6-luna",
+          "requested_effort": "max",
+          "served_model": "gpt-5.6-luna",
+          "terminal": "response.completed",
+          "marker_verified": true
+        }
+      ]
+    },
+    "test_fixture_cleanup": {
+      "followup_rerun_failure": "ENOTEMPTY while native background plugin cloning raced with removal of a generated test directory; the failed cleanup hook also left its test HTTP server open.",
+      "initial_failure_log": "/tmp/copilot-502-native-cleanup-race.tap",
+      "fix": "Close generated bridges and SDK clients before removing test directories; use bounded recursive-removal retries.",
+      "user_processes_affected": false
+    }
+  },
+  "limits": [
+    "These tests do not establish the original exception in the already-running old process.",
+    "Existing launchers must exit and resume to load the updated JavaScript and installed runtime.",
+    "No new exhaustive all-model or physical maximum-context test is claimed.",
+    "Remote disconnects, overloads and provider refusals remain possible; previous Opus 5 refusals are not claimed resolved."
+  ]
+}

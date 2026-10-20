@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { access, mkdir, mkdtemp, rm } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -22,6 +22,87 @@ const models = (
 const encode = (event) => Buffer.from(`data: ${JSON.stringify(event)}\n\n`);
 
 test(
+  "official runtime preserves the first connection error and removes its failed transport session",
+  {
+    skip: !cliPath,
+    timeout: 30000,
+  },
+  async (t) => {
+    const root = await mkdtemp(join(homedir(), ".copilot-sdk-first-error-"));
+    let sdk;
+    t.after(async () => {
+      await sdk?.close();
+      await rm(root, {
+        recursive: true,
+        force: true,
+        maxRetries: 5,
+        retryDelay: 100,
+      });
+    });
+    const sessionIds = [],
+      deleted = [];
+    let requests = 0;
+    class Client extends CopilotClient {
+      async createSession(options) {
+        const session = await super.createSession(options);
+        sessionIds.push(session.sessionId);
+        return session;
+      }
+      async deleteSession(id) {
+        assert.ok(sessionIds.includes(id));
+        await super.deleteSession(id);
+        deleted.push(id);
+      }
+    }
+    const file = join(root, "diagnostics.jsonl");
+    sdk = await createSdkTransport({
+      Client,
+      cliPath,
+      directory: root,
+      diagnosticFile: file,
+      forward: async (request) => {
+        if (request.method === "GET") return fetch(request);
+        requests++;
+        throw new TypeError("PRIVATE_PROVIDER_REQUEST", {
+          cause: Object.assign(new Error("PRIVATE_TOKEN"), {
+            code: "ECONNRESET",
+          }),
+        });
+      },
+    });
+    await assert.rejects(
+      sdk.transport("https://api.githubcopilot.com/responses", {
+        body: JSON.stringify({
+          model: "gpt-6.1-sol",
+          stream: true,
+          input: "Synthetic connection failure check.",
+          reasoning: { effort: "max" },
+        }),
+        headers: { "X-Initiator": "user" },
+        signal: AbortSignal.timeout(20000),
+      }),
+      { code: "ECONNRESET" },
+    );
+    await sdk.close();
+    assert.equal(requests, 1);
+    assert.equal(sessionIds.length, 1);
+    assert.deepEqual(deleted, sessionIds);
+    for (const id of sessionIds)
+      await assert.rejects(
+        access(join(homedir(), ".copilot", "session-state", id)),
+        { code: "ENOENT" },
+      );
+    const text = await readFile(file, "utf8");
+    const diagnostics = text.trim().split("\n").map(JSON.parse);
+    assert.equal(diagnostics[0].code, "ECONNRESET");
+    assert.doesNotMatch(
+      text,
+      /PRIVATE_|COPILOT_RUNTIME_EXTRA_REQUEST|SDK_SESSION_CLEANUP_FAILED/,
+    );
+  },
+);
+
+test(
   `native Codex and official runtime sustain ${duration / 1000}-second active streams`,
   { skip: !cliPath || !codexBin, concurrency: true, timeout: duration + 60000 },
   async (t) => {
@@ -31,7 +112,17 @@ test(
           const root = await mkdtemp(
             join(homedir(), ".copilot-sdk-runtime-test-"),
           );
-          t.after(() => rm(root, { recursive: true, force: true }));
+          let sdk, bridge;
+          t.after(async () => {
+            await bridge?.close();
+            await sdk?.close();
+            await rm(root, {
+              recursive: true,
+              force: true,
+              maxRetries: 5,
+              retryDelay: 100,
+            });
+          });
           const state = join(root, "state");
           await mkdir(state, { mode: 0o700 });
           let backendRequests = 0,
@@ -89,7 +180,7 @@ test(
               deletedSessionIds.push(id);
             }
           }
-          const sdk = await createSdkTransport({
+          sdk = await createSdkTransport({
             Client,
             cliPath,
             directory: root,
@@ -231,7 +322,6 @@ test(
               );
             },
           });
-          t.after(() => sdk.close());
           const selected = (
             await listModels(async () => "sdk-owned", sdk.transport, {
               messages: true,
@@ -241,13 +331,12 @@ test(
             selected,
             "The logged-in seat must enable the selected model.",
           );
-          const bridge = await startBridge({
+          bridge = await startBridge({
             getToken: async () => "sdk-owned",
             localToken: "local",
             model,
             transport: sdk.transport,
           });
-          t.after(() => bridge.close());
           const invocation = codexInvocation({
             model,
             url: bridge.url,
