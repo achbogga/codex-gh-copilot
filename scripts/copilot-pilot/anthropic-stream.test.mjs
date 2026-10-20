@@ -398,3 +398,65 @@ test("Messages in-stream errors retain size/server classification and stop quota
     assert.equal(await translated.completion, null);
   }
 });
+
+test("Messages refusals expose their category, fail partial answers and retain real accounting", async () => {
+  for (const partial of [[], [{ type: "text", text: "Incomplete answer" }]]) {
+    const diagnostics = [],
+      values = events(partial, "refusal");
+    values.at(-2).delta.stop_details = {
+      type: "refusal",
+      category: "reasoning_extraction",
+      explanation: "PROVIDER_EXPLANATION: use native thinking blocks.",
+      fallback_credit_token: "PRIVATE_BILLING_TOKEN",
+    };
+    const translated = messagesResponse(
+      response(values),
+      messagesRequest(payload, model),
+      { onDiagnostic: (value) => diagnostics.push(value) },
+    );
+    const wire = await translated.response.text();
+    const failed = wire
+      .split("\n")
+      .filter((line) => line.startsWith("data: "))
+      .map((line) => JSON.parse(line.slice(6)))
+      .at(-1);
+    assert.equal(failed.type, "response.failed");
+    assert.equal(failed.response.error.code, "invalid_prompt");
+    assert.match(failed.response.error.message, /reasoning_extraction/);
+    assert.match(failed.response.error.message, /PROVIDER_EXPLANATION/);
+    assert.equal(failed.response.usage.total_tokens, 25);
+    assert.doesNotMatch(wire, /response.completed|PRIVATE_BILLING_TOKEN/);
+    const acknowledgement = await translated.completion;
+    assert.equal(acknowledgement.usage.output_tokens, 7);
+    assert.equal(acknowledgement.copilot_usage.total_nano_aiu, 123);
+    assert.equal(diagnostics[0].code, "ANTHROPIC_REFUSAL");
+    assert.equal(diagnostics[0].category, "reasoning_extraction");
+    assert.doesNotMatch(
+      JSON.stringify(diagnostics),
+      /PROVIDER_EXPLANATION|PRIVATE_BILLING_TOKEN|Incomplete answer/,
+    );
+  }
+});
+
+test("Messages refusals tolerate absent and unknown categories without logging provider text", async () => {
+  for (const details of [null, { category: "PRIVATE_UNKNOWN_CATEGORY" }]) {
+    const values = events([], "refusal"),
+      diagnostics = [];
+    values.at(-2).delta.stop_details = details;
+    const translated = messagesResponse(
+      response(values),
+      messagesRequest(payload, model),
+      {
+        onDiagnostic: (value) => {
+          diagnostics.push(value);
+          throw new Error("diagnostics unavailable");
+        },
+      },
+    );
+    const wire = await translated.response.text();
+    assert.match(wire, /refused this request \(unknown\)/);
+    assert.doesNotMatch(wire, /response.completed|PRIVATE_UNKNOWN_CATEGORY/);
+    assert.equal(diagnostics[0].category, "unknown");
+    assert.ok(await translated.completion);
+  }
+});

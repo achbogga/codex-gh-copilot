@@ -4,6 +4,13 @@ import { plaintextAgentCall } from "./agent-messages.mjs";
 
 const maxEventBytes = 32 * 1024 * 1024;
 const maxContentBytes = 32 * 1024 * 1024;
+const refusalCategories = new Set([
+  "cyber",
+  "bio",
+  "frontier_llm",
+  "reasoning_extraction",
+  "general_harms",
+]);
 
 export function messagesResponse(response, request, { onDiagnostic } = {}) {
   const finished = Promise.withResolvers();
@@ -189,32 +196,46 @@ export function messagesResponse(response, request, { onDiagnostic } = {}) {
                 },
               },
             };
-            if (
-              message.stop_reason === "refusal" &&
-              !output.some((entry) => entry.type === "message")
-            ) {
-              item = {
-                id: `${message.id}_refusal`,
-                type: "message",
-                role: "assistant",
-                content: [
-                  {
-                    type: "output_text",
-                    text: "The model declined this request.",
-                    annotations: [],
-                  },
-                ],
-              };
-              yield itemEvent("response.output_item.added");
-              yield itemEvent("response.output_item.done");
-              output.push(item);
-            }
             stopped = true;
             finished.resolve({
               ...message,
               stop_reason: "end_turn",
               content: [{ type: "text", text: "Forwarded to Codex." }],
             });
+            if (message.stop_reason === "refusal") {
+              const category = refusalCategories.has(
+                message.stop_details?.category,
+              )
+                ? message.stop_details.category
+                : "unknown";
+              try {
+                onDiagnostic?.({
+                  code: "ANTHROPIC_REFUSAL",
+                  category,
+                  received_events: receivedEvents,
+                });
+              } catch {} // Diagnostics cannot change provider accounting.
+              // A refusal can follow partial text or tool output. Never label
+              // that incomplete answer successful or turn it into a retry.
+              // Explanations belong in the user-visible error, not diagnostics.
+              const explanation = message.stop_details?.explanation;
+              yield event("response.failed", {
+                response: {
+                  id: message.id,
+                  status: "failed",
+                  usage: completed.usage,
+                  error: {
+                    code: "invalid_prompt",
+                    message:
+                      `Copilot Anthropic refused this request (${category}).` +
+                      (typeof explanation === "string" && explanation.trim()
+                        ? ` ${explanation.slice(0, 2000)}`
+                        : " The provider did not supply an explanation."),
+                  },
+                },
+              });
+              return;
+            }
             yield event("response.completed", { response: completed });
             return; // message_stop is terminal; EOF and DONE trailers are optional.
           }

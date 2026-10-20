@@ -1,0 +1,82 @@
+{
+  "date": "2026-10-20",
+  "baseline_commit": "4a7e5501ef06938418374955b88bf118962b7d14",
+  "status": "Opus 5 native continuation remains unresolved; all-model seamless switching is not achieved",
+  "versions": {
+    "codex": "0.163.0",
+    "copilot_cli": "1.0.100",
+    "copilot_sdk": "1.0.22",
+    "node": "22.23.3"
+  },
+  "correction": "The original matrix's seven refused transitions must not be described as proof that Opus 5 cannot resume sessions. The official Copilot CLI passed a control task that the bridge still refuses. The original matrix report is retained unchanged.",
+  "official_cli_control": {
+    "models": ["claude-opus-5", "claude-opus-5.5"],
+    "settings": {
+      "reasoning_effort": "max",
+      "context": "long_context"
+    },
+    "generated_file_tasks": [
+      "First turn: shell-read a random marker and edit a generated artifact",
+      "Second turn: resume the same session, read a fresh proof file, recall the earlier marker and report the changed artifact"
+    ],
+    "passed": 2,
+    "total": 2
+  },
+  "native_bridge_findings": {
+    "model": "claude-opus-5",
+    "http_status": 200,
+    "stop_reason": "refusal",
+    "stop_details_category": "reasoning_extraction",
+    "observed_behavior": "The first shell-and-patch turn succeeds; the next user turn can be refused before tools or visible output, even without a session fork.",
+    "source_of_original_generic_text": "The Messages adapter synthesized 'The model declined this request.' and emitted response.completed, losing the refusal category and explanation.",
+    "failed_to_establish_a_fix": [
+      "Use Anthropic mid-conversation system messages for later native developer instructions",
+      "Set adaptive thinking display to summarized",
+      "Remove top-level automatic prompt caching",
+      "Limit max_tokens to the official runtime's 32000 default",
+      "Set temperature to 1",
+      "Replace the fallback prompt's streaming-thinking instruction with progress updates and native thinking",
+      "Ask explicitly for the earlier visible answer rather than remembered tokens",
+      "Ask only for a new file read without recalling earlier text",
+      "Omit completed prior thinking while retaining active tool-turn thinking",
+      "Remove unused agent and goal tools in the isolated fixture",
+      "Replace only the fixture's base coding prompt with a minimal coding prompt",
+      "Reuse one official SDK session across the fixture's native requests"
+    ],
+    "inconsistent_successes": "Two initial controls using 32000 max_tokens plus temperature 1 succeeded. Separate cap-only and temperature-only controls subsequently refused. These settings have not been applied as a purported fix or used to reduce the user's limits.",
+    "remaining_unknown": "Which difference between the official CLI's conversation and native translated conversation triggers the provider classifier. The category alone does not establish that the benign fixture actually requests private reasoning."
+  },
+  "implemented_correction": {
+    "native_terminal_event": "response.failed",
+    "native_error_code": "invalid_prompt",
+    "user_visible_details": "Provider refusal category and bounded human-readable explanation",
+    "diagnostics": "ANTHROPIC_REFUSAL with allowlisted category and event count; no prompt, explanation, reasoning, credentials or fallback token",
+    "accounting": "Real provider token usage and Copilot billing metadata retained in the runtime acknowledgement",
+    "partial_output": "A refusal following partial output no longer emits a successful completion",
+    "refusal_retry": false,
+    "context_or_reasoning_limits_reduced": false,
+    "model_switched_automatically": false
+  },
+  "validation": {
+    "regular_node_tests": { "passed": 84, "failed": 0, "opt_in_skipped": 11 },
+    "refusal_unit_coverage": [
+      "Empty and partial-output refusals fail with category and explanation",
+      "Real token and billing accounting is preserved",
+      "Unknown or missing refusal details produce a safe explicit error",
+      "Provider explanations and fallback tokens are excluded from diagnostic logs",
+      "Diagnostic write failures cannot interrupt accounting"
+    ],
+    "real_native_error_controls": {
+      "generated_sessions": 2,
+      "seed_shell_and_patch": "2/2 completed",
+      "following_opus_5_turn": "2/2 returned an explicit reasoning_extraction error",
+      "requests_per_refused_turn": 1,
+      "native_reconnects": 0,
+      "underlying_continuation_fixed": false
+    }
+  },
+  "references": [
+    "https://platform.claude.com/docs/en/build-with-claude/refusals-and-fallback",
+    "https://platform.claude.com/docs/en/build-with-claude/thinking"
+  ]
+}

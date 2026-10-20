@@ -30,12 +30,21 @@ const safeId = (id) => id.replace(/[^a-zA-Z0-9_-]/g, "_");
 const hasMarker = (text, marker) =>
   text.replace(/[`*\s]/g, "").includes(marker);
 const token = (prefix) => prefix + randomBytes(10).toString("hex");
-const completed = (result) =>
+const completed = (result) => {
+  if (
+    result.turn.error?.message?.startsWith(
+      "Copilot Anthropic refused this request (",
+    )
+  )
+    throw Object.assign(new Error(result.turn.error.message), {
+      code: "PROVIDER_REFUSAL",
+    });
   assert.equal(
     result.turn.status,
     "completed",
     JSON.stringify(result.turn.error),
   );
+};
 
 // Opt-in live regression: uses only generated test files/prompts, the installed
 // native harness, the real bridge and official SDK. It never starts agents.
@@ -307,6 +316,9 @@ export async function checkModelSwitches({
                 source: source.id,
                 passed: false,
                 error: error.message.slice(0, 1000),
+                ...(error.code === "PROVIDER_REFUSAL"
+                  ? { classification: "provider_refusal" }
+                  : {}),
               });
               for (const target of destinations)
                 await record({
