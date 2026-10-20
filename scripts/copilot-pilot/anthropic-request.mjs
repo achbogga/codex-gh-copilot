@@ -128,14 +128,17 @@ export function messagesRequest(payload, model) {
         append(item.role, blocks);
       } else throw new Error("Unsupported Anthropic message role.");
     } else if (item.type === "reasoning") {
-      if (!item.encrypted_content?.startsWith(thinkingPrefix)) continue; // Opaque reasoning belongs to its original provider, not the new model.
+      if (!item.encrypted_content?.startsWith(thinkingPrefix)) continue; // Opaque state from another protocol stays archived.
       const saved = JSON.parse(
         Buffer.from(
           item.encrypted_content.slice(thinkingPrefix.length),
           "base64",
         ).toString(),
       );
-      if (saved.model !== payload.model) continue;
+      // Claude supports native cross-model thinking for compatible model pairs.
+      // Keep signed blocks exact and let its API enforce model/account binding
+      // and drop unreadable blocks. Filtering all foreign Claude state here
+      // needlessly discards reasoning that a newer Claude model can read.
       if (!["thinking", "redacted_thinking"].includes(saved.block?.type))
         throw new Error("Incompatible Anthropic thinking block.");
       assistantBoundary(saved.message_id ?? providerMessageId(item));

@@ -15,6 +15,9 @@ import { codexInvocation } from "./run.mjs";
 import { nativeCheck } from "./native-check.mjs";
 import { switchFixture } from "./switch-fixture.mjs";
 import { mapResponseEvents } from "./responses-events.mjs";
+import { thinkingPrefix } from "./anthropic-request.mjs";
+import { sameInferenceModel } from "./inference-model.mjs";
+import { modelStatePrefix } from "./model-state.mjs";
 
 const textOf = (result) =>
   result.events
@@ -30,6 +33,40 @@ const safeId = (id) => id.replace(/[^a-zA-Z0-9_-]/g, "_");
 const hasMarker = (text, marker) =>
   text.replace(/[`*\s]/g, "").includes(marker);
 const token = (prefix) => prefix + randomBytes(10).toString("hex");
+const claudeBlocks = (input) =>
+  (input ?? [])
+    .filter((item) => item.encrypted_content?.startsWith(thinkingPrefix))
+    .map(
+      (item) =>
+        JSON.parse(
+          Buffer.from(
+            item.encrypted_content.slice(thinkingPrefix.length),
+            "base64",
+          ).toString(),
+        ).block,
+    );
+const modelProof = (requests) =>
+  requests.map((request) => {
+    if (request.messages || request.model.startsWith("gpt-")) {
+      assert.ok(request.served_model, "Provider response omitted its model.");
+      assert.ok(
+        sameInferenceModel(request.model, request.served_model),
+        "A fallback model must not count as success for the requested model.",
+      );
+    }
+    return {
+      requested_model: request.model,
+      served_model: request.served_model ?? null,
+    };
+  });
+const gptReasoning = (input) =>
+  (input ?? []).flatMap((item) => {
+    if (!item.encrypted_content?.startsWith(modelStatePrefix)) return [];
+    const state = item.encrypted_content.slice(modelStatePrefix.length),
+      end = state.indexOf("\n");
+    if (!decodeURIComponent(state.slice(0, end)).startsWith("gpt-")) return [];
+    return [{ ...item, encrypted_content: state.slice(end + 1) }];
+  });
 const completed = (result) => {
   if (
     result.turn.error?.message?.startsWith(
@@ -122,14 +159,31 @@ export async function checkModelSwitches({
         await mkdir(project, { mode: 0o700 });
         let seeding = false;
         const calls = [],
-          wireModels = [];
+          wireModels = [],
+          wireRequests = [];
         const sdk = await createSdkTransport({
           cliPath: copilotBin,
           directory: root,
           diagnosticFile: join(root, "diagnostics.jsonl"),
           forward: async (request) => {
-            if (request.method === "POST")
-              wireModels.push((await request.clone().json()).model);
+            let wire;
+            if (request.method === "POST") {
+              const body = await request.clone().json();
+              wire = {
+                model: body.model,
+                messages: Array.isArray(body.messages),
+                thinking: body.messages?.flatMap((message) =>
+                  message.content.filter((block) =>
+                    ["thinking", "redacted_thinking"].includes(block.type),
+                  ),
+                ),
+                reasoning: Array.isArray(body.input)
+                  ? body.input.filter((item) => item.type === "reasoning")
+                  : [],
+              };
+              wireModels.push(body.model);
+              wireRequests.push(wire);
+            }
             let response;
             try {
               response = await (request.method === "POST"
@@ -152,7 +206,12 @@ export async function checkModelSwitches({
                 { mode: 0o600 },
               );
             }
-            return response;
+            if (!wire || !response.ok) return response;
+            return mapResponseEvents(response, (event) => {
+              const served = event.message?.model ?? event.response?.model;
+              if (served) wire.served_model = served;
+              return event;
+            });
           },
         });
         const localToken = randomBytes(24).toString("hex");
@@ -257,6 +316,7 @@ export async function checkModelSwitches({
             await writeFile(seed, historyMarker + "\n");
             await writeFile(artifact, "PATCH_BEFORE\n");
             let parent, sourceItems;
+            const sourceWireOffset = wireRequests.length;
             try {
               parent = await native.rpc("thread/start", {
                 cwd: project,
@@ -301,6 +361,9 @@ export async function checkModelSwitches({
                 sourceItems.length >= 2,
                 "Source did not save structured native tool history.",
               );
+              const inference = modelProof(
+                wireRequests.slice(sourceWireOffset),
+              );
               await record({
                 kind: "source",
                 source: source.id,
@@ -308,6 +371,7 @@ export async function checkModelSwitches({
                 patch: true,
                 history: true,
                 thread_id: parent.thread.id,
+                inference,
               });
             } catch (error) {
               seeding = false;
@@ -393,6 +457,41 @@ export async function checkModelSwitches({
                 const compacted = items.some(
                   (item) => item.type === "contextCompaction",
                 );
+                let signedBlocks = 0,
+                  opaqueItems = 0;
+                if (
+                  !compacted &&
+                  target.supported_endpoints?.includes("/v1/messages")
+                ) {
+                  const firstWire = wireRequests
+                    .slice(wireOffset)
+                    .find((wire) => wire.model === target.id);
+                  for (const block of claudeBlocks(first.input)) {
+                    assert.ok(
+                      firstWire?.thinking?.some(
+                        (sent) =>
+                          JSON.stringify(sent) === JSON.stringify(block),
+                      ),
+                      "A saved Claude thinking block was changed or omitted.",
+                    );
+                    signedBlocks++;
+                  }
+                }
+                if (!compacted && target.id.startsWith("gpt-")) {
+                  const firstWire = wireRequests
+                    .slice(wireOffset)
+                    .find((wire) => wire.model === target.id);
+                  for (const item of gptReasoning(first.input)) {
+                    assert.ok(
+                      firstWire?.reasoning?.some(
+                        (sent) => JSON.stringify(sent) === JSON.stringify(item),
+                      ),
+                      "A saved GPT reasoning item was changed or omitted.",
+                    );
+                    opaqueItems++;
+                  }
+                }
+                const inference = modelProof(wireRequests.slice(wireOffset));
                 if (!compacted)
                   for (const saved of sourceItems) {
                     assert.deepEqual(
@@ -422,6 +521,9 @@ export async function checkModelSwitches({
                   history: true,
                   tools: true,
                   patched_files: true,
+                  inference,
+                  native_claude_thinking_blocks_forwarded: signedBlocks,
+                  native_gpt_reasoning_items_forwarded: opaqueItems,
                   full_history: !compacted,
                   context_window: usage?.modelContextWindow ?? null,
                   request_count: calls.length - offset,
@@ -451,6 +553,10 @@ export async function checkModelSwitches({
                     .catch(() => {});
                 // History stays in the native test rollouts; only retain call metadata.
                 for (const call of calls) delete call.input;
+                for (const wire of wireRequests) {
+                  delete wire.thinking;
+                  delete wire.reasoning;
+                }
               }
             }
           }

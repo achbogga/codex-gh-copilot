@@ -128,7 +128,7 @@ test("native compaction stays with its source when total windows match but input
   );
 });
 
-test("all 256 model ownership pairs preserve saved opaque state and restore it only to supported owners after restart", () => {
+test("all 256 ownership pairs preserve opaque state and restore native GPT state across GPT switches after restart", () => {
   let checked = 0;
   for (const source of models)
     for (const target of models) {
@@ -142,7 +142,7 @@ test("all 256 model ownership pairs preserve saved opaque state and restore it o
         JSON.stringify(sealModelState(original, source)),
       );
       const restored = restoreModelState(archived, target);
-      if (source === target && target.startsWith("gpt-"))
+      if (source.startsWith("gpt-") && target.startsWith("gpt-"))
         assert.deepEqual(restored, original);
       else assert.equal(restored, undefined);
       assert.equal(
@@ -158,7 +158,7 @@ test("all 256 model ownership pairs preserve saved opaque state and restore it o
   assert.equal(checked, 256);
 });
 
-test("Claude signed thinking survives JSON session storage and is restored only to its owning Claude model", () => {
+test("Claude signed thinking survives JSON session storage and is replayed natively to Claude models", () => {
   const claudes = models.filter((id) => id.startsWith("claude-"));
   for (const source of claudes)
     for (const target of claudes) {
@@ -187,7 +187,7 @@ test("Claude signed thinking survives JSON session storage and is restored only 
       const blocks = request.body.messages
         .flatMap((m) => m.content)
         .filter((b) => b.type === "thinking");
-      assert.deepEqual(blocks, source === target ? [block] : []);
+      assert.deepEqual(blocks, [block]); // The provider enforces readability.
     }
 });
 

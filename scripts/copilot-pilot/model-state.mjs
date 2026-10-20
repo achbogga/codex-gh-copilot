@@ -3,7 +3,7 @@ import { thinkingPrefix } from "./anthropic-request.mjs";
 import { modelInputLimit } from "./model-config.mjs";
 
 // This is provenance around opaque provider bytes, not decryption or encryption
-// with a shared key. The original ciphertext is restored only to its model.
+// with a shared key. The provider decides which models can read that state.
 export const modelStatePrefix = "copilot-model-state-v3:";
 
 export function modelStateOwner(item) {
@@ -74,7 +74,10 @@ export function restoreModelState(item, model) {
   const owner = modelStateOwner(item);
   // Grok returns opaque reasoning but rejects it on replay, even to itself.
   // Keep it saved locally without sending an input the provider cannot accept.
-  if (owner !== model || !model.startsWith("gpt-")) return undefined;
+  // OpenAI renders compatible reasoning within model families and ignores
+  // incompatible family state. Replay exact GPT bytes to GPT endpoints rather
+  // than discarding state just because the selected GPT variant changed.
+  if (!owner?.startsWith("gpt-") || !model.startsWith("gpt-")) return undefined;
   return { ...item, encrypted_content: state.slice(end + 1) };
 }
 

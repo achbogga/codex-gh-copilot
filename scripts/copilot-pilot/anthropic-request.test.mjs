@@ -57,6 +57,43 @@ test("native assistant continuations retain complete history without unsupported
   assert.equal(input.length, payload.input.length + 1);
 });
 
+test("Claude switches replay signed provider blocks natively without decrypting or demoting them", () => {
+  const block = {
+    type: "thinking",
+    thinking: "Provider-supplied summary",
+    signature: "opaque-signed-state",
+  };
+  const redacted = { type: "redacted_thinking", data: "opaque-redacted-state" };
+  const reasoning = (model, savedBlock) => ({
+    type: "reasoning",
+    encrypted_content:
+      thinkingPrefix +
+      Buffer.from(
+        JSON.stringify({ model, message_id: "msg_source", block: savedBlock }),
+      ).toString("base64"),
+  });
+  const input = [
+    ...payload.input,
+    reasoning("claude-opus-4.8", block),
+    reasoning("claude-opus-4.8", redacted),
+    { id: "msg_source_2", role: "assistant", content: "Visible source answer" },
+    { type: "reasoning", encrypted_content: "foreign-gpt-ciphertext" },
+    { role: "user", content: "Continue on the selected Claude model." },
+  ];
+  const copy = structuredClone(input);
+  const request = messagesRequest({ ...payload, input }, model);
+  assert.deepEqual(request.body.messages[1].content, [
+    block,
+    redacted,
+    { type: "text", text: "Visible source answer" },
+  ]);
+  assert.doesNotMatch(
+    JSON.stringify(request.body),
+    /foreign-gpt-ciphertext|copilot-anthropic-v1:/,
+  );
+  assert.deepEqual(input, copy);
+});
+
 test("Code Mode models receive output-printing instructions alongside native tool definitions", () => {
   const request = messagesRequest(
     {

@@ -20,6 +20,7 @@ async function fixture(
   const requests = [],
     acknowledgements = [],
     sessions = [],
+    deletedSessions = [],
     responseStarts = [],
     runtimeEvents = [];
   const catalog = {
@@ -57,6 +58,11 @@ async function fixture(
     async createSession(options) {
       assert.deepEqual(options.availableTools, []);
       assert.equal(options.streaming, true);
+      assert.equal(
+        (await options.onPermissionRequest({ kind: "shell" })).kind,
+        "reject",
+        "The current SDK permission protocol must deny tool execution.",
+      );
       sessions.push({
         model: options.model,
         contextTier: options.contextTier,
@@ -149,6 +155,10 @@ async function fixture(
       };
     }
     async stop() {}
+    async deleteSession(id) {
+      assert.equal(id, "test-session", "Only this transport session is owned.");
+      deletedSessions.push(id);
+    }
   }
   const sdk = await createSdkTransport({
     Client,
@@ -173,6 +183,7 @@ async function fixture(
     sessions,
     responseStarts,
     runtimeEvents,
+    deletedSessions,
   };
 }
 
@@ -326,7 +337,7 @@ test("a fresh bridge omits saved foreign Responses reasoning when resuming GPT",
   assert.deepEqual(JSON.parse(sdk.requests[0].body).input, [history[1]]);
 });
 
-test("a fresh SDK restores only owned GPT ciphertext, retaining exact native tools and visible history", async (t) => {
+test("a fresh SDK replays durable GPT ciphertext across GPT models and omits unknown raw state", async (t) => {
   const sdk = await fixture(
     t,
     () =>
@@ -378,6 +389,7 @@ test("a fresh SDK restores only owned GPT ciphertext, retaining exact native too
   const { id, ...portableCall } = call;
   assert.deepEqual(JSON.parse(sdk.requests[0].body).input, [
     own,
+    foreign,
     portableCall,
     result,
     user,
@@ -455,6 +467,7 @@ test("native compaction uses the authorized source's larger input budget with on
     await sdk.transport("https://api.githubcopilot.com/responses", request)
   ).text();
   await sdk.close();
+  assert.deepEqual(sdk.deletedSessions, ["test-session"]);
   assert.deepEqual(sdk.sessions, [
     {
       model: models[1].id,

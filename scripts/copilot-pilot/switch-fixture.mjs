@@ -26,10 +26,24 @@ export function switchFixture(models, { nearLimit = false } = {}) {
     ];
     for (const value of history ?? []) {
       if (value.type === "reasoning")
-        assert.equal(value.encrypted_content, `fixture-private:${model.id}`);
+        assert.ok(
+          models.some(
+            (source) =>
+              source.id.startsWith("gpt-") &&
+              value.encrypted_content === `fixture-private:${source.id}`,
+          ),
+          "GPT receives original GPT state and enforces family compatibility itself.",
+        );
       for (const block of value.content ?? [])
         if (block.type === "thinking")
-          assert.equal(block.signature, `fixture-signature:${model.id}`);
+          assert.ok(
+            models.some(
+              (source) =>
+                source.supported_endpoints?.includes("/v1/messages") &&
+                block.signature === `fixture-signature:${source.id}`,
+            ),
+            "Claude accepts valid signed blocks and decides model readability itself.",
+          );
     }
     const last = history?.at(-1);
     const afterTool = messages
@@ -189,7 +203,7 @@ export function switchFixture(models, { nearLimit = false } = {}) {
     const events = [
       {
         type: "response.created",
-        response: { id: "resp_" + id, status: "in_progress" },
+        response: { id: "resp_" + id, model: model.id, status: "in_progress" },
       },
       { type: "response.output_item.done", item: reasoning },
       { type: "response.output_item.done", item },
@@ -197,6 +211,7 @@ export function switchFixture(models, { nearLimit = false } = {}) {
         type: "response.completed",
         response: {
           id: "resp_" + id,
+          model: model.id,
           status: "completed",
           output: [reasoning, item],
           usage: {

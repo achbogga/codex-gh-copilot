@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { access, mkdir, mkdtemp, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -38,7 +38,9 @@ test(
             runtimeRequests = 0,
             idle = 0;
           const errors = [],
-            sessions = [];
+            sessions = [],
+            sessionIds = [],
+            deletedSessionIds = [];
           class Client extends CopilotClient {
             constructor(options) {
               if (process.env.COPILOT_PILOT_RUNTIME_DEBUG)
@@ -72,12 +74,19 @@ test(
                 streaming: options.streaming,
               });
               const session = await super.createSession(options);
+              sessionIds.push(session.sessionId);
               session.on((event) => {
                 if (event.type === "session.error")
                   errors.push(event.data.errorType);
                 if (event.type === "session.idle") idle++;
               });
               return session;
+            }
+            async deleteSession(id) {
+              assert.ok(sessionIds.includes(id));
+              await access(join(homedir(), ".copilot", "session-state", id));
+              await super.deleteSession(id);
+              deletedSessionIds.push(id);
             }
           }
           const sdk = await createSdkTransport({
@@ -278,6 +287,13 @@ test(
             "Runtime must accept the acknowledgement before shutdown.",
           );
           assert.deepEqual(errors, []);
+          assert.deepEqual(deletedSessionIds, sessionIds);
+          for (const id of sessionIds)
+            await assert.rejects(
+              access(join(homedir(), ".copilot", "session-state", id)),
+              { code: "ENOENT" },
+              "Temporary SDK state must be removed after accounting completes.",
+            );
           assert.deepEqual(sessions, [
             {
               model,

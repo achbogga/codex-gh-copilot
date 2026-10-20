@@ -1,0 +1,2070 @@
+{
+  "date": "2026-10-20T19:28:16.578704+00:00",
+  "baseline_commit": "f3aede0cea518504985b173a0a481ee191ee0ac7",
+  "versions": {
+    "codex": "0.163.0",
+    "copilot_cli": "1.0.100",
+    "copilot_sdk": "1.0.22",
+    "node": "22.23.3"
+  },
+  "implemented": [
+    "Replay unchanged durable GPT opaque state on GPT-to-GPT switches; the API enforces family compatibility.",
+    "Replay unchanged signed Claude thinking on Claude-to-Claude switches; the API enforces model and account compatibility.",
+    "Keep cross-provider opaque state archived and off incompatible wire protocols; never convert it to plain message text.",
+    "Use Web Streams for SSE mapping and Messages output, preserving upstream cancellation.",
+    "Delete only per-request SDK transport sessions after accounting or cancellation; preserve native Codex rollouts and project files.",
+    "Use the current SDK permission rejection enum while retaining zero SDK tools.",
+    "Verify actually served GPT and Claude models and exact forwarded opaque items in native switch checks."
+  ],
+  "gpt_live_native_matrix": {
+    "expected_pairs": 49,
+    "passed_pairs": 49,
+    "failed_pairs": 0,
+    "pairs_with_original_opaque_state_forwarded": 49,
+    "total_original_opaque_items_forwarded": 161,
+    "results": [
+      {
+        "source": "gpt-5.3-codex",
+        "target": "gpt-5.3-codex",
+        "passed": true,
+        "context_window": 380000,
+        "request_count": 2,
+        "compacted": false,
+        "full_history": true,
+        "native_claude_thinking_blocks_forwarded": 0,
+        "native_gpt_reasoning_items_forwarded": 3,
+        "inference": [
+          {
+            "requested_model": "gpt-5.3-codex",
+            "served_model": "gpt-5.3-codex"
+          },
+          {
+            "requested_model": "gpt-5.3-codex",
+            "served_model": "gpt-5.3-codex"
+          }
+        ]
+      },
+      {
+        "source": "gpt-5.6-luna",
+        "target": "gpt-5.3-codex",
+        "passed": true,
+        "context_window": 380000,
+        "request_count": 2,
+        "compacted": false,
+        "full_history": true,
+        "native_claude_thinking_blocks_forwarded": 0,
+        "native_gpt_reasoning_items_forwarded": 4,
+        "inference": [
+          {
+            "requested_model": "gpt-5.3-codex",
+            "served_model": "gpt-5.3-codex"
+          },
+          {
+            "requested_model": "gpt-5.3-codex",
+            "served_model": "gpt-5.3-codex"
+          }
+        ]
+      },
+      {
+        "source": "gpt-5.6-sol",
+        "target": "gpt-5.3-codex",
+        "passed": true,
+        "context_window": 380000,
+        "request_count": 2,
+        "compacted": false,
+        "full_history": true,
+        "native_claude_thinking_blocks_forwarded": 0,
+        "native_gpt_reasoning_items_forwarded": 5,
+        "inference": [
+          {
+            "requested_model": "gpt-5.3-codex",
+            "served_model": "gpt-5.3-codex"
+          },
+          {
+            "requested_model": "gpt-5.3-codex",
+            "served_model": "gpt-5.3-codex"
+          }
+        ]
+      },
+      {
+        "source": "gpt-5.3-codex",
+        "target": "gpt-5.6-luna",
+        "passed": true,
+        "context_window": 997500,
+        "request_count": 2,
+        "compacted": false,
+        "full_history": true,
+        "native_claude_thinking_blocks_forwarded": 0,
+        "native_gpt_reasoning_items_forwarded": 3,
+        "inference": [
+          {
+            "requested_model": "gpt-5.6-luna",
+            "served_model": "gpt-5.6-luna"
+          },
+          {
+            "requested_model": "gpt-5.6-luna",
+            "served_model": "gpt-5.6-luna"
+          }
+        ]
+      },
+      {
+        "source": "gpt-5.6-luna",
+        "target": "gpt-5.6-luna",
+        "passed": true,
+        "context_window": 997500,
+        "request_count": 2,
+        "compacted": false,
+        "full_history": true,
+        "native_claude_thinking_blocks_forwarded": 0,
+        "native_gpt_reasoning_items_forwarded": 4,
+        "inference": [
+          {
+            "requested_model": "gpt-5.6-luna",
+            "served_model": "gpt-5.6-luna"
+          },
+          {
+            "requested_model": "gpt-5.6-luna",
+            "served_model": "gpt-5.6-luna"
+          }
+        ]
+      },
+      {
+        "source": "gpt-5.6-sol",
+        "target": "gpt-5.6-luna",
+        "passed": true,
+        "context_window": 997500,
+        "request_count": 2,
+        "compacted": false,
+        "full_history": true,
+        "native_claude_thinking_blocks_forwarded": 0,
+        "native_gpt_reasoning_items_forwarded": 5,
+        "inference": [
+          {
+            "requested_model": "gpt-5.6-luna",
+            "served_model": "gpt-5.6-luna"
+          },
+          {
+            "requested_model": "gpt-5.6-luna",
+            "served_model": "gpt-5.6-luna"
+          }
+        ]
+      },
+      {
+        "source": "gpt-5.3-codex",
+        "target": "gpt-5.6-sol",
+        "passed": true,
+        "context_window": 997500,
+        "request_count": 2,
+        "compacted": false,
+        "full_history": true,
+        "native_claude_thinking_blocks_forwarded": 0,
+        "native_gpt_reasoning_items_forwarded": 3,
+        "inference": [
+          {
+            "requested_model": "gpt-5.6-sol",
+            "served_model": "gpt-5.6-sol"
+          },
+          {
+            "requested_model": "gpt-5.6-sol",
+            "served_model": "gpt-5.6-sol"
+          }
+        ]
+      },
+      {
+        "source": "gpt-5.6-luna",
+        "target": "gpt-5.6-sol",
+        "passed": true,
+        "context_window": 997500,
+        "request_count": 2,
+        "compacted": false,
+        "full_history": true,
+        "native_claude_thinking_blocks_forwarded": 0,
+        "native_gpt_reasoning_items_forwarded": 4,
+        "inference": [
+          {
+            "requested_model": "gpt-5.6-sol",
+            "served_model": "gpt-5.6-sol"
+          },
+          {
+            "requested_model": "gpt-5.6-sol",
+            "served_model": "gpt-5.6-sol"
+          }
+        ]
+      },
+      {
+        "source": "gpt-5.6-sol",
+        "target": "gpt-5.6-sol",
+        "passed": true,
+        "context_window": 997500,
+        "request_count": 2,
+        "compacted": false,
+        "full_history": true,
+        "native_claude_thinking_blocks_forwarded": 0,
+        "native_gpt_reasoning_items_forwarded": 5,
+        "inference": [
+          {
+            "requested_model": "gpt-5.6-sol",
+            "served_model": "gpt-5.6-sol"
+          },
+          {
+            "requested_model": "gpt-5.6-sol",
+            "served_model": "gpt-5.6-sol"
+          }
+        ]
+      },
+      {
+        "source": "gpt-5.3-codex",
+        "target": "gpt-5.6-terra",
+        "passed": true,
+        "context_window": 997500,
+        "request_count": 2,
+        "compacted": false,
+        "full_history": true,
+        "native_claude_thinking_blocks_forwarded": 0,
+        "native_gpt_reasoning_items_forwarded": 3,
+        "inference": [
+          {
+            "requested_model": "gpt-5.6-terra",
+            "served_model": "gpt-5.6-terra"
+          },
+          {
+            "requested_model": "gpt-5.6-terra",
+            "served_model": "gpt-5.6-terra"
+          }
+        ]
+      },
+      {
+        "source": "gpt-5.6-sol",
+        "target": "gpt-5.6-terra",
+        "passed": true,
+        "context_window": 997500,
+        "request_count": 2,
+        "compacted": false,
+        "full_history": true,
+        "native_claude_thinking_blocks_forwarded": 0,
+        "native_gpt_reasoning_items_forwarded": 5,
+        "inference": [
+          {
+            "requested_model": "gpt-5.6-terra",
+            "served_model": "gpt-5.6-terra"
+          },
+          {
+            "requested_model": "gpt-5.6-terra",
+            "served_model": "gpt-5.6-terra"
+          }
+        ]
+      },
+      {
+        "source": "gpt-5.6-luna",
+        "target": "gpt-5.6-terra",
+        "passed": true,
+        "context_window": 997500,
+        "request_count": 2,
+        "compacted": false,
+        "full_history": true,
+        "native_claude_thinking_blocks_forwarded": 0,
+        "native_gpt_reasoning_items_forwarded": 4,
+        "inference": [
+          {
+            "requested_model": "gpt-5.6-terra",
+            "served_model": "gpt-5.6-terra"
+          },
+          {
+            "requested_model": "gpt-5.6-terra",
+            "served_model": "gpt-5.6-terra"
+          }
+        ]
+      },
+      {
+        "source": "gpt-5.3-codex",
+        "target": "gpt-6.1-sol",
+        "passed": true,
+        "context_window": 997500,
+        "request_count": 2,
+        "compacted": false,
+        "full_history": true,
+        "native_claude_thinking_blocks_forwarded": 0,
+        "native_gpt_reasoning_items_forwarded": 3,
+        "inference": [
+          {
+            "requested_model": "gpt-6.1-sol",
+            "served_model": "gpt-6.1-sol"
+          },
+          {
+            "requested_model": "gpt-6.1-sol",
+            "served_model": "gpt-6.1-sol"
+          }
+        ]
+      },
+      {
+        "source": "gpt-5.6-sol",
+        "target": "gpt-6.1-sol",
+        "passed": true,
+        "context_window": 997500,
+        "request_count": 2,
+        "compacted": false,
+        "full_history": true,
+        "native_claude_thinking_blocks_forwarded": 0,
+        "native_gpt_reasoning_items_forwarded": 5,
+        "inference": [
+          {
+            "requested_model": "gpt-6.1-sol",
+            "served_model": "gpt-6.1-sol"
+          },
+          {
+            "requested_model": "gpt-6.1-sol",
+            "served_model": "gpt-6.1-sol"
+          }
+        ]
+      },
+      {
+        "source": "gpt-5.3-codex",
+        "target": "gpt-6-luna",
+        "passed": true,
+        "context_window": 950000,
+        "request_count": 2,
+        "compacted": false,
+        "full_history": true,
+        "native_claude_thinking_blocks_forwarded": 0,
+        "native_gpt_reasoning_items_forwarded": 3,
+        "inference": [
+          {
+            "requested_model": "gpt-6-luna",
+            "served_model": "gpt-6-luna"
+          },
+          {
+            "requested_model": "gpt-6-luna",
+            "served_model": "gpt-6-luna"
+          }
+        ]
+      },
+      {
+        "source": "gpt-5.6-luna",
+        "target": "gpt-6.1-sol",
+        "passed": true,
+        "context_window": 997500,
+        "request_count": 2,
+        "compacted": false,
+        "full_history": true,
+        "native_claude_thinking_blocks_forwarded": 0,
+        "native_gpt_reasoning_items_forwarded": 4,
+        "inference": [
+          {
+            "requested_model": "gpt-6.1-sol",
+            "served_model": "gpt-6.1-sol"
+          },
+          {
+            "requested_model": "gpt-6.1-sol",
+            "served_model": "gpt-6.1-sol"
+          }
+        ]
+      },
+      {
+        "source": "gpt-5.6-sol",
+        "target": "gpt-6-luna",
+        "passed": true,
+        "context_window": 950000,
+        "request_count": 2,
+        "compacted": false,
+        "full_history": true,
+        "native_claude_thinking_blocks_forwarded": 0,
+        "native_gpt_reasoning_items_forwarded": 5,
+        "inference": [
+          {
+            "requested_model": "gpt-6-luna",
+            "served_model": "gpt-6-luna"
+          },
+          {
+            "requested_model": "gpt-6-luna",
+            "served_model": "gpt-6-luna"
+          }
+        ]
+      },
+      {
+        "source": "gpt-5.3-codex",
+        "target": "gpt-6-sol",
+        "passed": true,
+        "context_window": 950000,
+        "request_count": 2,
+        "compacted": false,
+        "full_history": true,
+        "native_claude_thinking_blocks_forwarded": 0,
+        "native_gpt_reasoning_items_forwarded": 3,
+        "inference": [
+          {
+            "requested_model": "gpt-6-sol",
+            "served_model": "gpt-6-sol"
+          },
+          {
+            "requested_model": "gpt-6-sol",
+            "served_model": "gpt-6-sol"
+          }
+        ]
+      },
+      {
+        "source": "gpt-5.6-luna",
+        "target": "gpt-6-luna",
+        "passed": true,
+        "context_window": 950000,
+        "request_count": 2,
+        "compacted": false,
+        "full_history": true,
+        "native_claude_thinking_blocks_forwarded": 0,
+        "native_gpt_reasoning_items_forwarded": 4,
+        "inference": [
+          {
+            "requested_model": "gpt-6-luna",
+            "served_model": "gpt-6-luna"
+          },
+          {
+            "requested_model": "gpt-6-luna",
+            "served_model": "gpt-6-luna"
+          }
+        ]
+      },
+      {
+        "source": "gpt-5.6-sol",
+        "target": "gpt-6-sol",
+        "passed": true,
+        "context_window": 950000,
+        "request_count": 2,
+        "compacted": false,
+        "full_history": true,
+        "native_claude_thinking_blocks_forwarded": 0,
+        "native_gpt_reasoning_items_forwarded": 5,
+        "inference": [
+          {
+            "requested_model": "gpt-6-sol",
+            "served_model": "gpt-6-sol"
+          },
+          {
+            "requested_model": "gpt-6-sol",
+            "served_model": "gpt-6-sol"
+          }
+        ]
+      },
+      {
+        "source": "gpt-5.6-luna",
+        "target": "gpt-6-sol",
+        "passed": true,
+        "context_window": 950000,
+        "request_count": 2,
+        "compacted": false,
+        "full_history": true,
+        "native_claude_thinking_blocks_forwarded": 0,
+        "native_gpt_reasoning_items_forwarded": 4,
+        "inference": [
+          {
+            "requested_model": "gpt-6-sol",
+            "served_model": "gpt-6-sol"
+          },
+          {
+            "requested_model": "gpt-6-sol",
+            "served_model": "gpt-6-sol"
+          }
+        ]
+      },
+      {
+        "source": "gpt-5.6-terra",
+        "target": "gpt-5.3-codex",
+        "passed": true,
+        "context_window": 380000,
+        "request_count": 2,
+        "compacted": false,
+        "full_history": true,
+        "native_claude_thinking_blocks_forwarded": 0,
+        "native_gpt_reasoning_items_forwarded": 3,
+        "inference": [
+          {
+            "requested_model": "gpt-5.3-codex",
+            "served_model": "gpt-5.3-codex"
+          },
+          {
+            "requested_model": "gpt-5.3-codex",
+            "served_model": "gpt-5.3-codex"
+          }
+        ]
+      },
+      {
+        "source": "gpt-6.1-sol",
+        "target": "gpt-5.3-codex",
+        "passed": true,
+        "context_window": 380000,
+        "request_count": 2,
+        "compacted": false,
+        "full_history": true,
+        "native_claude_thinking_blocks_forwarded": 0,
+        "native_gpt_reasoning_items_forwarded": 1,
+        "inference": [
+          {
+            "requested_model": "gpt-5.3-codex",
+            "served_model": "gpt-5.3-codex"
+          },
+          {
+            "requested_model": "gpt-5.3-codex",
+            "served_model": "gpt-5.3-codex"
+          }
+        ]
+      },
+      {
+        "source": "gpt-5.6-terra",
+        "target": "gpt-5.6-luna",
+        "passed": true,
+        "context_window": 997500,
+        "request_count": 2,
+        "compacted": false,
+        "full_history": true,
+        "native_claude_thinking_blocks_forwarded": 0,
+        "native_gpt_reasoning_items_forwarded": 3,
+        "inference": [
+          {
+            "requested_model": "gpt-5.6-luna",
+            "served_model": "gpt-5.6-luna"
+          },
+          {
+            "requested_model": "gpt-5.6-luna",
+            "served_model": "gpt-5.6-luna"
+          }
+        ]
+      },
+      {
+        "source": "gpt-6.1-sol",
+        "target": "gpt-5.6-luna",
+        "passed": true,
+        "context_window": 997500,
+        "request_count": 2,
+        "compacted": false,
+        "full_history": true,
+        "native_claude_thinking_blocks_forwarded": 0,
+        "native_gpt_reasoning_items_forwarded": 1,
+        "inference": [
+          {
+            "requested_model": "gpt-5.6-luna",
+            "served_model": "gpt-5.6-luna"
+          },
+          {
+            "requested_model": "gpt-5.6-luna",
+            "served_model": "gpt-5.6-luna"
+          }
+        ]
+      },
+      {
+        "source": "gpt-6-luna",
+        "target": "gpt-5.3-codex",
+        "passed": true,
+        "context_window": 380000,
+        "request_count": 2,
+        "compacted": false,
+        "full_history": true,
+        "native_claude_thinking_blocks_forwarded": 0,
+        "native_gpt_reasoning_items_forwarded": 4,
+        "inference": [
+          {
+            "requested_model": "gpt-5.3-codex",
+            "served_model": "gpt-5.3-codex"
+          },
+          {
+            "requested_model": "gpt-5.3-codex",
+            "served_model": "gpt-5.3-codex"
+          }
+        ]
+      },
+      {
+        "source": "gpt-5.6-terra",
+        "target": "gpt-5.6-sol",
+        "passed": true,
+        "context_window": 997500,
+        "request_count": 2,
+        "compacted": false,
+        "full_history": true,
+        "native_claude_thinking_blocks_forwarded": 0,
+        "native_gpt_reasoning_items_forwarded": 3,
+        "inference": [
+          {
+            "requested_model": "gpt-5.6-sol",
+            "served_model": "gpt-5.6-sol"
+          },
+          {
+            "requested_model": "gpt-5.6-sol",
+            "served_model": "gpt-5.6-sol"
+          }
+        ]
+      },
+      {
+        "source": "gpt-6.1-sol",
+        "target": "gpt-5.6-sol",
+        "passed": true,
+        "context_window": 997500,
+        "request_count": 2,
+        "compacted": false,
+        "full_history": true,
+        "native_claude_thinking_blocks_forwarded": 0,
+        "native_gpt_reasoning_items_forwarded": 1,
+        "inference": [
+          {
+            "requested_model": "gpt-5.6-sol",
+            "served_model": "gpt-5.6-sol"
+          },
+          {
+            "requested_model": "gpt-5.6-sol",
+            "served_model": "gpt-5.6-sol"
+          }
+        ]
+      },
+      {
+        "source": "gpt-6-luna",
+        "target": "gpt-5.6-luna",
+        "passed": true,
+        "context_window": 997500,
+        "request_count": 2,
+        "compacted": false,
+        "full_history": true,
+        "native_claude_thinking_blocks_forwarded": 0,
+        "native_gpt_reasoning_items_forwarded": 4,
+        "inference": [
+          {
+            "requested_model": "gpt-5.6-luna",
+            "served_model": "gpt-5.6-luna"
+          },
+          {
+            "requested_model": "gpt-5.6-luna",
+            "served_model": "gpt-5.6-luna"
+          }
+        ]
+      },
+      {
+        "source": "gpt-5.6-terra",
+        "target": "gpt-5.6-terra",
+        "passed": true,
+        "context_window": 997500,
+        "request_count": 2,
+        "compacted": false,
+        "full_history": true,
+        "native_claude_thinking_blocks_forwarded": 0,
+        "native_gpt_reasoning_items_forwarded": 3,
+        "inference": [
+          {
+            "requested_model": "gpt-5.6-terra",
+            "served_model": "gpt-5.6-terra"
+          },
+          {
+            "requested_model": "gpt-5.6-terra",
+            "served_model": "gpt-5.6-terra"
+          }
+        ]
+      },
+      {
+        "source": "gpt-6.1-sol",
+        "target": "gpt-5.6-terra",
+        "passed": true,
+        "context_window": 997500,
+        "request_count": 2,
+        "compacted": false,
+        "full_history": true,
+        "native_claude_thinking_blocks_forwarded": 0,
+        "native_gpt_reasoning_items_forwarded": 1,
+        "inference": [
+          {
+            "requested_model": "gpt-5.6-terra",
+            "served_model": "gpt-5.6-terra"
+          },
+          {
+            "requested_model": "gpt-5.6-terra",
+            "served_model": "gpt-5.6-terra"
+          }
+        ]
+      },
+      {
+        "source": "gpt-6-luna",
+        "target": "gpt-5.6-sol",
+        "passed": true,
+        "context_window": 997500,
+        "request_count": 2,
+        "compacted": false,
+        "full_history": true,
+        "native_claude_thinking_blocks_forwarded": 0,
+        "native_gpt_reasoning_items_forwarded": 4,
+        "inference": [
+          {
+            "requested_model": "gpt-5.6-sol",
+            "served_model": "gpt-5.6-sol"
+          },
+          {
+            "requested_model": "gpt-5.6-sol",
+            "served_model": "gpt-5.6-sol"
+          }
+        ]
+      },
+      {
+        "source": "gpt-6.1-sol",
+        "target": "gpt-6.1-sol",
+        "passed": true,
+        "context_window": 997500,
+        "request_count": 2,
+        "compacted": false,
+        "full_history": true,
+        "native_claude_thinking_blocks_forwarded": 0,
+        "native_gpt_reasoning_items_forwarded": 1,
+        "inference": [
+          {
+            "requested_model": "gpt-6.1-sol",
+            "served_model": "gpt-6.1-sol"
+          },
+          {
+            "requested_model": "gpt-6.1-sol",
+            "served_model": "gpt-6.1-sol"
+          }
+        ]
+      },
+      {
+        "source": "gpt-5.6-terra",
+        "target": "gpt-6.1-sol",
+        "passed": true,
+        "context_window": 997500,
+        "request_count": 2,
+        "compacted": false,
+        "full_history": true,
+        "native_claude_thinking_blocks_forwarded": 0,
+        "native_gpt_reasoning_items_forwarded": 3,
+        "inference": [
+          {
+            "requested_model": "gpt-6.1-sol",
+            "served_model": "gpt-6.1-sol"
+          },
+          {
+            "requested_model": "gpt-6.1-sol",
+            "served_model": "gpt-6.1-sol"
+          }
+        ]
+      },
+      {
+        "source": "gpt-6-luna",
+        "target": "gpt-5.6-terra",
+        "passed": true,
+        "context_window": 997500,
+        "request_count": 2,
+        "compacted": false,
+        "full_history": true,
+        "native_claude_thinking_blocks_forwarded": 0,
+        "native_gpt_reasoning_items_forwarded": 4,
+        "inference": [
+          {
+            "requested_model": "gpt-5.6-terra",
+            "served_model": "gpt-5.6-terra"
+          },
+          {
+            "requested_model": "gpt-5.6-terra",
+            "served_model": "gpt-5.6-terra"
+          }
+        ]
+      },
+      {
+        "source": "gpt-6.1-sol",
+        "target": "gpt-6-luna",
+        "passed": true,
+        "context_window": 950000,
+        "request_count": 2,
+        "compacted": false,
+        "full_history": true,
+        "native_claude_thinking_blocks_forwarded": 0,
+        "native_gpt_reasoning_items_forwarded": 1,
+        "inference": [
+          {
+            "requested_model": "gpt-6-luna",
+            "served_model": "gpt-6-luna"
+          },
+          {
+            "requested_model": "gpt-6-luna",
+            "served_model": "gpt-6-luna"
+          }
+        ]
+      },
+      {
+        "source": "gpt-5.6-terra",
+        "target": "gpt-6-luna",
+        "passed": true,
+        "context_window": 950000,
+        "request_count": 2,
+        "compacted": false,
+        "full_history": true,
+        "native_claude_thinking_blocks_forwarded": 0,
+        "native_gpt_reasoning_items_forwarded": 3,
+        "inference": [
+          {
+            "requested_model": "gpt-6-luna",
+            "served_model": "gpt-6-luna"
+          },
+          {
+            "requested_model": "gpt-6-luna",
+            "served_model": "gpt-6-luna"
+          }
+        ]
+      },
+      {
+        "source": "gpt-6.1-sol",
+        "target": "gpt-6-sol",
+        "passed": true,
+        "context_window": 950000,
+        "request_count": 2,
+        "compacted": false,
+        "full_history": true,
+        "native_claude_thinking_blocks_forwarded": 0,
+        "native_gpt_reasoning_items_forwarded": 1,
+        "inference": [
+          {
+            "requested_model": "gpt-6-sol",
+            "served_model": "gpt-6-sol"
+          },
+          {
+            "requested_model": "gpt-6-sol",
+            "served_model": "gpt-6-sol"
+          }
+        ]
+      },
+      {
+        "source": "gpt-6-luna",
+        "target": "gpt-6.1-sol",
+        "passed": true,
+        "context_window": 997500,
+        "request_count": 2,
+        "compacted": false,
+        "full_history": true,
+        "native_claude_thinking_blocks_forwarded": 0,
+        "native_gpt_reasoning_items_forwarded": 4,
+        "inference": [
+          {
+            "requested_model": "gpt-6.1-sol",
+            "served_model": "gpt-6.1-sol"
+          },
+          {
+            "requested_model": "gpt-6.1-sol",
+            "served_model": "gpt-6.1-sol"
+          }
+        ]
+      },
+      {
+        "source": "gpt-5.6-terra",
+        "target": "gpt-6-sol",
+        "passed": true,
+        "context_window": 950000,
+        "request_count": 2,
+        "compacted": false,
+        "full_history": true,
+        "native_claude_thinking_blocks_forwarded": 0,
+        "native_gpt_reasoning_items_forwarded": 3,
+        "inference": [
+          {
+            "requested_model": "gpt-6-sol",
+            "served_model": "gpt-6-sol"
+          },
+          {
+            "requested_model": "gpt-6-sol",
+            "served_model": "gpt-6-sol"
+          }
+        ]
+      },
+      {
+        "source": "gpt-6-luna",
+        "target": "gpt-6-luna",
+        "passed": true,
+        "context_window": 950000,
+        "request_count": 2,
+        "compacted": false,
+        "full_history": true,
+        "native_claude_thinking_blocks_forwarded": 0,
+        "native_gpt_reasoning_items_forwarded": 4,
+        "inference": [
+          {
+            "requested_model": "gpt-6-luna",
+            "served_model": "gpt-6-luna"
+          },
+          {
+            "requested_model": "gpt-6-luna",
+            "served_model": "gpt-6-luna"
+          }
+        ]
+      },
+      {
+        "source": "gpt-6-luna",
+        "target": "gpt-6-sol",
+        "passed": true,
+        "context_window": 950000,
+        "request_count": 2,
+        "compacted": false,
+        "full_history": true,
+        "native_claude_thinking_blocks_forwarded": 0,
+        "native_gpt_reasoning_items_forwarded": 4,
+        "inference": [
+          {
+            "requested_model": "gpt-6-sol",
+            "served_model": "gpt-6-sol"
+          },
+          {
+            "requested_model": "gpt-6-sol",
+            "served_model": "gpt-6-sol"
+          }
+        ]
+      },
+      {
+        "source": "gpt-6-sol",
+        "target": "gpt-5.3-codex",
+        "passed": true,
+        "context_window": 380000,
+        "request_count": 3,
+        "compacted": false,
+        "full_history": true,
+        "native_claude_thinking_blocks_forwarded": 0,
+        "native_gpt_reasoning_items_forwarded": 3,
+        "inference": [
+          {
+            "requested_model": "gpt-5.3-codex",
+            "served_model": "gpt-5.3-codex"
+          },
+          {
+            "requested_model": "gpt-5.3-codex",
+            "served_model": "gpt-5.3-codex"
+          },
+          {
+            "requested_model": "gpt-5.3-codex",
+            "served_model": "gpt-5.3-codex"
+          }
+        ]
+      },
+      {
+        "source": "gpt-6-sol",
+        "target": "gpt-5.6-luna",
+        "passed": true,
+        "context_window": 997500,
+        "request_count": 2,
+        "compacted": false,
+        "full_history": true,
+        "native_claude_thinking_blocks_forwarded": 0,
+        "native_gpt_reasoning_items_forwarded": 3,
+        "inference": [
+          {
+            "requested_model": "gpt-5.6-luna",
+            "served_model": "gpt-5.6-luna"
+          },
+          {
+            "requested_model": "gpt-5.6-luna",
+            "served_model": "gpt-5.6-luna"
+          }
+        ]
+      },
+      {
+        "source": "gpt-6-sol",
+        "target": "gpt-5.6-sol",
+        "passed": true,
+        "context_window": 997500,
+        "request_count": 2,
+        "compacted": false,
+        "full_history": true,
+        "native_claude_thinking_blocks_forwarded": 0,
+        "native_gpt_reasoning_items_forwarded": 3,
+        "inference": [
+          {
+            "requested_model": "gpt-5.6-sol",
+            "served_model": "gpt-5.6-sol"
+          },
+          {
+            "requested_model": "gpt-5.6-sol",
+            "served_model": "gpt-5.6-sol"
+          }
+        ]
+      },
+      {
+        "source": "gpt-6-sol",
+        "target": "gpt-5.6-terra",
+        "passed": true,
+        "context_window": 997500,
+        "request_count": 2,
+        "compacted": false,
+        "full_history": true,
+        "native_claude_thinking_blocks_forwarded": 0,
+        "native_gpt_reasoning_items_forwarded": 3,
+        "inference": [
+          {
+            "requested_model": "gpt-5.6-terra",
+            "served_model": "gpt-5.6-terra"
+          },
+          {
+            "requested_model": "gpt-5.6-terra",
+            "served_model": "gpt-5.6-terra"
+          }
+        ]
+      },
+      {
+        "source": "gpt-6-sol",
+        "target": "gpt-6.1-sol",
+        "passed": true,
+        "context_window": 997500,
+        "request_count": 2,
+        "compacted": false,
+        "full_history": true,
+        "native_claude_thinking_blocks_forwarded": 0,
+        "native_gpt_reasoning_items_forwarded": 3,
+        "inference": [
+          {
+            "requested_model": "gpt-6.1-sol",
+            "served_model": "gpt-6.1-sol"
+          },
+          {
+            "requested_model": "gpt-6.1-sol",
+            "served_model": "gpt-6.1-sol"
+          }
+        ]
+      },
+      {
+        "source": "gpt-6-sol",
+        "target": "gpt-6-luna",
+        "passed": true,
+        "context_window": 950000,
+        "request_count": 2,
+        "compacted": false,
+        "full_history": true,
+        "native_claude_thinking_blocks_forwarded": 0,
+        "native_gpt_reasoning_items_forwarded": 3,
+        "inference": [
+          {
+            "requested_model": "gpt-6-luna",
+            "served_model": "gpt-6-luna"
+          },
+          {
+            "requested_model": "gpt-6-luna",
+            "served_model": "gpt-6-luna"
+          }
+        ]
+      },
+      {
+        "source": "gpt-6-sol",
+        "target": "gpt-6-sol",
+        "passed": true,
+        "context_window": 950000,
+        "request_count": 2,
+        "compacted": false,
+        "full_history": true,
+        "native_claude_thinking_blocks_forwarded": 0,
+        "native_gpt_reasoning_items_forwarded": 3,
+        "inference": [
+          {
+            "requested_model": "gpt-6-sol",
+            "served_model": "gpt-6-sol"
+          },
+          {
+            "requested_model": "gpt-6-sol",
+            "served_model": "gpt-6-sol"
+          }
+        ]
+      }
+    ]
+  },
+  "claude_live_native_matrix": {
+    "expected_pairs": 36,
+    "passed_pairs": 33,
+    "failed_pairs": 3,
+    "pairs_with_original_signed_state_forwarded": 33,
+    "first_run": {
+      "passed": 23,
+      "failed": 13,
+      "note": "Eleven failures were model-proof alias checks involving Haiku 4.5, including its source setup. All eleven cases were rerun after verifying the published snapshot alias. The two original policy refusals were retained; a third was observed on the first proper Haiku-source continuation."
+    },
+    "alias_recheck_pairs": 11,
+    "results": [
+      {
+        "source": "claude-opus-5",
+        "target": "claude-opus-4.8",
+        "passed": true,
+        "context_window": 950000,
+        "request_count": 2,
+        "compacted": false,
+        "full_history": true,
+        "native_claude_thinking_blocks_forwarded": 1,
+        "inference": [
+          {
+            "requested_model": "claude-opus-4.8",
+            "served_model": "claude-opus-4-8"
+          },
+          {
+            "requested_model": "claude-opus-4.8",
+            "served_model": "claude-opus-4-8"
+          }
+        ]
+      },
+      {
+        "source": "claude-opus-5.5",
+        "target": "claude-opus-4.8",
+        "passed": true,
+        "context_window": 950000,
+        "request_count": 2,
+        "compacted": false,
+        "full_history": true,
+        "native_claude_thinking_blocks_forwarded": 3,
+        "inference": [
+          {
+            "requested_model": "claude-opus-4.8",
+            "served_model": "claude-opus-4-8"
+          },
+          {
+            "requested_model": "claude-opus-4.8",
+            "served_model": "claude-opus-4-8"
+          }
+        ]
+      },
+      {
+        "source": "claude-opus-4.8",
+        "target": "claude-opus-4.8",
+        "passed": true,
+        "context_window": 950000,
+        "request_count": 2,
+        "compacted": false,
+        "full_history": true,
+        "native_claude_thinking_blocks_forwarded": 3,
+        "inference": [
+          {
+            "requested_model": "claude-opus-4.8",
+            "served_model": "claude-opus-4-8"
+          },
+          {
+            "requested_model": "claude-opus-4.8",
+            "served_model": "claude-opus-4-8"
+          }
+        ]
+      },
+      {
+        "source": "claude-opus-5.5",
+        "target": "claude-opus-5.5",
+        "passed": true,
+        "context_window": 950000,
+        "request_count": 2,
+        "compacted": false,
+        "full_history": true,
+        "native_claude_thinking_blocks_forwarded": 3,
+        "inference": [
+          {
+            "requested_model": "claude-opus-5.5",
+            "served_model": "claude-opus-5-5"
+          },
+          {
+            "requested_model": "claude-opus-5.5",
+            "served_model": "claude-opus-5-5"
+          }
+        ]
+      },
+      {
+        "source": "claude-opus-5",
+        "target": "claude-opus-5.5",
+        "passed": true,
+        "context_window": 950000,
+        "request_count": 2,
+        "compacted": false,
+        "full_history": true,
+        "native_claude_thinking_blocks_forwarded": 1,
+        "inference": [
+          {
+            "requested_model": "claude-opus-5.5",
+            "served_model": "claude-opus-5-5"
+          },
+          {
+            "requested_model": "claude-opus-5.5",
+            "served_model": "claude-opus-5-5"
+          }
+        ]
+      },
+      {
+        "source": "claude-opus-5",
+        "target": "claude-opus-5",
+        "passed": false,
+        "classification": "provider_refusal",
+        "refusal_category": "reasoning_extraction"
+      },
+      {
+        "source": "claude-opus-4.8",
+        "target": "claude-opus-5.5",
+        "passed": true,
+        "context_window": 950000,
+        "request_count": 2,
+        "compacted": false,
+        "full_history": true,
+        "native_claude_thinking_blocks_forwarded": 3,
+        "inference": [
+          {
+            "requested_model": "claude-opus-5.5",
+            "served_model": "claude-opus-5-5"
+          },
+          {
+            "requested_model": "claude-opus-5.5",
+            "served_model": "claude-opus-5-5"
+          }
+        ]
+      },
+      {
+        "source": "claude-opus-5.5",
+        "target": "claude-opus-5",
+        "passed": true,
+        "context_window": 950000,
+        "request_count": 2,
+        "compacted": false,
+        "full_history": true,
+        "native_claude_thinking_blocks_forwarded": 3,
+        "inference": [
+          {
+            "requested_model": "claude-opus-5",
+            "served_model": "claude-opus-5"
+          },
+          {
+            "requested_model": "claude-opus-5",
+            "served_model": "claude-opus-5"
+          }
+        ]
+      },
+      {
+        "source": "claude-opus-5",
+        "target": "claude-sonnet-5.5",
+        "passed": true,
+        "context_window": 950000,
+        "request_count": 2,
+        "compacted": false,
+        "full_history": true,
+        "native_claude_thinking_blocks_forwarded": 1,
+        "inference": [
+          {
+            "requested_model": "claude-sonnet-5.5",
+            "served_model": "claude-sonnet-5-5"
+          },
+          {
+            "requested_model": "claude-sonnet-5.5",
+            "served_model": "claude-sonnet-5-5"
+          }
+        ]
+      },
+      {
+        "source": "claude-opus-4.8",
+        "target": "claude-opus-5",
+        "passed": true,
+        "context_window": 950000,
+        "request_count": 2,
+        "compacted": false,
+        "full_history": true,
+        "native_claude_thinking_blocks_forwarded": 3,
+        "inference": [
+          {
+            "requested_model": "claude-opus-5",
+            "served_model": "claude-opus-5"
+          },
+          {
+            "requested_model": "claude-opus-5",
+            "served_model": "claude-opus-5"
+          }
+        ]
+      },
+      {
+        "source": "claude-opus-5.5",
+        "target": "claude-sonnet-5.5",
+        "passed": true,
+        "context_window": 950000,
+        "request_count": 2,
+        "compacted": false,
+        "full_history": true,
+        "native_claude_thinking_blocks_forwarded": 3,
+        "inference": [
+          {
+            "requested_model": "claude-sonnet-5.5",
+            "served_model": "claude-sonnet-5-5"
+          },
+          {
+            "requested_model": "claude-sonnet-5.5",
+            "served_model": "claude-sonnet-5-5"
+          }
+        ]
+      },
+      {
+        "source": "claude-opus-5",
+        "target": "claude-sonnet-5",
+        "passed": true,
+        "context_window": 950000,
+        "request_count": 2,
+        "compacted": false,
+        "full_history": true,
+        "native_claude_thinking_blocks_forwarded": 1,
+        "inference": [
+          {
+            "requested_model": "claude-sonnet-5",
+            "served_model": "claude-sonnet-5"
+          },
+          {
+            "requested_model": "claude-sonnet-5",
+            "served_model": "claude-sonnet-5"
+          }
+        ]
+      },
+      {
+        "source": "claude-opus-4.8",
+        "target": "claude-sonnet-5.5",
+        "passed": true,
+        "context_window": 950000,
+        "request_count": 2,
+        "compacted": false,
+        "full_history": true,
+        "native_claude_thinking_blocks_forwarded": 3,
+        "inference": [
+          {
+            "requested_model": "claude-sonnet-5.5",
+            "served_model": "claude-sonnet-5-5"
+          },
+          {
+            "requested_model": "claude-sonnet-5.5",
+            "served_model": "claude-sonnet-5-5"
+          }
+        ]
+      },
+      {
+        "source": "claude-opus-5.5",
+        "target": "claude-sonnet-5",
+        "passed": true,
+        "context_window": 950000,
+        "request_count": 2,
+        "compacted": false,
+        "full_history": true,
+        "native_claude_thinking_blocks_forwarded": 3,
+        "inference": [
+          {
+            "requested_model": "claude-sonnet-5",
+            "served_model": "claude-sonnet-5"
+          },
+          {
+            "requested_model": "claude-sonnet-5",
+            "served_model": "claude-sonnet-5"
+          }
+        ]
+      },
+      {
+        "source": "claude-opus-5",
+        "target": "claude-haiku-4.5",
+        "passed": true,
+        "context_window": 190000,
+        "request_count": 2,
+        "compacted": false,
+        "full_history": true,
+        "native_claude_thinking_blocks_forwarded": 1,
+        "inference": [
+          {
+            "requested_model": "claude-haiku-4.5",
+            "served_model": "claude-haiku-4-5-20251001"
+          },
+          {
+            "requested_model": "claude-haiku-4.5",
+            "served_model": "claude-haiku-4-5-20251001"
+          }
+        ]
+      },
+      {
+        "source": "claude-opus-4.8",
+        "target": "claude-sonnet-5",
+        "passed": true,
+        "context_window": 950000,
+        "request_count": 2,
+        "compacted": false,
+        "full_history": true,
+        "native_claude_thinking_blocks_forwarded": 3,
+        "inference": [
+          {
+            "requested_model": "claude-sonnet-5",
+            "served_model": "claude-sonnet-5"
+          },
+          {
+            "requested_model": "claude-sonnet-5",
+            "served_model": "claude-sonnet-5"
+          }
+        ]
+      },
+      {
+        "source": "claude-opus-5.5",
+        "target": "claude-haiku-4.5",
+        "passed": true,
+        "context_window": 190000,
+        "request_count": 2,
+        "compacted": false,
+        "full_history": true,
+        "native_claude_thinking_blocks_forwarded": 3,
+        "inference": [
+          {
+            "requested_model": "claude-haiku-4.5",
+            "served_model": "claude-haiku-4-5-20251001"
+          },
+          {
+            "requested_model": "claude-haiku-4.5",
+            "served_model": "claude-haiku-4-5-20251001"
+          }
+        ]
+      },
+      {
+        "source": "claude-opus-4.8",
+        "target": "claude-haiku-4.5",
+        "passed": true,
+        "context_window": 190000,
+        "request_count": 2,
+        "compacted": false,
+        "full_history": true,
+        "native_claude_thinking_blocks_forwarded": 2,
+        "inference": [
+          {
+            "requested_model": "claude-haiku-4.5",
+            "served_model": "claude-haiku-4-5-20251001"
+          },
+          {
+            "requested_model": "claude-haiku-4.5",
+            "served_model": "claude-haiku-4-5-20251001"
+          }
+        ]
+      },
+      {
+        "source": "claude-sonnet-5.5",
+        "target": "claude-opus-4.8",
+        "passed": true,
+        "context_window": 950000,
+        "request_count": 2,
+        "compacted": false,
+        "full_history": true,
+        "native_claude_thinking_blocks_forwarded": 2,
+        "inference": [
+          {
+            "requested_model": "claude-opus-4.8",
+            "served_model": "claude-opus-4-8"
+          },
+          {
+            "requested_model": "claude-opus-4.8",
+            "served_model": "claude-opus-4-8"
+          }
+        ]
+      },
+      {
+        "source": "claude-sonnet-5",
+        "target": "claude-opus-4.8",
+        "passed": true,
+        "context_window": 950000,
+        "request_count": 2,
+        "compacted": false,
+        "full_history": true,
+        "native_claude_thinking_blocks_forwarded": 2,
+        "inference": [
+          {
+            "requested_model": "claude-opus-4.8",
+            "served_model": "claude-opus-4-8"
+          },
+          {
+            "requested_model": "claude-opus-4.8",
+            "served_model": "claude-opus-4-8"
+          }
+        ]
+      },
+      {
+        "source": "claude-haiku-4.5",
+        "target": "claude-opus-4.8",
+        "passed": true,
+        "context_window": 950000,
+        "request_count": 2,
+        "compacted": false,
+        "full_history": true,
+        "native_claude_thinking_blocks_forwarded": 1,
+        "inference": [
+          {
+            "requested_model": "claude-opus-4.8",
+            "served_model": "claude-opus-4-8"
+          },
+          {
+            "requested_model": "claude-opus-4.8",
+            "served_model": "claude-opus-4-8"
+          }
+        ]
+      },
+      {
+        "source": "claude-haiku-4.5",
+        "target": "claude-opus-5.5",
+        "passed": true,
+        "context_window": 950000,
+        "request_count": 2,
+        "compacted": false,
+        "full_history": true,
+        "native_claude_thinking_blocks_forwarded": 1,
+        "inference": [
+          {
+            "requested_model": "claude-opus-5.5",
+            "served_model": "claude-opus-5-5"
+          },
+          {
+            "requested_model": "claude-opus-5.5",
+            "served_model": "claude-opus-5-5"
+          }
+        ]
+      },
+      {
+        "source": "claude-haiku-4.5",
+        "target": "claude-opus-5",
+        "passed": false,
+        "classification": "provider_refusal",
+        "refusal_category": "reasoning_extraction"
+      },
+      {
+        "source": "claude-haiku-4.5",
+        "target": "claude-sonnet-5.5",
+        "passed": true,
+        "context_window": 950000,
+        "request_count": 2,
+        "compacted": false,
+        "full_history": true,
+        "native_claude_thinking_blocks_forwarded": 1,
+        "inference": [
+          {
+            "requested_model": "claude-sonnet-5.5",
+            "served_model": "claude-sonnet-5-5"
+          },
+          {
+            "requested_model": "claude-sonnet-5.5",
+            "served_model": "claude-sonnet-5-5"
+          }
+        ]
+      },
+      {
+        "source": "claude-haiku-4.5",
+        "target": "claude-sonnet-5",
+        "passed": true,
+        "context_window": 950000,
+        "request_count": 2,
+        "compacted": false,
+        "full_history": true,
+        "native_claude_thinking_blocks_forwarded": 1,
+        "inference": [
+          {
+            "requested_model": "claude-sonnet-5",
+            "served_model": "claude-sonnet-5"
+          },
+          {
+            "requested_model": "claude-sonnet-5",
+            "served_model": "claude-sonnet-5"
+          }
+        ]
+      },
+      {
+        "source": "claude-haiku-4.5",
+        "target": "claude-haiku-4.5",
+        "passed": true,
+        "context_window": 190000,
+        "request_count": 3,
+        "compacted": false,
+        "full_history": true,
+        "native_claude_thinking_blocks_forwarded": 1,
+        "inference": [
+          {
+            "requested_model": "claude-haiku-4.5",
+            "served_model": "claude-haiku-4-5-20251001"
+          },
+          {
+            "requested_model": "claude-haiku-4.5",
+            "served_model": "claude-haiku-4-5-20251001"
+          },
+          {
+            "requested_model": "claude-haiku-4.5",
+            "served_model": "claude-haiku-4-5-20251001"
+          }
+        ]
+      },
+      {
+        "source": "claude-sonnet-5.5",
+        "target": "claude-opus-5.5",
+        "passed": true,
+        "context_window": 950000,
+        "request_count": 2,
+        "compacted": false,
+        "full_history": true,
+        "native_claude_thinking_blocks_forwarded": 2,
+        "inference": [
+          {
+            "requested_model": "claude-opus-5.5",
+            "served_model": "claude-opus-5-5"
+          },
+          {
+            "requested_model": "claude-opus-5.5",
+            "served_model": "claude-opus-5-5"
+          }
+        ]
+      },
+      {
+        "source": "claude-sonnet-5",
+        "target": "claude-opus-5.5",
+        "passed": true,
+        "context_window": 950000,
+        "request_count": 2,
+        "compacted": false,
+        "full_history": true,
+        "native_claude_thinking_blocks_forwarded": 2,
+        "inference": [
+          {
+            "requested_model": "claude-opus-5.5",
+            "served_model": "claude-opus-5-5"
+          },
+          {
+            "requested_model": "claude-opus-5.5",
+            "served_model": "claude-opus-5-5"
+          }
+        ]
+      },
+      {
+        "source": "claude-sonnet-5.5",
+        "target": "claude-opus-5",
+        "passed": false,
+        "classification": "provider_refusal",
+        "refusal_category": "reasoning_extraction"
+      },
+      {
+        "source": "claude-sonnet-5.5",
+        "target": "claude-sonnet-5.5",
+        "passed": true,
+        "context_window": 950000,
+        "request_count": 2,
+        "compacted": false,
+        "full_history": true,
+        "native_claude_thinking_blocks_forwarded": 2,
+        "inference": [
+          {
+            "requested_model": "claude-sonnet-5.5",
+            "served_model": "claude-sonnet-5-5"
+          },
+          {
+            "requested_model": "claude-sonnet-5.5",
+            "served_model": "claude-sonnet-5-5"
+          }
+        ]
+      },
+      {
+        "source": "claude-sonnet-5",
+        "target": "claude-opus-5",
+        "passed": true,
+        "context_window": 950000,
+        "request_count": 2,
+        "compacted": false,
+        "full_history": true,
+        "native_claude_thinking_blocks_forwarded": 2,
+        "inference": [
+          {
+            "requested_model": "claude-opus-5",
+            "served_model": "claude-opus-5"
+          },
+          {
+            "requested_model": "claude-opus-5",
+            "served_model": "claude-opus-5"
+          }
+        ]
+      },
+      {
+        "source": "claude-sonnet-5.5",
+        "target": "claude-sonnet-5",
+        "passed": true,
+        "context_window": 950000,
+        "request_count": 2,
+        "compacted": false,
+        "full_history": true,
+        "native_claude_thinking_blocks_forwarded": 2,
+        "inference": [
+          {
+            "requested_model": "claude-sonnet-5",
+            "served_model": "claude-sonnet-5"
+          },
+          {
+            "requested_model": "claude-sonnet-5",
+            "served_model": "claude-sonnet-5"
+          }
+        ]
+      },
+      {
+        "source": "claude-sonnet-5",
+        "target": "claude-sonnet-5.5",
+        "passed": true,
+        "context_window": 950000,
+        "request_count": 2,
+        "compacted": false,
+        "full_history": true,
+        "native_claude_thinking_blocks_forwarded": 2,
+        "inference": [
+          {
+            "requested_model": "claude-sonnet-5.5",
+            "served_model": "claude-sonnet-5-5"
+          },
+          {
+            "requested_model": "claude-sonnet-5.5",
+            "served_model": "claude-sonnet-5-5"
+          }
+        ]
+      },
+      {
+        "source": "claude-sonnet-5",
+        "target": "claude-sonnet-5",
+        "passed": true,
+        "context_window": 950000,
+        "request_count": 2,
+        "compacted": false,
+        "full_history": true,
+        "native_claude_thinking_blocks_forwarded": 2,
+        "inference": [
+          {
+            "requested_model": "claude-sonnet-5",
+            "served_model": "claude-sonnet-5"
+          },
+          {
+            "requested_model": "claude-sonnet-5",
+            "served_model": "claude-sonnet-5"
+          }
+        ]
+      },
+      {
+        "source": "claude-sonnet-5.5",
+        "target": "claude-haiku-4.5",
+        "passed": true,
+        "context_window": 190000,
+        "request_count": 2,
+        "compacted": false,
+        "full_history": true,
+        "native_claude_thinking_blocks_forwarded": 2,
+        "inference": [
+          {
+            "requested_model": "claude-haiku-4.5",
+            "served_model": "claude-haiku-4-5-20251001"
+          },
+          {
+            "requested_model": "claude-haiku-4.5",
+            "served_model": "claude-haiku-4-5-20251001"
+          }
+        ]
+      },
+      {
+        "source": "claude-sonnet-5",
+        "target": "claude-haiku-4.5",
+        "passed": true,
+        "context_window": 190000,
+        "request_count": 2,
+        "compacted": false,
+        "full_history": true,
+        "native_claude_thinking_blocks_forwarded": 2,
+        "inference": [
+          {
+            "requested_model": "claude-haiku-4.5",
+            "served_model": "claude-haiku-4-5-20251001"
+          },
+          {
+            "requested_model": "claude-haiku-4.5",
+            "served_model": "claude-haiku-4-5-20251001"
+          }
+        ]
+      }
+    ]
+  },
+  "synthetic_near_limit_native_matrix": {
+    "expected_pairs": 256,
+    "passed_pairs": 256,
+    "failed_pairs": 0,
+    "source_affinity_compactions": 104,
+    "real_native_tools_and_files": true,
+    "model_inference": "synthetic",
+    "physical_capacity_test": false,
+    "coverage": "Every ordered pair of the 16 currently enabled concrete seat models."
+  },
+  "fresh_process_resume": [
+    {
+      "model": "gpt-5.6-sol",
+      "passed": true,
+      "stages": [
+        {
+          "stage": "restart-resume",
+          "model": "gpt-5.6-sol",
+          "passed": true
+        },
+        {
+          "stage": "switch-away",
+          "model": "claude-opus-5.5",
+          "passed": true
+        },
+        {
+          "stage": "switch-back",
+          "model": "gpt-5.6-sol",
+          "passed": true
+        }
+      ],
+      "elapsed_ms": 27296
+    },
+    {
+      "model": "gpt-6.1-sol",
+      "passed": true,
+      "stages": [
+        {
+          "stage": "restart-resume",
+          "model": "gpt-6.1-sol",
+          "passed": true
+        },
+        {
+          "stage": "switch-away",
+          "model": "claude-opus-5.5",
+          "passed": true
+        },
+        {
+          "stage": "switch-back",
+          "model": "gpt-6.1-sol",
+          "passed": true
+        }
+      ],
+      "elapsed_ms": 28919
+    },
+    {
+      "model": "claude-opus-5.5",
+      "passed": true,
+      "stages": [
+        {
+          "stage": "restart-resume",
+          "model": "claude-opus-5.5",
+          "passed": true
+        },
+        {
+          "stage": "switch-away",
+          "model": "gpt-6.1-sol",
+          "passed": true
+        },
+        {
+          "stage": "switch-back",
+          "model": "claude-opus-5.5",
+          "passed": true
+        }
+      ],
+      "elapsed_ms": 37323
+    }
+  ],
+  "official_runtime_reference_control": {
+    "requested_model": "claude-opus-5",
+    "task_passed": true,
+    "requested_model_satisfied": false,
+    "stages": [
+      {
+        "stage": 0,
+        "history": true,
+        "proof": true,
+        "patch": true,
+        "shell": true,
+        "tools": ["bash", "view", "edit"]
+      },
+      {
+        "stage": 1,
+        "history": true,
+        "proof": true,
+        "patch": true,
+        "shell": true,
+        "tools": ["bash"]
+      }
+    ],
+    "inference": [
+      {
+        "stage": 0,
+        "requested_model": "claude-opus-5",
+        "served_model": "claude-opus-5",
+        "stop_reason": "refusal",
+        "refusal_category": "reasoning_extraction",
+        "fallback_credit_present": false
+      },
+      {
+        "stage": 0,
+        "requested_model": "claude-opus-4.8",
+        "served_model": "claude-opus-4-8",
+        "stop_reason": "tool_use",
+        "refusal_category": null,
+        "fallback_credit_present": false
+      },
+      {
+        "stage": 0,
+        "requested_model": "claude-opus-4.8",
+        "served_model": "claude-opus-4-8",
+        "stop_reason": "tool_use",
+        "refusal_category": null,
+        "fallback_credit_present": false
+      },
+      {
+        "stage": 0,
+        "requested_model": "claude-opus-4.8",
+        "served_model": "claude-opus-4-8",
+        "stop_reason": "end_turn",
+        "refusal_category": null,
+        "fallback_credit_present": false
+      },
+      {
+        "stage": 1,
+        "requested_model": "claude-opus-4.8",
+        "served_model": "claude-opus-4-8",
+        "stop_reason": "tool_use",
+        "refusal_category": null,
+        "fallback_credit_present": false
+      },
+      {
+        "stage": 1,
+        "requested_model": "claude-opus-4.8",
+        "served_model": "claude-opus-4-8",
+        "stop_reason": "end_turn",
+        "refusal_category": null,
+        "fallback_credit_present": false
+      }
+    ],
+    "model_changes": [
+      {
+        "from": "claude-opus-5",
+        "to": "claude-opus-4.8",
+        "cause": "refusal_fallback"
+      }
+    ]
+  },
+  "correction_to_earlier_cli_comparison": "Task completion alone did not verify the requested model. Wire capture and the official session.model_change event prove that the runtime also encounters reasoning_extraction and completes the task after refusal_fallback to Opus 4.8. This is not evidence of a bridge-only rejection.",
+  "additional_gpt_controls": [
+    {
+      "source": "gpt-5.6-sol",
+      "target": "gpt-5.6-luna",
+      "seed_and_continuation_passed": true,
+      "source_ciphertext_items_replayed": 2,
+      "effective_reasoning_context": "all_turns",
+      "effort": "max"
+    },
+    {
+      "source": "gpt-6.1-sol",
+      "target": "gpt-6-sol",
+      "seed_and_continuation_passed": true,
+      "source_ciphertext_items_replayed": 1,
+      "effective_reasoning_context": "all_turns",
+      "effort": "max"
+    }
+  ],
+  "stream_cancellation_regression": {
+    "test": "responses-events.test.mjs: cancelling nested SSE mappings releases a still-open upstream reader",
+    "before": {
+      "upstream_readers_released": 0,
+      "attempts": 50
+    },
+    "after": {
+      "upstream_readers_released": 50,
+      "attempts": 50
+    },
+    "live_failure_observed_before_fix": {
+      "code": "ERR_INVALID_STATE",
+      "message": "Controller is already closed"
+    },
+    "scope": "Fixes the reproduced reader cleanup defect; does not establish a cause for every historical remote disconnect."
+  },
+  "temporary_sdk_cleanup": {
+    "real_native_and_runtime_protocols_tested": [
+      "GPT Responses",
+      "Claude Messages"
+    ],
+    "real_accounting_and_idle_verified": true,
+    "temporary_session_directory_exists_before_delete_and_is_absent_after_delete": true,
+    "native_sessions_and_project_files_deleted": false
+  },
+  "disk_recovery": {
+    "root_available_before_bytes": 0,
+    "generated_validation_artifacts_archived_to_data_volume": "about 11 GiB",
+    "original_artifact_paths_preserved_as_symlinks": true,
+    "existing_user_sessions_stopped_or_moved": false,
+    "interrupted_checks": "One GPT submatrix and one synthetic matrix encountered the full filesystem. Their partial runs are retained privately and excluded from passing counts; both complete matrices above were rerun successfully on the data volume."
+  },
+  "regular_checks": {
+    "node_passed": 88,
+    "node_failed": 0,
+    "opt_in_skipped": 11,
+    "native_recovery_size_and_runtime_passed": 12,
+    "native_recovery_size_and_runtime_failed": 0
+  },
+  "unchanged_defaults": {
+    "model": "gpt-6.1-sol",
+    "reasoning": "max or the destination strongest supported value",
+    "context": "full advertised per-model window",
+    "request_byte_ceiling": 33554432,
+    "host_shell_and_environment": "full user access"
+  },
+  "limits_and_unresolved": [
+    "The three remaining Claude submatrix failures target Opus 5 and are terminal reasoning_extraction refusals; no refusal retry or hidden model substitution was used.",
+    "Opaque reasoning is not universally readable across providers or incompatible model families. Replaying a block proves protocol acceptance, not that an incompatible model read it.",
+    "These current live submatrices cover every GPT-to-GPT and Claude-to-Claude pair. Current all-provider coverage is synthetic; the earlier full live matrix remains a separate historical result.",
+    "Physical maximum-window capacity was not rerun. Prior large-request overload and EOF observations remain unresolved remote behavior.",
+    "All-model seamless operation is not guaranteed while a selected provider refuses a conversation."
+  ],
+  "references": [
+    "https://developers.openai.com/api/docs/guides/reasoning",
+    "https://platform.claude.com/docs/en/build-with-claude/preserved-thinking",
+    "https://platform.claude.com/docs/en/build-with-claude/refusals-and-fallback",
+    "https://platform.claude.com/docs/en/models/haiku-4-5/overview"
+  ],
+  "official_runtime_reference_opus55": {
+    "requested_model": "claude-opus-5.5",
+    "task_passed": true,
+    "requested_model_satisfied": true,
+    "stages": [
+      {
+        "stage": 0,
+        "history": true,
+        "proof": true,
+        "patch": true,
+        "shell": true,
+        "tools": ["bash", "view", "edit", "bash"]
+      },
+      {
+        "stage": 1,
+        "history": true,
+        "proof": true,
+        "patch": true,
+        "shell": true,
+        "tools": ["bash"]
+      }
+    ],
+    "inference": [
+      {
+        "stage": 0,
+        "requested_model": "claude-opus-5.5",
+        "served_model": "claude-opus-5-5",
+        "stop_reason": "tool_use",
+        "refusal_category": null,
+        "fallback_credit_present": false
+      },
+      {
+        "stage": 0,
+        "requested_model": "claude-opus-5.5",
+        "served_model": "claude-opus-5-5",
+        "stop_reason": "tool_use",
+        "refusal_category": null,
+        "fallback_credit_present": false
+      },
+      {
+        "stage": 0,
+        "requested_model": "claude-opus-5.5",
+        "served_model": "claude-opus-5-5",
+        "stop_reason": "tool_use",
+        "refusal_category": null,
+        "fallback_credit_present": false
+      },
+      {
+        "stage": 0,
+        "requested_model": "claude-opus-5.5",
+        "served_model": "claude-opus-5-5",
+        "stop_reason": "end_turn",
+        "refusal_category": null,
+        "fallback_credit_present": false
+      },
+      {
+        "stage": 1,
+        "requested_model": "claude-opus-5.5",
+        "served_model": "claude-opus-5-5",
+        "stop_reason": "tool_use",
+        "refusal_category": null,
+        "fallback_credit_present": false
+      },
+      {
+        "stage": 1,
+        "requested_model": "claude-opus-5.5",
+        "served_model": "claude-opus-5-5",
+        "stop_reason": "end_turn",
+        "refusal_category": null,
+        "fallback_credit_present": false
+      }
+    ],
+    "model_changes": []
+  }
+}

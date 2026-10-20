@@ -322,7 +322,7 @@ export async function createSdkTransport({
             return [];
           }
           // Old raw GPT ciphertext has no durable owner. Preserve it on disk,
-          // but never guess a provider/model after a bridge restart. New state
+          // but never guess its provider after a bridge restart. New state
           // carries ownership and is restored byte-for-byte above.
           if (
             item.encrypted_content &&
@@ -370,7 +370,8 @@ export async function createSdkTransport({
         streaming: true,
         availableTools: [],
         onPermissionRequest: async () => ({
-          kind: "denied-no-approval-rule-and-could-not-request-from-user",
+          kind: "reject",
+          feedback: "Only the native Codex harness may execute tools.",
         }),
         capi: { enableWebSocketResponses: false },
         infiniteSessions: { enabled: false },
@@ -456,7 +457,17 @@ export async function createSdkTransport({
           unsubscribe();
           job.controller.abort();
           pending.delete(session.sessionId);
-          await session.disconnect().catch(() => {});
+          try {
+            // These sessions contain only the internal forwarding prompt and
+            // accounting acknowledgement. disconnect() keeps their files and
+            // can accumulate a directory for every native sampling request.
+            // Delete only this newly created transport session, after idle or
+            // cancellation; native Codex history has separate IDs and storage.
+            await client.deleteSession(session.sessionId);
+          } catch {
+            diagnose({ code: "SDK_SESSION_CLEANUP_FAILED", model: job.model });
+            await session.disconnect().catch(() => {});
+          }
           tasks.delete(task);
         });
       tasks.add(task);

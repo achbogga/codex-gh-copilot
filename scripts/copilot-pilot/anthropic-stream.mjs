@@ -1,4 +1,3 @@
-import { Readable } from "node:stream";
 import { thinkingPrefix } from "./anthropic-request.mjs";
 import { plaintextAgentCall } from "./agent-messages.mjs";
 
@@ -300,7 +299,7 @@ export function messagesResponse(response, request, { onDiagnostic } = {}) {
     }
   }
   return {
-    response: new Response(Readable.toWeb(Readable.from(stream())), {
+    response: new Response(ReadableStream.from(stream()), {
       headers: { "content-type": "text/event-stream" },
     }),
     completion: finished.promise,
