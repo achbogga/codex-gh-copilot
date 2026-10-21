@@ -77,6 +77,18 @@ Requests have a separate 32 MiB byte ceiling, matching the [Copilot Responses li
 
 Restart existing `cxf` and `cxo` processes after upgrading to load the updated adapter and binary. Existing sessions can then be resumed normally.
 
+Native `exec -c ...` configuration is normalized into the root CLI scope. A verified installed-binary failure discarded the injected provider, reasoning and context settings when an exec-local override was present, then attempted unauthenticated OpenAI requests. The launcher now preserves override order in one scope; an installed-native regression verifies that inference still goes to the local Copilot bridge. Literal `--` prompt arguments are preserved.
+
+### Host storage and goal checks
+
+The October 21 Lance migration incident included a full root filesystem (`ENOSPC`), an old bridge retrying generic HTTP 502s and failed native goal-state writes. Freeing storage and native `/compact` restored the existing goal, which continued running migration tests in the same Screen. This verifies recovery of that incident, not every possible cause of HTTP 502.
+
+The host's daily developer-cache cron job had run successfully, but its dangling-only Docker prune retained unused digest-only imports. Eight untagged imports referenced by no containers were removed without force. Separately, content-addressed OCI exports in an inactive September Copilot session contained verified duplicates: SHA-256 checks and atomic hardlink replacement recovered 60.16 GiB while preserving every path and the session history. User project files, containers and tagged images were preserved.
+
+The opt-in host tools in `scripts/maintenance/` are installed for this host. `dev_cache_cleanup.py` retains the existing guarded cache cleanup and also removes unused digest-only image references older than 24 hours. Its pressure mode runs every 15 minutes below 80 GiB available, uses a separate lock from the daily sweep, and reports failure if space remains low. The daily sweep remains at 03:47 UTC. The older system crontab lacks a final newline; the active user crontab is the maintained schedule.
+
+`lance-goal-watch` checks thread `01a11322-1821-7dc1-ba00-cb229d83753d` and its bound goal every three hours, at 00:00, 03:00, 06:00, 09:00, 12:00, 15:00, 18:00 and 21:00 UTC. It reads native state and captures the visible Screen, then runs one bounded Copilot audit in a separate state directory. It never opens a concurrent writer to the watched thread. Human pauses, completion, replaced goals and budget limits stop automatic auditing. Overlapping checks are locked out; failed checks cannot leave a stale healthy report. Reports live in `~/.local/state/lance-goal-watch/last-audit.txt` and `latest.json`. The live audit was validated with cron's minimal environment through the Copilot provider.
+
 ### Opus 5.5 option
 
 ```bash

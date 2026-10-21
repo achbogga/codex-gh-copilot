@@ -45,6 +45,7 @@ export function codexInvocation({
   args,
   environment = process.env,
 }) {
+  const native = nativeArguments(args);
   const env = { ...environment };
   for (const key of [
     "COPILOT_PILOT_TOKEN",
@@ -78,14 +79,41 @@ export function codexInvocation({
       'web_search="disabled"',
       "--sandbox",
       "workspace-write",
+      ...native.config,
       ...(args.some((arg) =>
         ["--yolo", "--dangerously-bypass-approvals-and-sandbox"].includes(arg),
       )
         ? []
         : ["--ask-for-approval", "on-request"]),
-      ...args,
+      ...native.forwarded,
     ],
   };
+}
+
+// Some installed Codex versions replace root config overrides when `exec -c`
+// supplies a nested override. That silently loses the local Copilot provider,
+// reasoning, context catalog and retry settings. Keep overrides in one root
+// scope, in their original order. A literal `--` still protects prompt content.
+export function nativeArguments(args) {
+  const config = [],
+    forwarded = [];
+  for (let index = 0; index < args.length; index++) {
+    const argument = args[index];
+    if (argument === "--") {
+      forwarded.push(...args.slice(index));
+      break;
+    }
+    if (argument === "-c" || argument === "--config") {
+      if (index + 1 === args.length)
+        throw new Error("Native -c/--config requires a value.");
+      config.push("-c", args[++index]);
+    } else if (argument.startsWith("--config=")) {
+      config.push("-c", argument.slice("--config=".length));
+    } else if (argument.startsWith("-c") && argument.length > 2) {
+      config.push("-c", argument.slice(2));
+    } else forwarded.push(argument);
+  }
+  return { config, forwarded };
 }
 
 async function main() {

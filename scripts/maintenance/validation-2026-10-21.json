@@ -1,0 +1,91 @@
+{
+  "recorded_at": "2026-10-21T00:57:42.084581+00:00",
+  "base_commit": "50494ed9235d6cbb4ae99ac485fea9f6134fa0e1",
+  "incident": {
+    "screen": "1217732.lance_migration",
+    "thread_id": "01a11322-1821-7dc1-ba00-cb229d83753d",
+    "goal_id": "b82b54ba-4c6a-45ca-9737-e1507eaa4fe8",
+    "legacy_bridge_port": 46027,
+    "legacy_bridge_started_utc": "2026-10-17T20:44:36Z",
+    "root_available_before_bytes": 0,
+    "local_ENOSPC_directly_reproduced": true,
+    "native_goal_state_write_failure_observed": true,
+    "original_legacy_exception": "Not retained by the old handler; this report does not attribute every historical 502 to disk space.",
+    "recovery": "Interrupt only the failing turn, free space, submit native /compact, verify that the existing goal continues in the same Screen.",
+    "user_screen_restarted": false,
+    "user_project_or_native_history_deleted": false
+  },
+  "storage_recovery": {
+    "OCI_duplicate_layers_reclaimed_gib": 60.16,
+    "OCI_duplicate_paths_preserved": 31,
+    "OCI_verification": "Inactive session, no active process references, content-addressed blobs older than 30 days, SHA-256 verified, identical mode/owner/device, atomic hardlink replacement.",
+    "unused_untagged_Docker_imports_removed": 8,
+    "Docker_removal": "Remove digest references without --force after checking tags and container references; preserve all containers and tagged images.",
+    "root_available_after_gib": 161.85,
+    "private_evidence": "/mnt/av-data/cache/lance-screen-recovery-fisg3kff"
+  },
+  "cleanup_findings": {
+    "daily_user_cron_had_run": "2026-10-20 03:47 UTC, successful, reported 111.8 GiB available at completion.",
+    "gaps": [
+      "Dangling-only Docker prune missed unused digest-only imports.",
+      "Copilot-generated OCI build exports were outside its cache scope.",
+      "Once-daily cleanup did not react to rapid root usage growth."
+    ],
+    "legacy_system_cron": "Missing final newline; the maintained schedule is the working user crontab.",
+    "new_pressure_schedule": "*/15 * * * *",
+    "root_pressure_threshold_gib": 80,
+    "pressure_execution_observed_in_cron_journal": "2026-10-21 00:45:01 UTC",
+    "safe_cleanup_cannot_restore_headroom": "Returns failure and logs the low-space condition rather than claiming success.",
+    "daily_schedule_preserved": "47 3 * * *"
+  },
+  "launcher_fix": {
+    "reproduction": "The first cron-environment audit with exec-local -c lost injected provider/configuration and attempted unauthenticated OpenAI requests.",
+    "change": "Hoist native -c/--config overrides into the root CLI scope, preserve order, and honor literal -- arguments.",
+    "installed_native_regression": "Real native exec with an exec-local override reached the synthetic local Copilot bridge and returned its expected marker."
+  },
+  "watch": {
+    "schedule_UTC": "0 */3 * * *",
+    "next_run_UTC": "2026-10-21T03:00:00Z",
+    "bound_to_exact_thread_and_goal": true,
+    "separate_audit_state": true,
+    "timeout_seconds": 1200,
+    "overlap_lock": true,
+    "pauses_completion_replacement_and_budget_limits_respected": true,
+    "latest_report": "/home/aboggaram/.local/state/lance-goal-watch/last-audit.txt",
+    "first_live_audit": {
+      "environment": "Minimal cron-like environment, not the interactive shell.",
+      "provider": "copilot-pilot",
+      "requested_model": "gpt-6.1-sol",
+      "exit_code": 0,
+      "finished_at": "2026-10-21T00:49:37.864798+00:00",
+      "visible_gateway_errors": 0,
+      "goal_status_after": "active"
+    },
+    "goal_status_at_recording": "active"
+  },
+  "checks": {
+    "regular_Node": {
+      "passed": 101,
+      "opt_in_skipped": 16,
+      "failed": 0
+    },
+    "native_runtime_enabled_run": {
+      "passed": 35,
+      "failed": 0,
+      "common_regular_cases": 16,
+      "additional_opt_in_checks": 19,
+      "synthetic_active_stream_ms": 5000
+    },
+    "Python_maintenance": {
+      "passed": 8,
+      "failed": 0
+    },
+    "cleanup_dry_run": "Passed against installed caches and local Docker daemon.",
+    "watch_timeout": "Verified that expiration terminates only its own isolated audit group while an unrelated process stays alive."
+  },
+  "limits": [
+    "No universal fix for all remote transport, policy or model-refusal errors is claimed.",
+    "No exhaustive all-model or physical maximum-context matrix was rerun for this host-recovery change.",
+    "The healthy existing Lance process is left running; it still has the older adapter loaded. Future launches and the scheduled audit use the current launcher."
+  ]
+}

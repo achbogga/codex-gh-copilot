@@ -11,7 +11,8 @@ import { Readable } from "node:stream";
 import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
 import { listModels, startBridge } from "./bridge.mjs";
-import { codexInvocation, tokenSource } from "./run.mjs";
+import { codexInvocation, nativeArguments, tokenSource } from "./run.mjs";
+import { catalogArguments } from "./model-config.mjs";
 
 const localToken = "local-test-secret";
 const localHeaders = {
@@ -453,6 +454,89 @@ test("YOLO overrides the launcher's default approval flag", () => {
   }
 });
 
+test("native exec config overrides share the provider scope and preserve literal prompt arguments", () => {
+  const result = nativeArguments([
+    "-c",
+    "first=1",
+    "exec",
+    "--config=second=2",
+    "-cthird=3",
+    "--",
+    "-c",
+    "literal prompt",
+  ]);
+  assert.deepEqual(result, {
+    config: ["-c", "first=1", "-c", "second=2", "-c", "third=3"],
+    forwarded: ["exec", "--", "-c", "literal prompt"],
+  });
+  assert.throws(() => nativeArguments(["exec", "-c"]), /requires a value/);
+});
+
+test(
+  "real native exec retains the Copilot provider when an exec-local config override is forwarded",
+  {
+    skip: !process.env.COPILOT_PILOT_CODEX_BIN,
+    timeout: 30000,
+  },
+  async (t) => {
+    const root = await mkdtemp(join(tmpdir(), "copilot-config-scope-"));
+    await mkdir(join(root, "state"));
+    const requests = [];
+    const bridge = await fixture(t, async (req, res) => {
+      let body = "";
+      for await (const chunk of req) body += chunk;
+      requests.push(JSON.parse(body));
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.end(
+        sse([
+          {
+            type: "response.output_item.done",
+            item: {
+              type: "message",
+              id: "scope",
+              role: "assistant",
+              content: [{ type: "output_text", text: "COPILOT_SCOPE_OK" }],
+            },
+          },
+          completed,
+        ]),
+      );
+    });
+    t.after(() => rm(root, { recursive: true, force: true, maxRetries: 5 }));
+    const invocation = codexInvocation({
+      model,
+      url: bridge.url,
+      localToken,
+      stateDir: join(root, "state"),
+      args: [
+        "--yolo",
+        "exec",
+        "--skip-git-repo-check",
+        "-c",
+        "features.multi_agent=false",
+        "Check config scope.",
+      ],
+    });
+    const pending = promisify(execFile)(
+      process.env.COPILOT_PILOT_CODEX_BIN,
+      invocation.args,
+      {
+        cwd: root,
+        env: invocation.env,
+        timeout: 20000,
+        maxBuffer: 1024 * 1024,
+      },
+    );
+    pending.child.stdin.end();
+    const result = await pending;
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0].model, model);
+    assert.match(result.stdout, /COPILOT_SCOPE_OK/);
+    assert.match(result.stderr, /provider: copilot-pilot/);
+    assert.doesNotMatch(result.stderr, /provider: openai|api\.openai\.com/);
+  },
+);
+
 test(
   "real Codex exchanges custom/function tools and resumes",
   { skip: !process.env.COPILOT_PILOT_CODEX_BIN, timeout: 60000 },
@@ -461,19 +545,69 @@ test(
     t.after(() => rm(directory, { recursive: true, force: true }));
     await writeFile(join(directory, "value.txt"), "before");
     await mkdir(join(directory, "state"));
+    // This synthetic model is no longer bundled by current Codex. Give it the
+    // same explicit tool/context metadata as the production host launcher.
+    const definition = {
+      id: model,
+      capabilities: {
+        supports: { reasoning_effort: ["max"] },
+        limits: {
+          max_context_window_tokens: 1050000,
+          max_prompt_tokens: 922000,
+          max_output_tokens: 128000,
+        },
+      },
+    };
+    const metadata = await catalogArguments(
+      [definition],
+      definition,
+      "max",
+      join(directory, "models.json"),
+    );
     const captured = [];
     const bridge = await fixture(t, async (req, res) => {
       const chunks = [];
       for await (const chunk of req) chunks.push(chunk);
       captured.push(JSON.parse(Buffer.concat(chunks)));
+      const declarations = [
+        ...(captured[0].tools ?? []),
+        ...(captured[0].input ?? []).flatMap((item) =>
+          item.type === "additional_tools" ? item.tools : [],
+        ),
+      ];
+      const tools = declarations.flatMap((tool) =>
+        tool.type === "namespace"
+          ? tool.tools.map((child) => ({ ...child, namespace: tool.name }))
+          : [tool],
+      );
+      const executor = tools.find(
+        (tool) => tool.name === "exec" || tool.name === "functions__exec",
+      );
+      assert.ok(
+        executor,
+        "The current native harness must advertise Code Mode: " +
+          JSON.stringify(
+            tools.map((tool) => ({
+              type: tool.type,
+              name: tool.name,
+              namespace: tool.namespace,
+            })),
+          ),
+      );
+      const patchCode = `text(await tools.apply_patch(${JSON.stringify("*** Begin Patch\n*** Update File: value.txt\n@@\n-before\n+after\n*** End Patch")}));`;
       const item =
         captured.length === 1
           ? {
-              type: "custom_tool_call",
+              type:
+                executor.type === "custom"
+                  ? "custom_tool_call"
+                  : "function_call",
               call_id: "pilot-patch",
-              name: "apply_patch",
-              input:
-                "*** Begin Patch\n*** Update File: value.txt\n@@\n-before\n+after\n*** End Patch",
+              name: executor.name,
+              namespace: executor.namespace,
+              ...(executor.type === "custom"
+                ? { input: patchCode }
+                : { arguments: JSON.stringify({ input: patchCode }) }),
             }
           : captured.length === 2
             ? {
@@ -515,7 +649,7 @@ test(
         url: bridge.url,
         localToken,
         stateDir: join(directory, "state"),
-        args,
+        args: [...metadata, ...args],
       });
       const pending = promisify(execFile)(
         process.env.COPILOT_PILOT_CODEX_BIN,
@@ -563,6 +697,14 @@ test(
         assert.equal(
           (await readFile(join(directory, "value.txt"), "utf8")).trim(),
           "after",
+          JSON.stringify({
+            patch: captured[1].input.find(
+              (item) =>
+                item.call_id === "pilot-patch" &&
+                item.type === "custom_tool_call_output",
+            )?.output,
+            shell: output.output,
+          }),
         );
         assert.match(output.output, /pilot-test-passed/);
       },
