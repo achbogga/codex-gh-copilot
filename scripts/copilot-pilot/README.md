@@ -4,7 +4,7 @@ This fork's experimental adapter runs **real Codex**, including Code Mode, its n
 
 ## Run on Linux
 
-Requires Node.js 22+ (tested with 22.23.3), an authenticated `copilot` CLI (tested with 1.0.100), and the installed Codex executable bundle (tested with 0.163.0). Docker is needed only for the optional container launcher.
+Requires Node.js 22+ (tested with 22.23.4), an authenticated `copilot` CLI (tested with 1.0.102), and the installed Codex executable bundle (tested with 0.163.0). Docker is needed only for the optional container launcher.
 
 ```bash
 npm ci --prefix scripts/copilot-pilot --ignore-scripts
@@ -180,7 +180,7 @@ In Docker mode, GitHub credentials remain outside the container. A private Unix 
 - ChatGPT-hosted features are not conferred by a Copilot seat. Copilot-specific governance controls are not automatically equivalent to Codex's controls; enterprise approval of this custom client and its data handling remains an organizational question.
 - Access denials and unsupported models fail closed. The adapter forwards each request once; Codex owns the bounded stream recovery described above. Upstream HTTP error bodies are suppressed, inference requests are bounded to 32 MiB, and a disconnected caller cancels inference. Size failures enter Codex's context-limit handling. TLS verification stays enabled.
 
-The SDK transport hook is experimental and pinned to SDK 1.0.22. Its internal completion acknowledgement preserves the real usage/accounting while preventing the runtime from executing Codex tool calls. Native GPT Responses output retains its content and accounting, with portable collaboration metadata and durable ownership around opaque reasoning; Grok and MAI tool events are translated to Codex custom-tool events. Generic protocol errors can be classified into Responses failure events.
+The SDK transport hook is experimental and pinned to SDK 1.0.25. Its internal completion acknowledgement preserves the real usage/accounting while preventing the runtime from executing Codex tool calls. Native GPT Responses output retains its content and accounting, with portable collaboration metadata and durable ownership around opaque reasoning; Grok and MAI tool events are translated to Codex custom-tool events. Generic protocol errors can be classified into Responses failure events.
 
 ## Installation and upstream checks on the configured machine
 
@@ -202,6 +202,8 @@ Release reminders appear when launching `codex-copilot`, `cx`, or `cxf` in a ter
 Stop scheduled checks with `systemctl --user disable --now codex-copilot-updates.timer`. To adopt upstream source, first review `git log HEAD..upstream/main`; fetching alone does not update the installed Codex binary.
 
 ## Validation
+
+The October 22 update merged 82 upstream commits through `342ed69a174c`, upgraded Copilot CLI to 1.0.102, SDK to 1.0.25 and host Node to 22.23.4. Codex 0.163.0 remained the latest stable binary. The installed host and Docker launchers use the new Node version; existing sessions continue with their already-loaded runtimes. The [update validation report](validation-2026-10-22-updates.json) records the verified artifact checksums and compatibility results. All 123 unit/native checks and 15 updater/maintenance Python checks passed, including HTTP 400/413 context recovery and compaction. Both 660-second synthetic full-bridge stream checks passed on the installed native Codex, official Copilot runtime and new SDK, each with one inference request, one runtime request, accepted accounting and no reconnects. All 256 synthetic transitions across the 16-model seat passed, including source-model compaction with simulated near-limit usage. Four live GPT-6.1 Sol/Opus 5.5 transitions verified the served model, native tools, saved history and patched files. Both generated sessions also passed all six fresh-process resume/switch stages. These results do not measure physical maximum-context capacity or resolve the previously recorded Opus 5 provider refusals.
 
 The October 20 switching checks ran on Codex 0.163.0, Copilot CLI 1.0.100 and SDK 1.0.22. The [machine-readable report](validation-2026-10-20.json) contains all transition results, model limits and unresolved provider failures.
 
