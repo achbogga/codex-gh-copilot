@@ -4,7 +4,11 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { usesMessages } from "./anthropic-request.mjs";
 import { encryptedAgentError } from "./agent-messages.mjs";
-import { requestError, requestFailure } from "./request-errors.mjs";
+import {
+  httpFailure,
+  requestError,
+  requestFailure,
+} from "./request-errors.mjs";
 
 const upstream = "https://api.githubcopilot.com";
 // Copilot CLI 1.0.74 raised the CAPI Responses request ceiling to 32 MiB.
@@ -205,11 +209,14 @@ export async function startBridge({
       });
       activity();
       if (!result.ok) {
+        const rejection = await httpFailure(result);
         diagnose({
           code: "COPILOT_HTTP_ERROR",
           stage: "bridge",
           model: requestModel,
           upstream_status: result.status,
+          upstream_code: rejection.code,
+          context_exceeded: rejection.contextExceeded,
           request_bytes: requestBytes,
           elapsed_ms: Date.now() - startedAt,
         });
@@ -218,10 +225,10 @@ export async function startBridge({
         await result.body?.cancel().catch(() => {});
         // Upstream error bodies can echo request data or credentials. Never relay them.
         const status = result.status >= 400 ? result.status : 502;
-        if (status === 413)
+        if (rejection.contextExceeded)
           return failContextLimit(
             response,
-            "Copilot rejected the request as too large (HTTP 413). Compact the conversation before continuing.",
+            `Copilot rejected the request as exceeding its context or size limit (HTTP ${status}). Compact the conversation before continuing.`,
           );
         const message = `Copilot returned HTTP ${result.status}; check authentication, policy, model compatibility, or budget.`;
         if (status >= 400 && status < 500) {

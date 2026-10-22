@@ -29,7 +29,7 @@ import {
   portableAgentTools,
   portableAgentResponse,
 } from "./agent-messages.mjs";
-import { requestError, runtimeError } from "./request-errors.mjs";
+import { httpFailure, requestError, runtimeError } from "./request-errors.mjs";
 
 // The official runtime supplies authentication, account routing and model policy.
 // Its request handler carries native Responses or translated Messages payloads
@@ -166,6 +166,9 @@ export async function createSdkTransport({
         throw runtimeError(error, "COPILOT_FORWARD_FAILED");
       }
       job.init.onActivity?.();
+      // The runtime can cancel a denied response as soon as we return it.
+      // Classify it first so a real context overflow survives SDK cleanup.
+      if (!response.ok) await httpFailure(response);
       if (
         response.ok &&
         !response.headers.get("content-type")?.startsWith("text/event-stream")

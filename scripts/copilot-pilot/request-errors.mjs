@@ -80,6 +80,66 @@ const known = new Set([
   ...local,
 ]);
 
+// Inspect a small, bounded error body before the SDK tears down its session.
+// Cache only fixed classifications so the bridge can reuse the result after
+// the original body has been consumed. Never expose upstream free-form text.
+const httpFailures = new WeakMap();
+export function httpFailure(response) {
+  let failure = httpFailures.get(response);
+  if (!failure) {
+    failure = readHttpFailure(response);
+    httpFailures.set(response, failure);
+  }
+  return failure;
+}
+
+async function readHttpFailure(response) {
+  const failure = {
+    code: "unknown",
+    contextExceeded: response.status === 413,
+  };
+  let reader, timer;
+  try {
+    if (![400, 422].includes(response.status)) return failure;
+    reader = response.body?.getReader();
+    if (!reader) return failure;
+    const deadline = new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error("Error body timeout")), 1000);
+    });
+    const chunks = [];
+    let size = 0;
+    while (true) {
+      const part = await Promise.race([reader.read(), deadline]);
+      if (part.done) break;
+      size += part.value.byteLength;
+      if (size > 16384) return failure;
+      chunks.push(Buffer.from(part.value));
+    }
+    const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    const error = body?.error ?? body;
+    if (
+      ["context_length_exceeded", "invalid_request_body"].includes(error?.code)
+    )
+      failure.code = error.code;
+    failure.contextExceeded =
+      error?.code === "context_length_exceeded" ||
+      (error?.code === "invalid_request_body" &&
+        typeof error.message === "string" &&
+        /^Your input exceeds the context window of this model\.(?: Please adjust your input and try again\.)?$/.test(
+          error.message,
+        ));
+    return failure;
+  } catch {
+    return failure;
+  } finally {
+    clearTimeout(timer);
+    try {
+      if (reader) void reader.cancel().catch(() => {});
+      else void response.body?.cancel().catch(() => {});
+    } catch {} // A broken error body must not replace its original HTTP status.
+  }
+}
+
 export function requestFailure(error, fallback = "COPILOT_BRIDGE_FAILED") {
   const codes = [];
   for (

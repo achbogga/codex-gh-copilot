@@ -49,7 +49,7 @@ Anthropic refusals now produce a terminal, non-retryable error with the provider
 
 ### Streaming and compaction
 
-Active Responses requests have no adapter-imposed total-duration deadline. The bridge cancels after five minutes without upstream bytes; Codex's own SSE inactivity limit is six minutes so the bridge can report its error first. Opus thinking activity emits progress events while preserving signed thinking. A stalled or truncated stream cancels the outstanding request and releases the SDK session. Codex can reconnect up to three times per sampling request, using its current conversation history and completed tool results. Unbounded connection retries are disabled. The bridge and SDK do not retry or execute tools themselves, and never fabricate a completion. Upstream HTTP 4xx responses become terminal Responses rejections; authentication, policy, quota and compatibility denials are not retried. Server and transport failures use the bounded native recovery path.
+Active Responses requests have no adapter-imposed total-duration deadline. The bridge cancels after five minutes without upstream bytes; Codex's own SSE inactivity limit is six minutes so the bridge can report its error first. Opus thinking activity emits progress events while preserving signed thinking. A stalled or truncated stream cancels the outstanding request and releases the SDK session. Codex can reconnect up to three times per sampling request, using its current conversation history and completed tool results. Unbounded connection retries are disabled. The bridge and SDK do not retry or execute tools themselves, and never fabricate a completion. Upstream HTTP 4xx responses become terminal Responses rejections except for explicit context/size overflows, which enter native compaction. Authentication, policy, quota and compatibility denials are not retried. Server and transport failures use the bounded native recovery path.
 
 Failures before response headers now preserve the first classified cause. Previously, a failed provider connection could trigger the runtime's internal retries; the adapter's one-inference guard then replaced that original cause with "Unexpected additional runtime inference request", and the bridge returned a generic HTTP 502. The adapter now rejects the native request immediately with an allowlisted cause and cancels the failed transport session. Socket/DNS/timeouts enter native bounded recovery. Authentication, quota, TLS verification, local storage/permission failures, unsupported history and runtime protocol mismatches stop with a specific error instead of repeatedly retrying a deterministic failure. Invalid local JSON returns HTTP 400. Cancelling an already-failed upstream error body cannot replace its real HTTP denial with a local 502. No raw runtime error message is exposed.
 
@@ -74,6 +74,8 @@ Later October 9 failures occurred after about 47 and 97 seconds, with reasoning 
 Compaction uses Codex's native local summarization through the normal model endpoint. The provider explicitly sets `capabilities.remote_compaction="unsupported"`, since the bridge does not implement the new remote compaction protocol. `model_auto_compact_token_limit_scope="total"` counts the whole context. GPT's 875,900-token and Opus's 828,400-token thresholds retain output headroom; the full context windows and max reasoning defaults are unchanged. Compaction itself can take time and obeys the same inactivity watchdog.
 
 Requests have a separate 32 MiB byte ceiling, matching the [Copilot Responses limit introduced in CLI 1.0.74](https://github.com/github/copilot-cli/issues/4183#issuecomment-5088784470). The previous local 8 MiB cap could block long histories below their token-based compaction threshold, especially with opaque reasoning state. Local size failures and upstream HTTP 413 responses now produce an explicit `context_length_exceeded` failure. Codex marks context full and runs native local compaction before the next turn instead of reconnecting with the same oversized request. Both declared-length and chunked uploads enforce the byte ceiling. Model discovery retains its independent 8 MiB bound.
+
+Copilot can also reject oversized context with HTTP 400 and `invalid_request_body`, saying exactly "Your input exceeds the context window of this model. Please adjust your input and try again." This was reproduced in a long-running session on October 22, including during source-model compaction before switching models. The adapter now recognizes that specific rejection and the standard `context_length_exceeded` code on HTTP 400/422. Codex can then remove old items from an oversized compaction request and retry its native summarization. Other invalid requests remain terminal. Error inspection is limited to 16 KiB and one second, happens before SDK cleanup can cancel the body, and retains only fixed classifications in memory and diagnostics. Upstream text, prompts and credentials are never relayed or logged by this classifier. Native regressions cover overflow during both normal inference and compaction, followed by a successful resumed continuation.
 
 Restart existing `cxf` and `cxo` processes after upgrading to load the updated adapter and binary. Existing sessions can then be resumed normally.
 
@@ -203,28 +205,28 @@ Stop scheduled checks with `systemctl --user disable --now codex-copilot-updates
 
 The October 20 switching checks ran on Codex 0.163.0, Copilot CLI 1.0.100 and SDK 1.0.22. The [machine-readable report](validation-2026-10-20.json) contains all transition results, model limits and unresolved provider failures.
 
-| Check | Result |
-| --- | --- |
-| Live native switching, including exact retained tool history, shell use and patched files | 249/256 passed; all seven remaining cases were explicit `claude-opus-5` provider refusals |
-| Synthetic near-limit matrix through the installed native engine | 256/256 passed, including 104 compactions with source affinity checked |
-| Real-provider compaction across unequal input budgets | 2/2 passed; only the native client's reported token counts were simulated |
-| Fresh-process resume, switch away, switch back | 15/16 models passed all three stages; Opus 5 declined the resumed conversation |
-| Advertised reasoning configurations | All 76 accepted by real inference; marker compliance is reported separately |
-| Physical large-context requests | 10/16 completed at about 93–94% of input allowance; nine retrieved both markers; the other GPT requests encountered upstream overload or EOF |
-| Regular checks | 82 Node checks, nine native recovery/size checks and seven updater checks passed; 11 opt-in checks skipped in the regular Node run |
+| Check                                                                                     | Result                                                                                                                                       |
+| ----------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| Live native switching, including exact retained tool history, shell use and patched files | 249/256 passed; all seven remaining cases were explicit `claude-opus-5` provider refusals                                                    |
+| Synthetic near-limit matrix through the installed native engine                           | 256/256 passed, including 104 compactions with source affinity checked                                                                       |
+| Real-provider compaction across unequal input budgets                                     | 2/2 passed; only the native client's reported token counts were simulated                                                                    |
+| Fresh-process resume, switch away, switch back                                            | 15/16 models passed all three stages; Opus 5 declined the resumed conversation                                                               |
+| Advertised reasoning configurations                                                       | All 76 accepted by real inference; marker compliance is reported separately                                                                  |
+| Physical large-context requests                                                           | 10/16 completed at about 93–94% of input allowance; nine retrieved both markers; the other GPT requests encountered upstream overload or EOF |
+| Regular checks                                                                            | 82 Node checks, nine native recovery/size checks and seven updater checks passed; 11 opt-in checks skipped in the regular Node run           |
 
 The provider failures remain visible. These results establish the tested native session/tool compatibility; they do not guarantee that every provider accepts every conversation or maximum-size request.
 
 The later [native-state and stream-cleanup report](validation-2026-10-20-native-state.json) covers the updated replay behavior:
 
-| Current follow-up check | Result |
-| --- | --- |
-| Every GPT-to-GPT native transition, original opaque state and actual model checked | 49/49 passed; 161 original reasoning items forwarded |
-| Every Claude-to-Claude native transition, original signed state and actual model checked | 33/36 passed; three Opus 5 `reasoning_extraction` refusals |
-| All-provider synthetic near-limit matrix | 256/256 passed, including 104 source-affinity compactions |
-| Fresh processes: resume, switch providers, switch back | 3/3 generated sessions passed all nine stages |
-| Stream cancellation with upstream left open | 50/50 readers released; the earlier implementation released 0/50 |
-| Regular and native regression checks | 88 regular checks passed, 11 opt-in checks skipped; 12 native recovery, size and runtime checks passed |
+| Current follow-up check                                                                  | Result                                                                                                 |
+| ---------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| Every GPT-to-GPT native transition, original opaque state and actual model checked       | 49/49 passed; 161 original reasoning items forwarded                                                   |
+| Every Claude-to-Claude native transition, original signed state and actual model checked | 33/36 passed; three Opus 5 `reasoning_extraction` refusals                                             |
+| All-provider synthetic near-limit matrix                                                 | 256/256 passed, including 104 source-affinity compactions                                              |
+| Fresh processes: resume, switch providers, switch back                                   | 3/3 generated sessions passed all nine stages                                                          |
+| Stream cancellation with upstream left open                                              | 50/50 readers released; the earlier implementation released 0/50                                       |
+| Regular and native regression checks                                                     | 88 regular checks passed, 11 opt-in checks skipped; 12 native recovery, size and runtime checks passed |
 
 The official-runtime control also refused an Opus 5 request and completed the task after changing to Opus 4.8. It records task recovery separately from requested-model success. Physical maximum-window capacity was not rerun in this follow-up. A root-filesystem exhaustion interrupted two validation runs; their partial results are excluded, and both complete matrices were rerun on the data volume. Generated validation artifacts were archived with their original paths preserved; existing user sessions were not moved or stopped.
 

@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { createSdkTransport } from "./sdk-transport.mjs";
 import { responsesThinkingPrefix } from "./responses-tools.mjs";
 import { sealModelState } from "./model-state.mjs";
+import { httpFailure } from "./request-errors.mjs";
 
 async function fixture(
   t,
@@ -208,6 +209,40 @@ const init = (signal) => ({
     "Authorization": "Bearer must-not-replace-runtime-token",
   },
   signal,
+});
+
+test("SDK classifies context-overflow denials before teardown consumes the error response", async (t) => {
+  const sdk = await fixture(t, () =>
+    Response.json(
+      {
+        error: {
+          code: "invalid_request_body",
+          message:
+            "Your input exceeds the context window of this model. Please adjust your input and try again.",
+          private_context: "PRIVATE_PROMPT",
+        },
+      },
+      { status: 400 },
+    ),
+  );
+  const response = await sdk.transport(
+    "https://api.githubcopilot.com/responses",
+    init(new AbortController().signal),
+  );
+  assert.equal(response.status, 400);
+  assert.equal(
+    response.bodyUsed,
+    true,
+    "Classification must precede returning the response to native Codex.",
+  );
+  assert.deepEqual(await httpFailure(response), {
+    code: "invalid_request_body",
+    contextExceeded: true,
+  });
+  await sdk.close();
+  assert.equal(sdk.requests.length, 1);
+  assert.deepEqual(sdk.deletedSessions, ["test-session"]);
+  assert.equal(sdk.acknowledgements.length, 0);
 });
 
 test("the first provider connection error survives SDK error handling and cleans up its transport session", async (t) => {
