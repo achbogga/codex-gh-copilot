@@ -48,6 +48,7 @@ pub use thread_lifecycle::ThreadReadyInput;
 pub use thread_lifecycle::ThreadResumeInput;
 pub use thread_lifecycle::ThreadStartInput;
 pub use thread_lifecycle::ThreadStopInput;
+pub use tool_lifecycle::CodeModeCellTiming;
 pub use tool_lifecycle::CommandStartInput;
 pub use tool_lifecycle::McpToolContext;
 pub use tool_lifecycle::McpToolResultInput;
@@ -60,6 +61,7 @@ pub use tool_lifecycle::ToolTimingBoundary;
 pub use tool_lifecycle::ToolTimingInput;
 pub use turn_input::TurnInputContext;
 pub use turn_input::TurnInputEnvironment;
+pub use turn_lifecycle::CatalogRefreshInput;
 pub use turn_lifecycle::TurnAbortInput;
 pub use turn_lifecycle::TurnErrorInput;
 pub use turn_lifecycle::TurnStartInput;
@@ -233,6 +235,14 @@ pub trait TurnLifecycleContributor: Send + Sync {
             let _self = self;
             let _input = input;
         })
+    }
+
+    /// Refreshes catalogs before a step; returns true when MCP needs rebuilding.
+    fn refresh_catalog_for_step<'a>(
+        &'a self,
+        _input: CatalogRefreshInput<'a>,
+    ) -> ExtensionFuture<'a, bool> {
+        Box::pin(async { false })
     }
 
     /// Observes a completed item without changing it or delaying streamed deltas.
@@ -439,6 +449,18 @@ pub trait ToolLifecycleContributor: Send + Sync {
     /// Observe handler or remote host duration as defined by `ToolTimingBoundary`.
     /// Handler timing includes cancellation. Observers must return promptly.
     fn on_tool_timing(&self, _input: ToolTimingInput<'_>) {}
+
+    /// Observe the exec that yielded a cell and the wait that collected its terminal result
+    /// or found the cell unavailable.
+    /// `call_id` identifies that dispatch. `cell_id` stays the same across waits.
+    fn on_code_mode_cell_timing(
+        &self,
+        _thread_id: &str,
+        _call_id: &str,
+        _cell_id: &str,
+        _timing: CodeModeCellTiming,
+    ) {
+    }
 }
 
 /// Owns the complete approval decision, including whether to consult a reviewer.

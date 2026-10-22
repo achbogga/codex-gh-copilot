@@ -39,7 +39,7 @@ use crate::tasks::interrupted_turn_history_marker;
 use crate::thread_startup_metadata::ThreadStartupMetadata;
 use codex_agent_graph_store::AgentGraphStore;
 use codex_agent_graph_store::LocalAgentGraphStore;
-use codex_agent_message_board_extension::LocalAgentMessageBoard;
+use codex_agent_message_board_extension::local_board_options;
 use codex_analytics::AnalyticsEventsClient;
 use codex_app_server_protocol::ThreadHistoryBuilder;
 use codex_app_server_protocol::TurnStatus;
@@ -66,6 +66,7 @@ use codex_login::AuthManager;
 use codex_login::CodexAuth;
 use codex_login::default_client::CODEX_INTERNAL_ORIGINATOR_OVERRIDE_ENV_VAR;
 use codex_login::default_client::originator;
+use codex_message_board::LocalAgentMessageBoard;
 use codex_model_provider::create_model_provider;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::OPENAI_PROVIDER_ID;
@@ -452,7 +453,7 @@ pub(crate) struct ThreadManagerState {
     plugins_manager: Arc<PluginsManager>,
     mcp_manager: Arc<McpManager>,
     code_mode_session_provider: Arc<dyn CodeModeSessionProvider>,
-    extensions: Arc<ExtensionRegistry<Config>>,
+    pub(crate) extensions: Arc<ExtensionRegistry<Config>>,
     user_instructions_provider: Arc<dyn UserInstructionsProvider>,
     image_store: Arc<dyn AttachmentStore>,
     thread_store: Arc<dyn ThreadStore>,
@@ -501,13 +502,19 @@ pub fn thread_store_from_config(
                         let sqlite = sqlite.clone();
                         Box::pin(async move {
                             let boards = thread_ids.into_iter().map(Into::into).collect::<Vec<_>>();
-                            LocalAgentMessageBoard::delete_boards(&sqlite, &boards)
-                                .await
-                                .map_err(|err| ThreadStoreError::Internal {
+                            LocalAgentMessageBoard::delete_boards(
+                                &sqlite,
+                                &local_board_options(),
+                                &boards,
+                            )
+                            .await
+                            .map_err(|err| {
+                                ThreadStoreError::Internal {
                                     message: format!(
                                         "failed to delete agent message boards: {err}"
                                     ),
-                                })
+                                }
+                            })
                         })
                     }),
             );
@@ -973,7 +980,7 @@ impl ThreadManager {
     pub(crate) async fn get_thread_for_board(
         &self,
         thread_id: ThreadId,
-        connection: &codex_agent_message_board_extension::LocalBoardConnection,
+        connection: &codex_message_board::LocalBoardConnection,
     ) -> CodexResult<Arc<CodexThread>> {
         self.state
             .threads
@@ -983,7 +990,7 @@ impl ThreadManager {
             .filter(|thread| {
                 thread
                     .thread_extension_data()
-                    .get::<codex_agent_message_board_extension::LocalBoardConnection>()
+                    .get::<codex_message_board::LocalBoardConnection>()
                     .is_some_and(|other| connection.same_board(&other))
             })
             .cloned()
@@ -1408,7 +1415,7 @@ impl ThreadManager {
     /// as `Arc<CodexThread>`, it is possible that other references to it exist elsewhere.
     /// Returns the thread if the thread was found and removed.
     pub async fn remove_thread(&self, thread_id: &ThreadId) -> Option<Arc<CodexThread>> {
-        self.state.threads.write().await.remove(thread_id)
+        self.state.remove_thread(thread_id).await
     }
 
     /// Removes a runtime for a client request, leaving internal workers with their owner.
@@ -1426,7 +1433,9 @@ impl ThreadManager {
                 "live internal threads can only be removed by their owner".to_owned(),
             ));
         }
-        Ok(threads.remove(thread_id))
+        Ok(threads.remove(thread_id).inspect(|thread| {
+            thread.session.services.mcp_runtime.revoke_ema();
+        }))
     }
 
     /// Removes a thread only if `thread_id` still maps to `expected`.
@@ -1443,7 +1452,9 @@ impl ThreadManager {
             .get(thread_id)
             .is_some_and(|thread| Arc::ptr_eq(thread, expected))
         {
-            threads.remove(thread_id)
+            threads.remove(thread_id).inspect(|thread| {
+                thread.session.services.mcp_runtime.revoke_ema();
+            })
         } else {
             None
         }
@@ -1485,7 +1496,9 @@ impl ThreadManager {
 
         let mut tracked_threads = self.state.threads.write().await;
         for thread_id in &report.completed {
-            tracked_threads.remove(thread_id);
+            if let Some(thread) = tracked_threads.remove(thread_id) {
+                thread.session.services.mcp_runtime.revoke_ema();
+            }
         }
 
         report
@@ -1816,6 +1829,7 @@ impl ThreadManagerState {
         op: Op,
         parent_turn_id: Option<String>,
         root_turn_id: Option<String>,
+        message_delivery: Option<crate::agent_communication::MessageDelivery>,
     ) -> CodexResult<String> {
         let thread = self.get_thread(thread_id).await?;
         let residency_guard = if matches!(op, Op::InterAgentCommunication { .. }) {
@@ -1842,13 +1856,20 @@ impl ThreadManagerState {
                 parent_turn_id,
                 root_turn_id,
                 residency_guard,
+                message_delivery,
             )
             .await
     }
 
     /// Remove a thread from the manager by ID, returning it when present.
     pub(crate) async fn remove_thread(&self, thread_id: &ThreadId) -> Option<Arc<CodexThread>> {
-        self.threads.write().await.remove(thread_id)
+        self.threads
+            .write()
+            .await
+            .remove(thread_id)
+            .inspect(|thread| {
+                thread.session.services.mcp_runtime.revoke_ema();
+            })
     }
 
     pub(crate) async fn effective_multi_agent_version_for_spawn(
@@ -2092,6 +2113,17 @@ impl ThreadManagerState {
 
     /// Spawn a new thread with optional history and register it with the manager.
     async fn spawn_thread(&self, mut request: ThreadSpawnRequest) -> CodexResult<NewThread> {
+        let cancellation = request
+            .options
+            .config
+            .config_layer_stack
+            .mcp_ema_cancellation()
+            .for_startup();
+        request.options.config.config_layer_stack = request
+            .options
+            .config
+            .config_layer_stack
+            .with_mcp_ema_cancellation(cancellation);
         let runtime = request.agent_control.runtime().clone();
         let membership = runtime.admit_start()?;
         let owns_startup = request.startup.is_none();
@@ -2239,6 +2271,7 @@ impl ThreadManagerState {
                     });
                 }
                 threads.remove(&resumed.conversation_id);
+                thread.session.services.mcp_runtime.revoke_ema();
             }
         }
         let agent_control = match (&self.agent_control_factory, agent_control) {
@@ -2509,6 +2542,12 @@ impl ThreadManagerState {
             }
         };
 
+        let ema_cancellation = session
+            .get_config()
+            .await
+            .config_layer_stack
+            .mcp_ema_cancellation()
+            .clone();
         {
             let mut threads = self.threads.write().await;
             if let std::collections::hash_map::Entry::Vacant(e) = threads.entry(thread_id) {
@@ -2518,6 +2557,7 @@ impl ThreadManagerState {
                         .agent_control
                         .propagate_config_update(update);
                 }
+                ema_cancellation.publish();
                 let thread = Arc::new(CodexThread::new(
                     session,
                     io,
