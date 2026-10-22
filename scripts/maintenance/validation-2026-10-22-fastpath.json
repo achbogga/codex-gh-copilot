@@ -1,0 +1,100 @@
+{
+  "recorded_date_UTC": "2026-10-22",
+  "base_commit": "f1b7fd8e3fe62e5cd91019c0b41963608df231ba",
+  "incident": {
+    "screen": "fastpath",
+    "native_goal_saved": true,
+    "native_goal_status_before": "blocked",
+    "last_failure_at_UTC": "2026-10-22T18:49:06.015Z",
+    "last_failure_code": "UND_ERR_SOCKET",
+    "consecutive_long_transport_failures": 4,
+    "failed_request_bytes": [11814146, 13183217, 14543484, 15404314],
+    "failed_request_elapsed_ms": [631226, 631643, 415112, 556547],
+    "failures_had_no_completion": true,
+    "initial_transport_failures_proved_context_overflow": false,
+    "root_space_low_proved_socket_failure_cause": false,
+    "bridge_was_started_before_runtime_update": true
+  },
+  "native_recovery": {
+    "exact_saved_thread_and_goal_retained": true,
+    "only_target_screen_restarted": true,
+    "runtime": {
+      "Codex": "0.163.0",
+      "Copilot_CLI": "1.0.102",
+      "Copilot_SDK": "1.0.25",
+      "Node": "22.23.4"
+    },
+    "model": "gpt-6.1-sol",
+    "reasoning_effort": "max",
+    "native_compaction_completed": true,
+    "actual_context_overflow_trims_during_compaction": 65,
+    "native_goal_resumed_at_UTC": "2026-10-22T21:05:50Z",
+    "fresh_native_shell_tool_results_verified": true,
+    "native_effective_context_window_after_resume": 997500,
+    "input_tokens_observed_after_compaction": 137702,
+    "context_and_reasoning_limits_reduced": false,
+    "native_history_or_goal_database_manually_edited": false
+  },
+  "recovery_watch": {
+    "schedule": "*/5 * * * *",
+    "healthy_checks_call_a_model": false,
+    "native_state_read_only": true,
+    "action": "Native /goal resume in the existing verified detached Screen window only",
+    "cooldown_seconds": 900,
+    "max_attempts_without_new_tool_progress": 2,
+    "max_attempts_per_24_hours": 6,
+    "failure_minimum_age_seconds": 60,
+    "failure_maximum_age_seconds": 86400,
+    "human_review_checkpoint_tokens": 10000000,
+    "minimum_root_available_gib_for_recovery": 4,
+    "guards": [
+      "Exact configured thread and goal; respect paused, completed, replaced and budget-limited state",
+      "Allowlisted trailing native transport failure; match goal update and reject later user or turn activity",
+      "Failure must be newer than the current native process, preserving startup Leave paused choice",
+      "One foreground native process holds exactly this rollout in the configured detached Screen window",
+      "Known empty composer, stalled-goal footer, no busy task or compaction",
+      "Recheck native identity and goal before typing and Enter; verify pending command before Enter",
+      "Persist allowance before input and lock overlapping cron checks",
+      "Only verified new native tool-result progress resets consecutive recovery allowance",
+      "No new thread writer, model fallback, fake completion, process restart or enterprise-policy bypass"
+    ],
+    "cron_environment_check": "Passed with minimal environment and zero model calls on the healthy goal",
+    "actual_scheduled_check_at_UTC": "2026-10-22T21:10:02.360930Z",
+    "actual_scheduled_status": "goal-active",
+    "scheduled_stderr_bytes": 0,
+    "report_root": "~/.local/state/fastpath-goal-watch (data-volume backed)"
+  },
+  "storage_recovery": {
+    "exports": 11,
+    "files_SHA256_verified_source_and_destination": 370,
+    "content_addressed_blob_names_verified": true,
+    "exports_older_than_days": 30,
+    "no_process_cwd_or_open_file_references": true,
+    "original_paths_preserved": "Atomic directory-to-symlink exchange after durable verified copy",
+    "source_files_changed_during_copy": false,
+    "native_or_Copilot_session_history_deleted": false,
+    "project_files_containers_tagged_images_or_active_caches_deleted": false,
+    "recovered_gib": 102.76,
+    "root_available_after_gib": 109.37,
+    "post_archive_pressure_check_exit_code": 0,
+    "archive": "/mnt/av-data/cache/preserved-session-artifacts (permanent; not disposable cache)",
+    "daily_and_pressure_cleanup_schedules_preserved": true
+  },
+  "tests": {
+    "command": "COPILOT_PILOT_CODEX_BIN=<installed Codex> /usr/bin/python3 -m unittest discover -s scripts/maintenance -p 'test_*.py' -v",
+    "passed": 28,
+    "failed": 0,
+    "skipped": 0,
+    "installed_native_regression": "Separate real Codex TUI and GNU Screen, synthetic local stream failure, blocked native goal, watchdog submission and acceptance, actual shell-tool marker, same thread/goal/process verified",
+    "native_regression_remote_model_requests": 0,
+    "source_bridge_modified": false
+  },
+  "limits": [
+    "Remote Copilot socket termination can still happen; this change provides bounded recovery, not an upstream reliability guarantee.",
+    "The deterministic watch is explicitly scoped to the configured Fastpath goal, not every cxf session.",
+    "Authentication, policy, quota, TLS, refusals, protocol errors and unclassified gateway errors require review.",
+    "The watcher does not automatically interrupt tasks, perform compaction or restart processes.",
+    "An exhausted incident or configured strategy checkpoint requires review rather than unlimited model retries.",
+    "No new all-model maximum-context matrix was run for this maintenance-only change."
+  ]
+}
