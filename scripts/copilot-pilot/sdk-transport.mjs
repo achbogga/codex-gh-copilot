@@ -30,6 +30,7 @@ import {
   portableAgentResponse,
 } from "./agent-messages.mjs";
 import { httpFailure, requestError, runtimeError } from "./request-errors.mjs";
+import { loadAgentRecovery, recoverAgentProgress } from "./agent-recovery.mjs";
 
 // The official runtime supplies authentication, account routing and model policy.
 // Its request handler carries native Responses or translated Messages payloads
@@ -41,6 +42,7 @@ export async function createSdkTransport({
   Client = CopilotClient,
   forward = fetch,
   diagnosticFile,
+  agentRecoveryFile,
 } = {}) {
   if (environment.NODE_TLS_REJECT_UNAUTHORIZED === "0")
     throw new Error("TLS verification must remain enabled.");
@@ -61,6 +63,7 @@ export async function createSdkTransport({
   const tasks = new Set();
   let catalog;
   let runtimeModels = [];
+  const agentRecovery = loadAgentRecovery(agentRecoveryFile);
   const diagnose = (details) => {
     if (!diagnosticFile) return;
     try {
@@ -339,6 +342,15 @@ export async function createSdkTransport({
         init = { ...init, body: JSON.stringify(payload) };
       }
       let reasoningEffort;
+      const recovered = recoverAgentProgress(payload, agentRecovery);
+      if (recovered !== payload) {
+        payload = recovered;
+        init = { ...init, body: JSON.stringify(payload) };
+        diagnose({
+          code: "HISTORICAL_AGENT_PROGRESS_RECOVERY",
+          model: model.id,
+        });
+      }
       try {
         reasoningEffort = reasoningForModel(
           model,

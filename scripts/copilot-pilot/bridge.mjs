@@ -217,6 +217,9 @@ export async function startBridge({
           upstream_status: result.status,
           upstream_code: rejection.code,
           context_exceeded: rejection.contextExceeded,
+          ...(rejection.encryptedOutputUnreadable
+            ? { encrypted_output_unreadable: true }
+            : {}),
           request_bytes: requestBytes,
           elapsed_ms: Date.now() - startedAt,
         });
@@ -230,6 +233,18 @@ export async function startBridge({
             response,
             `Copilot rejected the request as exceeding its context or size limit (HTTP ${status}). Compact the conversation before continuing.`,
           );
+        if (rejection.encryptedOutputUnreadable) {
+          response.writeHead(200, {
+            "content-type": "text/event-stream",
+            "cache-control": "no-store",
+          });
+          return response.end(
+            failedEvent(
+              "Copilot cannot decode a saved encrypted function or agent output. Retrying or increasing context will not decrypt it. The original session is preserved; use an explicitly verified plaintext recovery record.",
+              "invalid_prompt",
+            ),
+          );
+        }
         const message = `Copilot returned HTTP ${result.status}; check authentication, policy, model compatibility, or budget.`;
         if (status >= 400 && status < 500) {
           // Native Codex retries unknown HTTP statuses. Encode an explicit

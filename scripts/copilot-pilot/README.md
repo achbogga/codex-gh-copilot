@@ -4,7 +4,7 @@ This fork's experimental adapter runs **real Codex**, including Code Mode, its n
 
 ## Run on Linux
 
-Requires Node.js 22+ (tested with 22.23.4), an authenticated `copilot` CLI (tested with 1.0.102), and the installed Codex executable bundle (tested with 0.163.0). Docker is needed only for the optional container launcher.
+Requires Node.js 22+ (tested with 22.23.4), an authenticated `copilot` CLI (tested with 1.0.103), and the installed Codex executable bundle (tested with 0.164.0). Docker is needed only for the optional container launcher.
 
 ```bash
 npm ci --prefix scripts/copilot-pilot --ignore-scripts
@@ -23,7 +23,12 @@ cxf models --json
 cxf -m claude-sonnet-5.5   # Select the initial model directly
 cxf -m grok-4.7
 cxf resume SESSION_ID
+cxf update                # Update stable runtimes, SDK and source, then reload exact Screen threads
+cxf update --check        # Check only
+cxf update --sync         # Synchronize source only
 ```
+
+The complete update command verifies release checksums and installs immutable version directories, preserving old running executables until each session reloads. It runs bridge/native/official-runtime smoke checks and maintenance regressions before changing Screens. Each replacement resumes its recorded root thread, model, reasoning and workspace in the existing Screen shell; completed goals and actual user pauses remain preserved. A busy turn can be interrupted through native Codex after a short drain; pending drafts and active compaction defer that reload. It waits for the old writer and launcher to exit before starting the replacement. The controlling session uses a separate supervisor after its current turn completes, then receives a continuation asking it to verify the saved reports. Private reports live beside the configured runtime installation. The command requires a clean `main`; it commits only SDK dependency pins it changes after validation, and does not push automatically.
 
 The October 20 seat check advertised 16 concrete models: GPT, Claude, Grok and MAI. The earlier October 17 catalog contained 21; models removed by the provider are not invented or re-enabled locally. Discovery refreshes on each launch. Explicitly disabled models stay excluded; a missing raw policy field is accepted only when the official SDK also lists the model. The seat's `auto` router does not advertise a concrete context window or transport and is not included as a model with invented limits.
 
@@ -46,6 +51,8 @@ If a conversation is too large for a smaller destination, installed Codex compac
 Provider-private state is not universally portable across model keys/accounts. The original October 20 matrix had seven failed transitions into `claude-opus-5`; seamless switching across every model is **not yet achieved**. Follow-up inspection found Anthropic's `stop_details.category="reasoning_extraction"` in native continuation probes. An earlier official-CLI comparison checked that the task completed but did not verify the served model. A subsequent wire-level control reproduced the refusal in the official runtime itself, followed by an automatic switch to `claude-opus-4.8` with `cause="refusal_fallback"`; Opus 4.8 completed the task. Successful CLI output therefore does not prove that Opus 5 accepted that conversation. Lowering output limits, changing thinking display, moving later system instructions, or omitting completed signed thinking did not establish a reliable fix. Limits and max reasoning have not been reduced. The bridge preserves the selected model rather than silently counting another model's answer as its success. After a refusal, `/model claude-opus-4.8` or another enabled model can continue the saved native conversation. The [earlier diagnostic report](validation-2026-10-20-refusal.json) retains the initial findings; the wire-level correction supersedes its unverified official-CLI model attribution.
 
 Anthropic refusals now produce a terminal, non-retryable error with the provider's category and explanation, rather than a fabricated successful answer saying only "The model declined this request." Real token and billing accounting is retained, including for refusals after partial output. Metadata diagnostics record only an allowlisted category. [Anthropic documents](https://platform.claude.com/docs/en/build-with-claude/refusals-and-fallback) that `reasoning_extraction` can originate in system instructions or tool schemas and recommends using native thinking blocks instead of asking for private reasoning in text. The adapter neither decrypts private reasoning nor automatically resubmits refusals. Large-context probes also observed provider HTTP 503 `model_overloaded` and an upstream EOF; advertised maximum windows are configured, but remote capacity and uninterrupted inference cannot be guaranteed.
+
+An October 23 Lance failure was a different HTTP 400: `Encrypted function output content could not be decrypted or decoded.` The affected legacy incoming agent progress updates could not be read by Copilot, including during compaction. An explicit private `agent-progress-recovery.json` maps only identified ciphertext hashes to an existing same-author plaintext `FINAL_ANSWER` message and its exact SHA-256. For those records, the request carries a visible notice explaining that the earlier progress is unreadable and pointing to that verified final report. The original native records, report text, tools and reasoning remain unchanged. This does not decrypt or reconstruct the earlier progress and is not a lossless conversion of it. Missing or altered final reports cannot authorize recovery. The rule is opt-in and does not apply to user instructions, encrypted final answers, signed thinking or unknown ciphertext. The bridge now identifies this exact upstream rejection explicitly instead of suggesting context compaction or generic authentication checks.
 
 ### Streaming and compaction
 

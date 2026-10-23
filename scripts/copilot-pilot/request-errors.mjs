@@ -128,6 +128,12 @@ async function readHttpFailure(response) {
         /^Your input exceeds the context window of this model\.(?: Please adjust your input and try again\.)?$/.test(
           error.message,
         ));
+    if (
+      error?.code === "invalid_request_body" &&
+      error?.message ===
+        "Encrypted function output content could not be decrypted or decoded."
+    )
+      failure.encryptedOutputUnreadable = true;
     return failure;
   } catch {
     return failure;

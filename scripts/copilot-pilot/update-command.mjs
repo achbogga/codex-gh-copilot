@@ -17,13 +17,16 @@ export function updateArguments(args) {
 }
 
 export async function runUpdate(args) {
+  const all = !args.length || args.includes("--all");
   const child = spawn(
     "python3",
     [
-      fileURLToPath(new URL("./update_check.py", import.meta.url)),
+      fileURLToPath(
+        new URL(all ? "./update_all.py" : "./update_check.py", import.meta.url),
+      ),
       "--config",
       join(homedir(), ".codex-copilot-pilot", "update-config.json"),
-      ...(args.length ? args : ["--sync"]),
+      ...(all ? args.filter((arg) => arg !== "--all") : args),
     ],
     { stdio: "inherit" },
   );

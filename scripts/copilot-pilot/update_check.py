@@ -12,6 +12,8 @@ import re
 import subprocess
 import tempfile
 import urllib.request
+import urllib.error
+import shutil
 
 
 def version(text):
@@ -54,8 +56,13 @@ def release_status(name, repository, installed):
             "Accept": "application/vnd.github+json",
         },
     )
-    with urllib.request.urlopen(request, timeout=30) as response:
-        release = json.loads(response.read(1024 * 1024))
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            release = json.loads(response.read(1024 * 1024))
+    except urllib.error.HTTPError as error:
+        if error.code != 403 or not shutil.which('gh'):
+            raise
+        release = json.loads(command(['gh', 'api', f'repos/{repository}/releases/latest']))
     if release.get("draft") or release.get("prerelease"):
         raise ValueError("Expected a stable release")
     latest = ".".join(map(str, version(release["tag_name"])))

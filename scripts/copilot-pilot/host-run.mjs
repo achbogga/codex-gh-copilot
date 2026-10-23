@@ -80,6 +80,7 @@ export async function runHost({
       cliPath: copilotBin,
       directory: transportDir,
       diagnosticFile: join(state, "stream-diagnostics.jsonl"),
+      agentRecoveryFile: join(state, "agent-progress-recovery.json"),
       environment,
     });
     const models = await listModels(async () => "sdk-owned", sdk.transport, {

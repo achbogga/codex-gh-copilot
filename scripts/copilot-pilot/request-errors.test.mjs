@@ -7,6 +7,25 @@ import {
   runtimeError,
 } from "./request-errors.mjs";
 
+test("encrypted output rejection is distinct from context overflow and does not expose provider text", async () => {
+  const failure = await httpFailure(
+    new Response(
+      JSON.stringify({
+        error: {
+          code: "invalid_request_body",
+          message:
+            "Encrypted function output content could not be decrypted or decoded.",
+        },
+      }),
+      { status: 400 },
+    ),
+  );
+  assert.equal(failure.encryptedOutputUnreadable, true);
+  assert.equal(failure.contextExceeded, false);
+  assert.equal(failure.code, "invalid_request_body");
+  assert.equal(failure.message, undefined);
+});
+
 test("Copilot HTTP 400 context overflows survive consumed bodies without exposing provider text", async () => {
   for (const error of [
     { code: "context_length_exceeded", message: "PRIVATE_PROMPT" },

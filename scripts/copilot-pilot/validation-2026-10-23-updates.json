@@ -1,0 +1,94 @@
+{
+  "validated_at": "2026-10-23T16:09:44.974205+00:00",
+  "phase": "runtime-updated-and-seven-screens-restored; controller handoff pending",
+  "upstream": {
+    "commit": "2839ed763",
+    "merged_commits": 73,
+    "merge_commit": "fef7a7d51b2b73d8062fade908f04a032748f350"
+  },
+  "installed": {
+    "codex": "0.164.0",
+    "copilot_cli": "1.0.103",
+    "copilot_sdk": "1.0.26",
+    "node": "22.23.4"
+  },
+  "installation": {
+    "stable_only": true,
+    "codex_native_npm_sha512_verified": true,
+    "copilot_github_release_sha256_verified": true,
+    "immutable_versioned_runtimes": true,
+    "running_executable_bytes_overwritten": false,
+    "codex_code_mode_host_preserved": true
+  },
+  "tests": {
+    "bridge_native_and_official_runtime_smoke": {
+      "passed": 131,
+      "failed": 0,
+      "skipped": 0,
+      "synthetic_active_stream_ms": 5000
+    },
+    "maintenance_native_screen_and_watch": {
+      "passed": 43,
+      "failed": 0
+    },
+    "updater_and_installer_python": {
+      "passed": 11,
+      "failed": 0
+    },
+    "long_runtime_streams": {
+      "passed": 4,
+      "failed": 0,
+      "synthetic_active_stream_ms": 660000,
+      "models": ["gpt-6.1-sol", "claude-opus-5.5"],
+      "inference_posts_per_stream": 1,
+      "model_backend_called": false
+    }
+  },
+  "fastpath": {
+    "failure": "UND_ERR_SOCKET after four long native inference attempts",
+    "disk_was_not_full": true,
+    "incorrect_watcher_approval_gate_removed": true,
+    "strategy_reassessment_then_autonomous_continuation_preserved": true,
+    "large_failed_history_native_compact_then_resume_enabled": true,
+    "same_thread_goal_model_and_reasoning_preserved": true,
+    "fresh_tool_outputs_verified": true
+  },
+  "lance": {
+    "upstream_status": 400,
+    "upstream_code": "invalid_request_body",
+    "exact_cause": "Encrypted function output content could not be decrypted or decoded.",
+    "not_a_context_overflow": true,
+    "native_compaction_alone_also_rejected": true,
+    "explicit_legacy_progress_recovery_entries": 4,
+    "verified_plaintext_final_reports_already_in_native_input": true,
+    "recovery_notices_visible_to_model": true,
+    "earlier_encrypted_progress_decrypted": false,
+    "earlier_progress_losslessly_reconstructed": false,
+    "original_native_history_modified": false,
+    "same_thread_and_goal_restored": true,
+    "fresh_shell_tool_results_verified": true
+  },
+  "screen_reload": {
+    "copilot_screens_verified": 7,
+    "exact_original_thread_ids_preserved": true,
+    "same_screen_shell_environment_preserved": true,
+    "completed_goal_state_preserved": true,
+    "actual_user_pauses_preserved": true,
+    "controller_reload": "Separate supervisor after current turn completes; final verification pending."
+  },
+  "saved_workflow": {
+    "command": "cxf update",
+    "explicit_equivalent": "cxf update --all",
+    "source_only": "cxf update --sync",
+    "check_only": "cxf update --check",
+    "instructions": "AGENTS.md",
+    "one_command_end_to_end_run": "pending final clean-tree invocation"
+  },
+  "limits": [
+    "Remote transport failures can still occur; no universal provider reliability or rejection bypass is claimed.",
+    "Unknown ciphertext and encrypted final reports are not decoded or silently discarded.",
+    "The legacy progress recovery is explicitly lossy about the unreadable progress; exact plaintext final reports, native originals, tools and reasoning remain preserved.",
+    "No all-model physical maximum-context matrix was rerun.",
+    "The controller must verify its own replacement report after handoff before marking the entire rollover complete."
+  ]
+}

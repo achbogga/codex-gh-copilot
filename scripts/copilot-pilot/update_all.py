@@ -1,0 +1,107 @@
+#!/usr/bin/python3
+"""Update source, verified runtimes and exact GNU Screen sessions in one command."""
+
+import argparse
+import datetime
+import fcntl
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+
+from runtime_update import atomic_text, install
+
+
+def run_logged(command, log, environment=None):
+    with log.open('w') as output:
+        result = subprocess.run(command, stdout=output, stderr=subprocess.STDOUT,
+                                env=environment, timeout=240, cwd=Path(__file__).resolve().parents[2])
+    if result.returncode:
+        raise RuntimeError(f'Update validation failed; inspect {log}')
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--config', type=Path, required=True)
+    args = parser.parse_args()
+    os.umask(0o077)
+    config = json.loads(args.config.read_text())
+    repo = Path(config['repo'])
+    root = Path(config.get('runtime_root', Path.home() / '.local/share/codex-copilot/runtimes')).parent / 'updates'
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with (root / 'update-all.lock').open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        state = Path(tempfile.mkdtemp(prefix='update-', dir=root))
+        print(f'Update report directory: {state}', flush=True)
+        maintenance = repo / 'scripts/maintenance/screen_sessions.py'
+        inventory_args = [sys.executable, str(maintenance), '--config', str(args.config), '--state-dir', str(state / 'screens')]
+        # Inventory first, before changes or process interruption.
+        run_logged(inventory_args, state / 'inventory.log')
+        git_environment = os.environ.copy()
+        for key, names in [('git_author_name', ('GIT_AUTHOR_NAME', 'GIT_COMMITTER_NAME')),
+                           ('git_author_email', ('GIT_AUTHOR_EMAIL', 'GIT_COMMITTER_EMAIL'))]:
+            if config.get(key):
+                for name in names:
+                    git_environment[name] = config[key]
+        subprocess.run([sys.executable, str(Path(__file__).with_name('update_check.py')),
+                        '--config', str(args.config), '--sync'], check=True, env=git_environment)
+        runtime = install(config, root / 'downloads')
+        atomic_text(args.config, json.dumps(config, indent=2) + '\n')
+        environment = {**os.environ, 'COPILOT_PILOT_CODEX_BIN': config['codex_bin'],
+                       'COPILOT_PILOT_RUNTIME_BIN': config['copilot_bin'],
+                       'COPILOT_PILOT_LONG_STREAM_MS': '5000'}
+        test_files = sorted(str(path) for path in (repo / 'scripts/copilot-pilot').glob('*.test.mjs'))
+        run_logged([config['node_bin'], '--test', *test_files], state / 'bridge-tests.log', environment)
+        run_logged([sys.executable, '-m', 'unittest', 'discover', '-s', str(repo / 'scripts/maintenance'), '-p', 'test_*.py'],
+                   state / 'maintenance-tests.log', environment)
+        run_logged([sys.executable, '-m', 'unittest', 'discover', '-s', str(repo / 'scripts/copilot-pilot'), '-p', '*_test.py'],
+                   state / 'updater-tests.log', environment)
+        # Only dependency pins created by this operation are committed here.
+        pins = ['scripts/copilot-pilot/package.json', 'scripts/copilot-pilot/package-lock.json']
+        if subprocess.check_output(['git', '-C', str(repo), 'diff', '--', *pins], text=True):
+            subprocess.run(['git', '-C', str(repo), 'add', '--', *pins], check=True)
+            git = ['git', '-C', str(repo)]
+            for key, option in [('git_author_name', 'user.name'), ('git_author_email', 'user.email')]:
+                if config.get(key):
+                    git += ['-c', option + '=' + config[key]]
+            subprocess.run([*git, 'commit', '-m', 'Update Copilot SDK to ' + runtime['copilot_sdk']], check=True)
+        # Screens are changed only after the upgraded runtime passes checks.
+        initial_targets = json.loads((state / 'screens/inventory.json').read_text())
+        for native_home in {target['home'] for target in initial_targets}:
+            diagnostics = Path(native_home) / 'stream-diagnostics.jsonl'
+            if diagnostics.exists() and diagnostics.stat().st_size >= 512 * 1024:
+                stamp = datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%S%f')
+                diagnostics.rename(diagnostics.with_name('stream-diagnostics.' + stamp + '.jsonl'))
+        subprocess.run([*inventory_args, '--apply'], check=True)
+        report_file = state / 'screens/reload-report.json'
+        report = json.loads(report_file.read_text())
+        report['runtime'] = runtime
+        report['validation'] = 'Bridge/native/official-runtime short streams and maintenance tests passed.'
+        controllers = [item for item in report['results'] if item['status'] == 'controller-deferred']
+        if controllers:
+            if len(controllers) != 1:
+                raise RuntimeError('Controller identity is ambiguous; no handoff was started.')
+            target = controllers[0]
+            note = (f'Continue the user-authorized update verification. Read {state / "update-report.json"} '
+                    f'and {state / "controller/reload-report.json"}. Verify every original Screen thread is restored '
+                    'on the updated runtime, report real failures accurately, and finish the user request. '
+                    'The reload supervisor waited for the previous turn to complete before restarting this same thread. '
+                    'Do not repeat the completed update or restart healthy sessions again.')
+            with (state / 'controller-handoff.log').open('w') as output:
+                handoff = subprocess.Popen([sys.executable, str(maintenance), '--config', str(args.config),
+                                           '--state-dir', str(state / 'controller'), '--only', target['screen'],
+                                           '--controller-thread', target['thread_id'], '--wait-controller-idle',
+                                           '--continuation', note, '--apply'], stdin=subprocess.DEVNULL,
+                                          stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
+            report['controller_handoff_pid'] = handoff.pid
+            print('Controller reload will run after its current turn completes.', flush=True)
+        report['finished_at'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        atomic_text(state / 'update-report.json', json.dumps(report, indent=2) + '\n')
+        atomic_text(root / 'latest-report.txt', str(state / 'update-report.json') + '\n')
+        print(json.dumps({'status': 'updated', 'runtime': runtime, 'report': str(state / 'update-report.json')}))
+
+
+if __name__ == '__main__':
+    main()
