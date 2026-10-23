@@ -176,6 +176,17 @@ def launch_arguments(target, config, continuation=None):
     return result
 
 
+def continuation_policy(before, interrupted, continuation):
+    if before and before['status'] in ('active', 'blocked'):
+        return None, continuation
+    if interrupted and not continuation:
+        continuation = ('Continue the interrupted user task after this harness runtime upgrade. '
+                        'The same native thread and files are preserved. Old PTY/process handles may no longer exist; '
+                        'inspect saved tool results and current authoritative state before rerunning commands. '
+                        'Preserve the existing goal objective, explicit user pauses and native budgets.')
+    return continuation, None
+
+
 def reload_target(target, config, state, drain_seconds=45, continuation=None):
     if not alive(target):
         raise RuntimeError('The inventoried native process changed; reinventory before restarting.')
@@ -213,12 +224,11 @@ def reload_target(target, config, state, drain_seconds=45, continuation=None):
         if time.monotonic() >= deadline:
             raise RuntimeError('Old writer/launcher has not exited; no concurrent resume was started.')
         time.sleep(.2)
-    if interrupted_for_update and not continuation:
-        continuation = ('Continue the interrupted user task after this harness runtime upgrade. '
-                        'The same native thread and files are preserved. Old PTY/process handles may no longer exist; '
-                        'inspect saved tool results and current authoritative state before rerunning commands. '
-                        'Preserve the existing goal objective, explicit user pauses and native budgets.')
-    enter_command(target, shlex.join(launch_arguments(target, config, continuation)))
+    # A positional prompt suppresses Codex's resume-goal dialog. Restore active
+    # goals first; otherwise the interruption's temporary pause is mistaken for
+    # a human pause. A controller continuation can be queued after restoration.
+    initial_continuation, deferred_continuation = continuation_policy(before, interrupted_for_update, continuation)
+    enter_command(target, shlex.join(launch_arguments(target, config, initial_continuation)))
     deadline = time.monotonic() + 90
     selected = False
     updated = None
@@ -242,7 +252,7 @@ def reload_target(target, config, state, drain_seconds=45, continuation=None):
         current_goal = goal(home, current['id']) if updated else None
         goal_ready = (not before or before['status'] in ('complete', 'usage_limited')
                       or (current_goal and current_goal['status'] == 'active' and before['status'] in ('active', 'blocked'))
-                      or (before['status'] == 'paused' and selected and current_goal and current_goal['status'] == 'paused'))
+                      or (before['status'] == 'paused' and (selected or continuation) and current_goal and current_goal['status'] == 'paused'))
         if (updated and replacement_seen_at is not None and time.monotonic() - replacement_seen_at >= 3
                 and goal_ready and 'Resume paused goal?' not in text
                 and ('Ask Codex to do anything' in text or busy(text))):
@@ -257,6 +267,11 @@ def reload_target(target, config, state, drain_seconds=45, continuation=None):
         raise RuntimeError('Goal identity changed during reload.')
     if before and before['status'] in ('paused', 'complete', 'usage_limited') and after['status'] != before['status']:
         raise RuntimeError('A paused or terminal goal changed status during reload.')
+    if deferred_continuation:
+        text = capture(updated, state)
+        if not empty_composer(text):
+            raise RuntimeError('Controller continuation was not queued over pending input.')
+        enter_command(updated, deferred_continuation)
     return {'screen': target['screen'], 'window': target['window'], 'thread_id': current['id'],
             'old_pid': target['pid'], 'new_pid': updated['pid'], 'model': current['model'],
             'reasoning_effort': current['reasoning_effort'], 'goal_before': before, 'goal_after': after,
@@ -283,6 +298,10 @@ def main():
     os.umask(0o077)
     args.state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     config = json.loads(args.config.read_text())
+    controller_guard = None
+    if args.wait_controller_idle:
+        controller_guard = (args.config.parent / 'controller-handoff.lock').open('a')
+        fcntl.flock(controller_guard, fcntl.LOCK_EX | fcntl.LOCK_NB)
     with (args.state_dir / 'reload.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         targets = inventory(args.controller_thread)
@@ -311,6 +330,7 @@ def main():
                 if stable < 2:
                     raise RuntimeError('Controller never became idle; no restart was attempted.')
             try:
+                config = json.loads(args.config.read_text())
                 result = reload_target(target, config, args.state_dir, continuation=args.continuation if target['controller'] else None)
             except Exception as error:
                 result = {'screen': target['screen'], 'thread_id': target['thread']['id'],

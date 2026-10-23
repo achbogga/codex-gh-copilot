@@ -35,6 +35,16 @@ class ScreenSessionTests(unittest.TestCase):
         self.assertTrue(sessions.busy('Compacting context (2m, esc to interrupt)\n' + idle))
         self.assertFalse(sessions.empty_composer(idle.replace('Ask Codex to do anything', 'unsent draft')))
 
+    def test_active_goals_restore_before_any_prompt_can_suppress_the_resume_dialog(self):
+        for status in ('active', 'blocked'):
+            self.assertEqual(sessions.continuation_policy({'status': status}, True, None), (None, None))
+            self.assertEqual(sessions.continuation_policy({'status': status}, True, 'Verify handoff.'), (None, 'Verify handoff.'))
+        initial, deferred = sessions.continuation_policy(None, True, None)
+        self.assertIn('Continue the interrupted user task', initial)
+        self.assertIsNone(deferred)
+        self.assertEqual(sessions.continuation_policy({'status': 'paused'}, False, 'Continue only the user status request.'),
+                         ('Continue only the user status request.', None))
+
     def test_changed_writer_or_thread_prevents_any_screen_input(self):
         target = self.target()
         with patch.object(sessions, 'alive', return_value=False), patch.object(sessions, 'stuff') as stuff:

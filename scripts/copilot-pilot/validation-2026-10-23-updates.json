@@ -1,10 +1,10 @@
 {
-  "validated_at": "2026-10-23T16:09:44.974205+00:00",
+  "validated_at": "2026-10-23T16:25:20.423460+00:00",
   "phase": "runtime-updated-and-seven-screens-restored; controller handoff pending",
   "upstream": {
-    "commit": "2839ed763",
-    "merged_commits": 73,
-    "merge_commit": "fef7a7d51b2b73d8062fade908f04a032748f350"
+    "commit": "810501d60d242b6195a9b92b01f37f5e95f5c97d",
+    "merged_commits": 76,
+    "merge_commit": "0b8d92699f934559e6922319e0478af95ace906c"
   },
   "installed": {
     "codex": "0.164.0",
@@ -28,7 +28,7 @@
       "synthetic_active_stream_ms": 5000
     },
     "maintenance_native_screen_and_watch": {
-      "passed": 43,
+      "passed": 44,
       "failed": 0
     },
     "updater_and_installer_python": {
@@ -74,7 +74,8 @@
     "same_screen_shell_environment_preserved": true,
     "completed_goal_state_preserved": true,
     "actual_user_pauses_preserved": true,
-    "controller_reload": "Separate supervisor after current turn completes; final verification pending."
+    "controller_reload": "Separate supervisor after current turn completes; final verification pending.",
+    "updater_pause_regression": "Active goals resume without a positional prompt suppressing their native dialog. The updater-created pause is not treated as a manual approval gate."
   },
   "saved_workflow": {
     "command": "cxf update",
@@ -82,7 +83,7 @@
     "source_only": "cxf update --sync",
     "check_only": "cxf update --check",
     "instructions": "AGENTS.md",
-    "one_command_end_to_end_run": "pending final clean-tree invocation"
+    "one_command_end_to_end_run": "Executed live; detected updater-owned temporary pause; corrected the resume path and verified all seven exact threads. Controller handoff pending."
   },
   "limits": [
     "Remote transport failures can still occur; no universal provider reliability or rejection bypass is claimed.",
