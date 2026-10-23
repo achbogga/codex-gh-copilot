@@ -38,8 +38,16 @@ class RecoveryTests(unittest.TestCase):
                 self.assertIsNotNone(self.reason(goal={**self.goal, 'status': status}))
         self.assertEqual(self.reason(goal={**self.goal, 'goal_id': 'replacement'}), 'goal-absent-or-replaced')
         self.assertEqual(self.reason(goal={**self.goal, 'token_budget': 7_000_000}), 'native-budget-reached')
-        self.assertEqual(self.reason(goal={**self.goal, 'tokens_used': 10_000_000}), 'human-strategy-review-required')
+        self.assertIsNone(self.reason(goal={**self.goal, 'tokens_used': 10_000_000}))
         self.assertIsNone(self.reason())
+
+    def test_strategy_review_and_then_proceed_does_not_impose_a_manual_approval_gate(self):
+        # Old configuration must not reinstate the incorrect approval gate.
+        self.assertEqual(self.config['review_at_tokens'], 10_000_000)
+        self.config['strategy_review_interval_tokens'] = 5_000_000
+        self.assertIsNone(self.reason(goal={**self.goal, 'tokens_used': 12_300_779}))
+        self.assertEqual(self.reason(goal={**self.goal, 'status': 'paused'}), 'goal-paused')
+        self.assertEqual(self.reason(goal={**self.goal, 'tokens_used': 12_300_779, 'token_budget': 10_000_000}), 'native-budget-reached')
 
     def test_old_scrollback_real_blockers_and_later_user_activity_cannot_authorize_resume(self):
         self.assertEqual(self.reason(evidence={**self.evidence, 'completion': None}), 'no-confirmed-transport-failure')
@@ -154,13 +162,13 @@ class RecoveryTests(unittest.TestCase):
                 if change == 'different-rollout':
                     (entry / 'fd/35').unlink(); (entry / 'fd/35').symlink_to(rollout)
 
-    def exercise_check(self, *, apply, native=None, screens=None, ledger=None, started_at=900):
+    def exercise_check(self, *, apply, native=None, screens=None, ledger=None, started_at=900, now=1100):
         if ledger:
             (self.root / 'recovery.json').write_text(json.dumps(ledger))
         free = type('Free', (), {'f_bavail': 20 * 1024**3, 'f_frsize': 1})()
         with (patch.object(watch, 'read_native', side_effect=native or [(self.goal, self.root)] * 4),
               patch.object(watch, 'rollout_evidence', return_value=self.evidence),
-              patch.object(watch.time, 'time', return_value=1100),
+              patch.object(watch.time, 'time', return_value=now),
               patch.object(watch.time, 'sleep'),
               patch.object(watch.os, 'statvfs', return_value=free),
               patch.object(watch, 'detached_screen', return_value='123.fastpath'),
@@ -247,6 +255,18 @@ class RecoveryTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             watch.native_identity(self.config, '123.fastpath', rollout, self.root / 'proc')
 
+    def test_unrelated_descriptor_closing_during_inspection_does_not_hide_the_live_rollout(self):
+        rollout = self.root / 'rollout-thread.jsonl'
+        entry = self.make_proc(456, 123, rollout)
+        (entry / 'fd/99').symlink_to('socket:123')
+        readlink = os.readlink
+        def closing_fd(path):
+            if Path(path).name == '99':
+                raise FileNotFoundError('Descriptor closed.')
+            return readlink(path)
+        with patch.object(watch.os, 'readlink', side_effect=closing_fd):
+            self.assertEqual(watch.native_identity(self.config, '123.fastpath', rollout, self.root / 'proc'), (456, '12345'))
+
     def test_overlapping_cron_checks_are_locked_out(self):
         config = self.root / 'config.json'
         config.write_text(json.dumps({**self.config, 'state_dir': str(self.root)}))
@@ -258,6 +278,109 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout)['status'], 'another-check-is-running')
         self.assertFalse((self.root / 'recovery.json').exists())
+
+    def pending_ledger(self):
+        return {'attempts': [{'at': 1050, 'failure_at': 1000}], 'consecutive_attempts': 1,
+                'last_failure_at': 1000, 'pending_compaction': {
+                    'at': 1050, 'goal_id': 'goal', 'goal_updated_at_ms': self.goal['updated_at_ms'],
+                    'native_identity': [456, '12345']}}
+
+    def completed_compaction(self):
+        return {**self.evidence, 'started_at': 1060, 'user_message_at': 800, 'compacted_at': 1079,
+                'completion': {'at': 1080, 'failed': False, 'failure_code': None}}
+
+    def test_compaction_requires_opt_in_and_a_large_confirmed_failed_context(self):
+        evidence = {'input_tokens': 711255, 'context_window': 997500}
+        self.assertFalse(watch.needs_compaction(self.config, evidence))
+        self.config['compact_after_transport_failure'] = True
+        self.assertTrue(watch.needs_compaction(self.config, evidence))
+        self.assertFalse(watch.needs_compaction(self.config, {**evidence, 'input_tokens': 1000}))
+        self.assertFalse(watch.needs_compaction(self.config, {}))
+        self.assertFalse(watch.needs_compaction(self.config, {**evidence, 'context_window': 0}))
+        self.config['compact_failure_context_fraction'] = .1
+        self.assertFalse(watch.needs_compaction(self.config, evidence))
+
+    def test_large_transport_failure_requests_native_compaction_once_before_resume(self):
+        self.config['compact_after_transport_failure'] = True
+        self.evidence.update({'input_tokens': 711255, 'context_window': 997500})
+        result, calls = self.exercise_check(apply=False)
+        self.assertEqual(result['status'], 'would-compact')
+        self.assertEqual(calls, [])
+        self.assertFalse((self.root / 'recovery.json').exists())
+        result, calls = self.exercise_check(apply=True, screens=[EMPTY_SCREEN, EMPTY_SCREEN,
+                                                               PENDING_SCREEN.replace('/goal resume', '/compact')])
+        self.assertEqual(result['status'], 'compaction-requested')
+        self.assertEqual([call.args[0][-1] for call in calls], ['/compact', '\r'])
+        ledger = json.loads((self.root / 'recovery.json').read_text())
+        self.assertEqual(ledger['consecutive_attempts'], 1)
+        self.assertEqual(ledger['pending_compaction']['native_identity'], [456, '12345'])
+
+    def test_pending_compaction_is_observed_without_resubmitting_or_interrupting_it(self):
+        self.evidence['started_at'] = 1060
+        result, calls = self.exercise_check(apply=True, ledger=self.pending_ledger(),
+                                            screens=['Compacting context (2m, esc to interrupt)\n' + EMPTY_SCREEN])
+        self.assertEqual(result['status'], 'compaction-in-progress')
+        self.assertEqual(calls, [])
+        self.assertIn('pending_compaction', json.loads((self.root / 'recovery.json').read_text()))
+
+    def test_only_persisted_successful_compaction_can_resume_without_spending_another_allowance(self):
+        self.evidence = self.completed_compaction()
+        result, calls = self.exercise_check(apply=False, ledger=self.pending_ledger())
+        self.assertEqual(result['status'], 'would-resume-after-compaction')
+        self.assertEqual(calls, [])
+        native = [(self.goal, self.root)] * 3 + [({**self.goal, 'status': 'active'}, self.root)]
+        result, calls = self.exercise_check(apply=True, ledger=self.pending_ledger(), native=native)
+        self.assertEqual(result['status'], 'resume-accepted')
+        self.assertEqual([call.args[0][-1] for call in calls], ['/goal resume', '\r'])
+        ledger = json.loads((self.root / 'recovery.json').read_text())
+        self.assertNotIn('pending_compaction', ledger)
+        self.assertEqual(ledger['consecutive_attempts'], 1)
+        self.assertEqual(len(ledger['attempts']), 1)
+
+    def test_compaction_failure_cannot_be_mistaken_for_success_or_retried_automatically(self):
+        for code in (None, 'UND_ERR_SOCKET'):
+            self.evidence = {**self.completed_compaction(), 'completion': {
+                'at': 1080, 'failed': True, 'failure_code': code}}
+            result, calls = self.exercise_check(apply=True, ledger=self.pending_ledger())
+            self.assertEqual(result['status'], 'compaction-failed-needs-review')
+            self.assertEqual(calls, [])
+            result, calls = self.exercise_check(apply=True, now=3000)
+            self.assertEqual(result['status'], 'compaction-failed-needs-review')
+            self.assertEqual(calls, [])
+
+    def test_pause_budget_user_activity_process_change_and_timeout_stop_pending_recovery(self):
+        for status in ('paused', 'complete', 'usage_limited'):
+            result, calls = self.exercise_check(apply=True, ledger=self.pending_ledger(),
+                                                native=[({**self.goal, 'status': status}, self.root)])
+            self.assertEqual(result['status'], 'goal-' + status)
+            self.assertEqual(calls, [])
+            self.assertNotIn('pending_compaction', json.loads((self.root / 'recovery.json').read_text()))
+        self.evidence = {**self.completed_compaction(), 'user_message_at': 1061}
+        result, calls = self.exercise_check(apply=True, ledger=self.pending_ledger())
+        self.assertEqual(result['status'], 'compaction-state-changed-needs-review')
+        self.assertEqual(calls, [])
+        self.evidence = self.completed_compaction()
+        ledger = self.pending_ledger(); ledger['pending_compaction']['native_identity'] = [789, 'different']
+        result, calls = self.exercise_check(apply=True, ledger=ledger)
+        self.assertEqual(result['status'], 'compaction-process-changed-needs-review')
+        self.assertEqual(calls, [])
+        result, calls = self.exercise_check(apply=True, ledger=self.pending_ledger(), now=5000)
+        self.assertEqual(result['status'], 'compaction-timeout-needs-review')
+        self.assertEqual(calls, [])
+        result, calls = self.exercise_check(apply=True, ledger=self.pending_ledger(),
+                                            native=[({**self.goal, 'token_budget': 1}, self.root)])
+        self.assertEqual(result['status'], 'native-budget-reached')
+        self.assertEqual(calls, [])
+
+    def test_missing_compaction_record_or_pending_user_draft_cannot_authorize_resume(self):
+        self.evidence = self.completed_compaction(); self.evidence['compacted_at'] = 0
+        result, calls = self.exercise_check(apply=True, ledger=self.pending_ledger(), now=1200)
+        self.assertEqual(result['status'], 'compaction-not-confirmed-needs-review')
+        self.assertEqual(calls, [])
+        self.evidence = self.completed_compaction()
+        result, calls = self.exercise_check(apply=True, ledger=self.pending_ledger(), screens=[': unfinished human draft\n'])
+        self.assertEqual(result['status'], 'compaction-screen-changed-needs-review')
+        self.assertEqual(calls, [])
 
 
 if __name__ == '__main__':

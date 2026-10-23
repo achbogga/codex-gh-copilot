@@ -23,6 +23,12 @@ spec.loader.exec_module(watch)
                      'Set COPILOT_PILOT_CODEX_BIN to run the installed-native Screen regression.')
 class NativeRecoveryTests(unittest.TestCase):
     def test_native_goal_recovers_in_the_same_screen_and_runs_a_real_shell_tool(self):
+        self.run_native_recovery(compact=False)
+
+    def test_native_compaction_completes_before_the_same_goal_resumes_and_runs_tools(self):
+        self.run_native_recovery(compact=True)
+
+    def run_native_recovery(self, compact):
         with tempfile.TemporaryDirectory(prefix='codex-watch-native-') as directory:
             root = Path(directory)
             home = root / 'state'
@@ -33,13 +39,14 @@ class NativeRecoveryTests(unittest.TestCase):
             marker = root / 'native-tool-result.txt'
             recovered = threading.Event()
             request_count = []
+            compaction_requests = []
 
             class Handler(BaseHTTPRequestHandler):
                 def log_message(self, *_args):
                     pass
 
                 def do_POST(self):
-                    json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+                    body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
                     request_count.append(recovered.is_set())
                     self.send_response(200)
                     self.send_header('Content-Type', 'text/event-stream')
@@ -49,6 +56,13 @@ class NativeRecoveryTests(unittest.TestCase):
                         events = [{'type': 'response.failed', 'response': {'error': {
                             'code': 'stream_interrupted',
                             'message': 'Copilot stream ended before completion (UND_ERR_SOCKET).'}}}]
+                    elif compact and not compaction_requests and 'CONTEXT CHECKPOINT COMPACTION' in json.dumps(body):
+                        compaction_requests.append(True)
+                        events = [{'type': 'response.output_item.done', 'item': {
+                            'type': 'message', 'id': 'summary', 'role': 'assistant',
+                            'content': [{'type': 'output_text', 'text': 'Continue the synthetic local recovery goal. No tools have run yet.'}]}},
+                            {'type': 'response.completed', 'response': {'id': 'compacted', 'usage': {
+                                'input_tokens': 1, 'output_tokens': 1, 'total_tokens': 2}}}]
                     elif not marker.exists():
                         events = [{'type': 'response.output_item.done', 'item': {
                             'type': 'custom_tool_call', 'call_id': 'native-watch-shell',
@@ -125,10 +139,26 @@ class NativeRecoveryTests(unittest.TestCase):
                 self.assertIsNotNone(goal)
                 self.assertEqual(goal['status'], 'blocked')
                 config['goal_id'] = goal['goal_id']
+                config['compact_after_transport_failure'] = compact
                 recovered.set()
                 # Failure-age grace is advanced only for this synthetic check;
                 # all identity, native state, input and acceptance checks are real.
-                with patch.object(watch.time, 'time', return_value=time.time() + 61):
+                original_gate = watch.blocked_reason
+                with (patch.object(watch, 'blocked_reason', side_effect=lambda c, g, e, l, n: original_gate(c, g, e, l, n + 61)),
+                      patch.object(watch, 'needs_compaction', return_value=compact)):
+                    result = watch.check(config, state, apply=True)
+                if compact:
+                    self.assertEqual(result['status'], 'compaction-requested', result)
+                    deadline = time.monotonic() + 15
+                    while time.monotonic() < deadline:
+                        _, rollout = watch.read_native(config)
+                        evidence = watch.rollout_evidence(rollout)
+                        if evidence['compacted_at'] and evidence['completion'] and evidence['completion']['at'] >= evidence['compacted_at']:
+                            break
+                        time.sleep(.1)
+                    self.assertEqual(len(compaction_requests), 1)
+                    self.assertFalse(marker.exists(), 'The goal must not execute tools while it is still compacting.')
+                    self.assertIn('pending_compaction', json.loads((state / 'recovery.json').read_text()))
                     result = watch.check(config, state, apply=True)
                 self.assertEqual(result['status'], 'resume-accepted', result)
                 deadline = time.monotonic() + 15

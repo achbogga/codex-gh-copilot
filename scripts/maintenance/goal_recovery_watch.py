@@ -1,8 +1,9 @@
 #!/usr/bin/python3
 """Bounded, opt-in Screen recovery for an exact native goal's transport failure.
 
-Healthy checks make no model calls. Native state is read-only; the only recovery
-command is /goal resume in the existing, verified, detached Screen window.
+Healthy checks make no model calls. Native state is read-only; recovery uses the
+existing, verified, detached Screen window. Large failed histories may opt into
+native /compact before /goal resume, without lowering the model context limit.
 """
 
 import argparse
@@ -43,7 +44,8 @@ def read_native(config):
 def rollout_evidence(path):
     """Read a bounded suffix; absent/truncated evidence can never authorize input."""
     result = {'completion': None, 'started_at': 0, 'tool_result_at': 0,
-              'user_message_at': 0}
+              'user_message_at': 0, 'compacted_at': 0,
+              'input_tokens': None, 'context_window': None}
     with path.open('rb') as source:
         source.seek(max(0, path.stat().st_size - TAIL_BYTES))
         lines = source.read(TAIL_BYTES).splitlines()
@@ -61,27 +63,40 @@ def rollout_evidence(path):
                     error = payload.get('error') or {}
                     match = TRANSIENT.fullmatch(error.get('message', ''))
                     result['completion'] = {
-                        'at': timestamp, 'failure_code': match[1] if match else None}
+                        'at': timestamp, 'failure_code': match[1] if match else None,
+                        'failed': bool(error)}
                 elif kind == 'task_started':
                     result['started_at'] = timestamp
                 elif kind in ('user_message', 'turn_aborted'):
                     result['user_message_at'] = timestamp
+                elif kind == 'token_count':
+                    info = payload.get('info') or {}
+                    result['input_tokens'] = (info.get('last_token_usage') or {}).get('input_tokens')
+                    result['context_window'] = info.get('model_context_window')
+            elif event.get('type') == 'compacted':
+                result['compacted_at'] = timestamp
             elif event.get('type') == 'response_item' and payload.get('type') in (
                     'function_call_output', 'custom_tool_call_output'):
                 result['tool_result_at'] = timestamp
     return result
 
 
-def blocked_reason(config, goal, evidence, ledger, now):
+def goal_guard(config, goal):
     if not goal or goal['goal_id'] != config['goal_id']:
         return 'goal-absent-or-replaced'
     if goal['status'] != 'blocked':
         return 'goal-' + goal['status']
     if goal['token_budget'] is not None and goal['tokens_used'] >= goal['token_budget']:
         return 'native-budget-reached'
-    review = config.get('review_at_tokens')
-    if review is not None and goal['tokens_used'] >= review:
-        return 'human-strategy-review-required'
+    return None
+
+
+def blocked_reason(config, goal, evidence, ledger, now):
+    reason = goal_guard(config, goal)
+    if reason:
+        return reason
+    if ledger.get('halted_reason'):
+        return ledger['halted_reason']
     completion = evidence['completion']
     if not completion or not completion['failure_code']:
         return 'no-confirmed-transport-failure'
@@ -148,8 +163,16 @@ def native_identity(config, session, rollout, proc=Path('/proc')):
                 parent = int((proc / str(parent) / 'stat').read_text().rsplit(')', 1)[1].split()[1])
             if parent != screen_pid:
                 continue
-            rollouts = {Path(os.readlink(fd)) for fd in (entry / 'fd').iterdir()
-                        if 'rollout-' in os.readlink(fd)}
+            rollouts = set()
+            for fd in (entry / 'fd').iterdir():
+                try:
+                    target = os.readlink(fd)
+                except FileNotFoundError:
+                    # Network/tool descriptors can close during inspection.
+                    # The exact live rollout descriptor is still mandatory.
+                    continue
+                if 'rollout-' in target:
+                    rollouts.add(Path(target))
             if rollouts != {rollout}:
                 continue
             matches.append((int(entry.name), fields[19]))  # PID + Linux start time
@@ -194,6 +217,97 @@ def save_json(path, value):
     temporary.replace(path)
 
 
+def needs_compaction(config, evidence):
+    fraction = config.get('compact_failure_context_fraction', .65)
+    tokens, window = evidence.get('input_tokens'), evidence.get('context_window')
+    return bool(config.get('compact_after_transport_failure')
+                and isinstance(fraction, (int, float)) and .5 <= fraction <= 1
+                and isinstance(tokens, (int, float)) and isinstance(window, (int, float))
+                and window > 0 and tokens >= fraction * window)
+
+
+def submit_command(config, state, goal, rollout, session, identity, text):
+    assert text in ('/goal resume', '/compact')
+    command = ['screen', '-S', session, '-p', str(config.get('window', 0)), '-X', 'stuff']
+    subprocess.run([*command, text], check=True, timeout=10)
+    time.sleep(.4)  # Codex paste detection requires a separate Enter.
+    current, _ = read_native(config)
+    if (current != goal or detached_screen(config['screen_name']) != session
+            or native_identity(config, session, rollout) != identity):
+        return 'state-changed-before-enter-needs-review'
+    pending = capture_screen(session, config.get('window', 0), state).splitlines()[-7:]
+    if not any(re.fullmatch(r'[^\w]{1,6}' + re.escape(text) + r'\s*', line) for line in pending):
+        return 'composer-changed-before-enter-needs-review'
+    subprocess.run([*command, '\r'], check=True, timeout=10)
+    return None
+
+
+def wait_for_active(config):
+    # Submission is not successful inference. Verify native acceptance only.
+    for _ in range(16):
+        time.sleep(.25)
+        after, _ = read_native(config)
+        if after and after['goal_id'] == config['goal_id'] and after['status'] == 'active':
+            return 'resume-accepted'
+        if not after or after['goal_id'] != config['goal_id'] or after['status'] != 'blocked':
+            break
+    return 'resume-not-confirmed-needs-review'
+
+
+def continue_compaction(config, state, goal, rollout, evidence, ledger, now, apply):
+    pending = ledger['pending_compaction']
+
+    def halt(reason):
+        if apply:
+            ledger.pop('pending_compaction', None)
+            ledger['halted_reason'] = reason
+            save_json(state / 'recovery.json', ledger)
+        return {'status': reason}
+
+    if (pending['goal_id'] != goal['goal_id']
+            or pending['goal_updated_at_ms'] != goal['updated_at_ms']
+            or evidence.get('user_message_at', 0) > pending['at']):
+        return halt('compaction-state-changed-needs-review')
+    if now - pending['at'] > 3600:
+        return halt('compaction-timeout-needs-review')
+    free = os.statvfs(config['project'])
+    if free.f_bavail * free.f_frsize / 1024**3 < config.get('min_free_gib', 4):
+        return {'status': 'disk-pressure-needs-review'}
+    session = detached_screen(config['screen_name'])
+    identity = native_identity(config, session, rollout)
+    if list(identity) != pending['native_identity']:
+        return halt('compaction-process-changed-needs-review')
+    completion = evidence.get('completion')
+    if completion and completion['at'] >= pending['at'] and completion.get('failed'):
+        return halt('compaction-failed-needs-review')
+    compacted_at = evidence.get('compacted_at', 0)
+    ready = (compacted_at >= pending['at'] and completion
+             and completion['at'] >= compacted_at and completion.get('failed') is False
+             and evidence['started_at'] <= completion['at'])
+    screen = capture_screen(session, config.get('window', 0), state)
+    if not ready:
+        if 'Compacting context' in '\n'.join(screen.splitlines()[-12:]):
+            return {'status': 'compaction-in-progress'}
+        if now - pending['at'] < 60:
+            return {'status': 'compaction-in-progress'}
+        return halt('compaction-not-confirmed-needs-review')
+    if not idle_stalled_prompt(screen):
+        return halt('compaction-screen-changed-needs-review')
+    if not apply:
+        return {'status': 'would-resume-after-compaction', 'native_pid': identity[0]}
+    current, current_rollout = read_native(config)
+    if (current != goal or current_rollout != rollout
+            or detached_screen(config['screen_name']) != session
+            or native_identity(config, session, rollout) != identity
+            or not idle_stalled_prompt(capture_screen(session, config.get('window', 0), state))):
+        return halt('compaction-state-changed-needs-review')
+    # Clear the pending action before input: a crash can never replay it.
+    ledger.pop('pending_compaction')
+    save_json(state / 'recovery.json', ledger)
+    issue = submit_command(config, state, goal, rollout, session, identity, '/goal resume')
+    return {'status': issue or wait_for_active(config), 'native_pid': identity[0]}
+
+
 def check(config, state, apply=False):
     now = time.time()
     ledger_path = state / 'recovery.json'
@@ -203,13 +317,21 @@ def check(config, state, apply=False):
               'thread_id': config['thread_id'], 'goal': goal}
     if not goal or goal['goal_id'] != config['goal_id'] or not rollout:
         return {**result, 'status': 'goal-absent-or-replaced'}
-    evidence = rollout_evidence(rollout) if goal['status'] == 'blocked' or ledger.get('consecutive_attempts') else {}
+    evidence = rollout_evidence(rollout) if goal['status'] == 'blocked' or ledger.get('consecutive_attempts') or ledger.get('pending_compaction') else {}
     if (ledger.get('attempts') and evidence.get('tool_result_at', 0) > ledger['attempts'][-1]['at']):
         ledger['consecutive_attempts'] = 0
+        ledger.pop('halted_reason', None)
         if apply:
             save_json(ledger_path, ledger)
     if goal['status'] != 'blocked':
+        if ledger.pop('pending_compaction', None) and apply:
+            save_json(ledger_path, ledger)
         return {**result, 'status': 'goal-' + goal['status']}
+    guard = goal_guard(config, goal)
+    if guard:
+        return {**result, 'status': guard}
+    if ledger.get('pending_compaction'):
+        return {**result, **continue_compaction(config, state, goal, rollout, evidence, ledger, now, apply)}
     reason = blocked_reason(config, goal, evidence, ledger, now)
     if reason:
         return {**result, 'status': reason}
@@ -226,8 +348,9 @@ def check(config, state, apply=False):
         return {**result, 'status': 'failure-precedes-current-native-process'}
     if not idle_stalled_prompt(capture_screen(session, config.get('window', 0), state)):
         return {**result, 'status': 'screen-busy-or-composer-not-empty'}
+    compact = needs_compaction(config, evidence)
     if not apply:
-        return {**result, 'status': 'would-resume', 'native_pid': identity[0]}
+        return {**result, 'status': 'would-compact' if compact else 'would-resume', 'native_pid': identity[0]}
     # Recheck identity and persisted state immediately before any terminal input.
     current, current_rollout = read_native(config)
     if current != goal or current_rollout != rollout or detached_screen(config['screen_name']) != session:
@@ -241,27 +364,18 @@ def check(config, state, apply=False):
     ledger['attempts'].append({'at': now, 'failure_at': evidence['completion']['at']})
     ledger['consecutive_attempts'] = ledger.get('consecutive_attempts', 0) + 1
     ledger['last_failure_at'] = evidence['completion']['at']
+    if compact:
+        ledger['pending_compaction'] = {
+            'at': now, 'goal_id': goal['goal_id'], 'goal_updated_at_ms': goal['updated_at_ms'],
+            'native_identity': list(identity)}
     save_json(ledger_path, ledger)
-    command = ['screen', '-S', session, '-p', str(config.get('window', 0)), '-X', 'stuff']
-    subprocess.run([*command, '/goal resume'], check=True, timeout=10)
-    time.sleep(.4)  # Codex paste detection requires a separate Enter.
-    current, _ = read_native(config)
-    if (current != goal or detached_screen(config['screen_name']) != session
-            or native_identity(config, session, rollout) != identity):
-        return {**result, 'status': 'state-changed-before-enter-needs-review'}
-    pending = capture_screen(session, config.get('window', 0), state).splitlines()[-7:]
-    if not any(re.fullmatch(r'[^\w]{1,6}/goal resume\s*', line) for line in pending):
-        return {**result, 'status': 'composer-changed-before-enter-needs-review'}
-    subprocess.run([*command, '\r'], check=True, timeout=10)
-    # Submission is not successful inference. Verify native acceptance only.
-    for _ in range(16):
-        time.sleep(.25)
-        after, _ = read_native(config)
-        if after and after['goal_id'] == config['goal_id'] and after['status'] == 'active':
-            return {**result, 'status': 'resume-accepted', 'native_pid': identity[0]}
-        if not after or after['goal_id'] != config['goal_id'] or after['status'] != 'blocked':
-            break
-    return {**result, 'status': 'resume-not-confirmed-needs-review'}
+    issue = submit_command(config, state, goal, rollout, session, identity, '/compact' if compact else '/goal resume')
+    if issue and compact:
+        ledger.pop('pending_compaction', None)
+        ledger['halted_reason'] = issue
+        save_json(ledger_path, ledger)
+    status = issue or ('compaction-requested' if compact else wait_for_active(config))
+    return {**result, 'status': status, 'native_pid': identity[0]}
 
 
 def main():
@@ -291,7 +405,9 @@ def main():
         alert = result['status'] not in ('goal-active', 'goal-paused', 'goal-complete',
                                          'goal-completed', 'goal-usage_limited',
                                          'goal-absent-or-replaced', 'would-resume',
-                                         'resume-accepted', 'recovery-cooldown')
+                                         'resume-accepted', 'recovery-cooldown', 'would-compact',
+                                         'compaction-requested', 'compaction-in-progress',
+                                         'would-resume-after-compaction')
         if alert:
             (state / 'alert.txt').write_text(json.dumps(result, indent=2) + '\n')
         else:
