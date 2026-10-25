@@ -16,7 +16,7 @@ import {
 } from "./responses-tools.mjs";
 import { messagesResponse } from "./anthropic-stream.mjs";
 import { responsesResponse } from "./responses-stream.mjs";
-import { appendFileSync, statSync } from "node:fs";
+import { appendDiagnostic } from "./diagnostics.mjs";
 import { runtimeAcknowledgement } from "./runtime-ack.mjs";
 import {
   restoreModelState,
@@ -64,27 +64,7 @@ export async function createSdkTransport({
   let catalog;
   let runtimeModels = [];
   const agentRecovery = loadAgentRecovery(agentRecoveryFile);
-  const diagnose = (details) => {
-    if (!diagnosticFile) return;
-    try {
-      let size = 0;
-      try {
-        size = statSync(diagnosticFile).size;
-      } catch (error) {
-        if (error.code !== "ENOENT") return;
-      }
-      if (size < 1024 * 1024)
-        appendFileSync(
-          diagnosticFile,
-          JSON.stringify({
-            time: new Date().toISOString(),
-            process_id: process.pid,
-            ...details,
-          }) + "\n",
-          { mode: 0o600 },
-        );
-    } catch {} // Diagnostics must never interrupt inference.
-  };
+  const diagnose = (details) => appendDiagnostic(diagnosticFile, details);
   class Handler extends CopilotRequestHandler {
     async sendRequest(request, context) {
       const job = pending.get(context.sessionId);

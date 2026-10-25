@@ -1,0 +1,49 @@
+{
+  "validated_at": "2026-10-25T19:49:41.922424+00:00",
+  "phase": "exact native session recovered; probe-free replacement executing real project tools",
+  "observed_failure": {
+    "protocol": "Responses streaming inference error",
+    "code": "invalid_prompt",
+    "native_goal_status": "blocked",
+    "last_successful_input_tokens": 516149,
+    "effective_context_window_tokens": 997500,
+    "recognized_context_overflow_observed": false,
+    "underlying_provider_reason": "Not retained: the shared diagnostic log had reached its 1 MiB append cap. The rejection has not recurred during this inspection."
+  },
+  "recovery": {
+    "exact_native_thread_preserved": true,
+    "exact_native_goal_preserved": true,
+    "model": "gpt-6.1-sol",
+    "reasoning_effort": "max",
+    "native_compaction_completed": true,
+    "native_compaction_duration_seconds": 145,
+    "post_compaction_input_tokens": 36842,
+    "fresh_real_project_tool_results_verified": true,
+    "native_rollout_or_database_edited": false,
+    "ciphertext_decrypted_or_discarded_by_adapter": false,
+    "new_provider_rejection_observed": false,
+    "final_probe_free_reload_verified": true,
+    "diagnostic_rotation_loaded_in_replacement": true,
+    "final_native_goal_status": "active",
+    "fresh_real_tool_results_after_final_reload_verified": true,
+    "codex_version": "0.164.0"
+  },
+  "repair": {
+    "diagnostic_append_cap_replaced_with_rotation": true,
+    "retained_rotated_generations": 3,
+    "rotation_shared_between_screen_bridges": true,
+    "stale_rotation_lock_recovery_seconds": 30,
+    "prompts_credentials_ciphertext_excluded_from_diagnostics": true,
+    "active_log_byte_limit": 1048576
+  },
+  "tests": {
+    "bridge_transport_stream_and_diagnostics_passed": 31,
+    "failed": 0,
+    "skipped": 0
+  },
+  "limits": [
+    "The lost provider error body cannot be reconstructed. A specific authentication, policy, encryption, context or schema cause is not established for the original invalid_prompt.",
+    "Successful compaction and fresh tools verify session recovery, not universal prevention of remote provider rejections.",
+    "Other healthy Screen processes were not restarted for this targeted repair."
+  ]
+}
