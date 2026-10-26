@@ -1,6 +1,6 @@
 {
-  "validated_at": "2026-10-26T01:31:47.085581+00:00",
-  "phase": "prevention tested and watch deployed; existing native compaction still running; runtime overrides await safe reload",
+  "validated_at": "2026-10-26T01:40:08.027995+00:00",
+  "phase": "native compaction completed; current goal resumed automatically; replacement runtime and fresh project tools verified",
   "observed_failure": {
     "native_error": "context_window_exceeded",
     "upstream_status": 400,
@@ -57,13 +57,27 @@
     "same_native_thread_and_current_goal_preserved": true,
     "native_rollout_and_databases_not_edited": true,
     "active_compaction_not_interrupted": true,
-    "fresh_real_tool_results_after_recovery_verified": false,
-    "runtime_overrides_verified_in_replacement": false
+    "fresh_real_tool_results_after_recovery_verified": true,
+    "runtime_overrides_verified_in_replacement": true,
+    "native_compaction_completed": true,
+    "native_compaction_duration_ms": 1099131,
+    "automatic_watch_resumed_same_goal_after_confirmed_compaction": true,
+    "same_goal_active_after_process_replacement": true,
+    "fresh_real_tool_results_after_runtime_replacement_verified": true,
+    "native_executable_matches_immutable_codex_bundle": true,
+    "diagnostic_rotation_loaded_in_replacement": true,
+    "model": "gpt-6.1-sol",
+    "reasoning_effort": "max",
+    "codex_version": "0.164.0",
+    "latest_observed_input_tokens": 97364,
+    "latest_observed_context_window": 997500,
+    "new_provider_failures_in_observed_replacement_turn": false,
+    "watch_ledger_reset_only_after_real_tool_progress": true
   },
   "limits": [
     "The socket failures arrived after about 631 seconds without local cancellation. The exact remote server or intermediary responsible is not established.",
     "These safeguards do not guarantee uninterrupted remote inference; unknown policy, authentication, encryption and quota errors remain terminal.",
     "Watch recovery remains bounded: 15-minute cooldown, two attempts without real tool progress, six attempts per day.",
-    "Current native compaction must finish before the replacement process and final live progress can be verified."
+    "Native local compaction retains its upstream one-item trimming fallback; earlier compaction and watcher-controlled recovery mitigate this path without claiming a new native compactor implementation."
   ]
 }
