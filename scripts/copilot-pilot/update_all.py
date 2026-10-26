@@ -42,7 +42,7 @@ def queue_controller(config_path, maintenance, state, report):
         handoff = subprocess.Popen([sys.executable, str(maintenance), '--config', str(config_path),
                                    '--state-dir', str(state / 'controller'), '--only', target['screen'],
                                    '--controller-thread', target['thread_id'], '--wait-controller-idle',
-                                   '--continuation', note, '--apply'], stdin=subprocess.DEVNULL,
+                                   '--probe-native', '--continuation', note, '--apply'], stdin=subprocess.DEVNULL,
                                   stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
     report['controller_handoff_pid'] = handoff.pid
     print('Controller reload will run after its current turn completes.', flush=True)
@@ -62,7 +62,7 @@ def main():
         state = Path(tempfile.mkdtemp(prefix='update-', dir=root))
         print(f'Update report directory: {state}', flush=True)
         maintenance = repo / 'scripts/maintenance/screen_sessions.py'
-        inventory_args = [sys.executable, str(maintenance), '--config', str(args.config), '--state-dir', str(state / 'screens')]
+        inventory_args = [sys.executable, str(maintenance), '--config', str(args.config), '--state-dir', str(state / 'screens'), '--probe-native']
         # Inventory first, before changes or process interruption.
         run_logged(inventory_args, state / 'inventory.log')
         git_environment = os.environ.copy()

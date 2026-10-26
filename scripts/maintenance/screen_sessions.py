@@ -74,7 +74,7 @@ def goal(home, thread):
     return dict(row) if row else None
 
 
-def inventory(controller=None):
+def inventory(controller=None, status_directory=None, status_screen=None):
     screens = set(re.findall(r'^\s*(\d+\.[^\s]+)\s', command(['screen', '-ls']), re.M))
     targets = []
     defaults = []
@@ -111,10 +111,19 @@ def inventory(controller=None):
             entry = {k: info[k] for k in ('pid', 'start', 'screen', 'window')}
             entry.update({'home': str(home), 'backend': backend, 'launcher_process': launch_process,
                           'thread': thread, 'controller': bool(thread and thread['id'] == controller)})
+            if (not thread and backend == 'native' and status_directory is not None
+                    and (status_screen is None or (entry['screen'], entry['window']) == status_screen)):
+                # Managed app-server clients hold no rollout descriptor. During
+                # an authorized update, ask the existing TUI for its exact ID.
+                identifier = probe_status_thread(entry, status_directory)
+                if identifier:
+                    thread = root_thread(home, info['pid'], identifier)
+                    entry.update({'thread': thread, 'identity_source': 'screen-status',
+                                  'controller': bool(thread and thread['id'] == controller)})
             if thread:
                 entry['goal'] = goal(home, thread['id'])
                 targets.append(entry)
-            elif backend == 'native' and home == Path.home() / '.codex':
+            elif backend == 'native' and home == Path.home() / '.codex' and status_directory is None:
                 defaults.append(entry)
         except (OSError, sqlite3.Error, IndexError):
             continue
@@ -162,6 +171,39 @@ def empty_composer(text):
                for line in text.splitlines()[-7:])
 
 
+def probe_status_thread(target, state):
+    """Read /status from a live TUI; never overwrite input or interrupt a turn."""
+    if not alive(target):
+        return None
+    text = capture(target, state)
+    if not empty_composer(text) or 'Compacting context' in '\n'.join(text.splitlines()[-12:]):
+        return None
+    stuff(target, '/status')
+    time.sleep(.2)
+    text = capture(target, state)
+    if not alive(target) or not any(re.fullmatch(r'[^\w]{1,6}/status\s*', line) for line in text.splitlines()[-7:]):
+        return None
+    stuff(target, '\r')
+    for _ in range(8):
+        time.sleep(.25)
+        text = capture(target, state)
+        if not alive(target):
+            return None
+        ids = re.findall(r'Session:\s*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b', text)
+        if ids and empty_composer(text):
+            return ids[-1]
+    return None
+
+
+def verified_thread(target, state):
+    identifier = target['thread']['id']
+    if target.get('identity_source') == 'screen-status':
+        if probe_status_thread(target, state) != identifier:
+            return None
+        return root_thread(Path(target['home']), target['pid'], identifier)
+    return root_thread(Path(target['home']), target['pid'], identifier if target['controller'] else None)
+
+
 def launch_arguments(target, config, continuation=None):
     thread = target['thread']
     if target['backend'] == 'copilot':
@@ -204,7 +246,7 @@ def reload_target(target, config, state, drain_seconds=45, continuation=None):
     if not alive(target):
         raise RuntimeError('The inventoried native process changed; reinventory before restarting.')
     home = Path(target['home'])
-    current = root_thread(home, target['pid'], target['thread']['id'] if target['controller'] else None)
+    current = verified_thread(target, state)
     if not current or current['id'] != target['thread']['id']:
         raise RuntimeError('The live thread changed; refusing to restart a different session.')
     target['thread'] = current
@@ -257,7 +299,10 @@ def reload_target(target, config, state, drain_seconds=45, continuation=None):
                 time.sleep(.2)
             stuff(target, '\r')
             selected = True
-        for candidate in inventory(current['id'] if target['controller'] else None):
+        # Probe only this replacement's TUI when its daemon owns the rollout.
+        status_args = ({'status_directory': state, 'status_screen': (target['screen'], target['window'])}
+                       if target.get('identity_source') == 'screen-status' else {})
+        for candidate in inventory(current['id'] if target['controller'] else None, **status_args):
             if candidate['screen'] == target['screen'] and candidate['window'] == target['window']:
                 if candidate['pid'] != target['pid'] and candidate['thread']['id'] == current['id']:
                     updated = candidate
@@ -308,6 +353,8 @@ def main():
     parser.add_argument('--only', help='Exact Screen name or suffix to reload.')
     parser.add_argument('--controller-thread', default=os.environ.get('CODEX_THREAD_ID'))
     parser.add_argument('--wait-controller-idle', action='store_true')
+    parser.add_argument('--probe-native', action='store_true',
+                        help='Use guarded /status to identify managed native TUI threads during an update.')
     parser.add_argument('--continuation')
     args = parser.parse_args()
     os.umask(0o077)
@@ -319,7 +366,7 @@ def main():
         fcntl.flock(controller_guard, fcntl.LOCK_EX | fcntl.LOCK_NB)
     with (args.state_dir / 'reload.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        targets = inventory(args.controller_thread)
+        targets = inventory(args.controller_thread, status_directory=args.state_dir if args.probe_native else None)
         if args.only:
             targets = [t for t in targets if t['screen'] == args.only or t['screen'].split('.', 1)[1] == args.only]
             if len(targets) != 1:

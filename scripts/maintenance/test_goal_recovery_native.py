@@ -139,9 +139,14 @@ class NativeRecoveryTests(unittest.TestCase):
                 goal = None
                 while time.monotonic() < deadline:
                     try:
-                        goal, _ = watch.read_native(config)
+                        goal, rollout = watch.read_native(config)
                         if goal and goal['status'] == 'blocked':
-                            break
+                            # The goal SQLite commit can precede the rollout's
+                            # failed-completion record. Recovery correctly waits
+                            # for that durable evidence; the fixture must too.
+                            completion = watch.rollout_evidence(rollout).get('completion') or {}
+                            if completion.get('failed'):
+                                break
                     except sqlite3.OperationalError:
                         pass
                     time.sleep(.2)

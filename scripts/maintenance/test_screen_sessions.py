@@ -1,7 +1,7 @@
 import importlib.util
 from pathlib import Path
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 spec = importlib.util.spec_from_file_location('screen_sessions', Path(__file__).with_name('screen_sessions.py'))
 sessions = importlib.util.module_from_spec(spec)
@@ -34,6 +34,66 @@ class ScreenSessionTests(unittest.TestCase):
         self.assertFalse(sessions.busy(idle))
         self.assertTrue(sessions.busy('Compacting context (2m, esc to interrupt)\n' + idle))
         self.assertFalse(sessions.empty_composer(idle.replace('Ask Codex to do anything', 'unsent draft')))
+
+    def test_status_probe_reads_the_existing_clients_exact_thread_without_a_model_prompt(self):
+        identifier = '11111111-2222-3333-4444-555555555555'
+        idle = ': Ask Codex to do anything\n'
+        status = f'/status\n  Session: {identifier}\n' + idle
+        with (patch.object(sessions, 'alive', return_value=True),
+              patch.object(sessions, 'capture', side_effect=[idle, ': /status\n', status]),
+              patch.object(sessions.time, 'sleep'), patch.object(sessions, 'stuff') as stuff):
+            self.assertEqual(sessions.probe_status_thread(self.target(), Path('/private')), identifier)
+        self.assertEqual([c.args[1] for c in stuff.call_args_list], ['/status', '\r'])
+
+    def test_status_probe_preserves_drafts_compaction_and_reused_processes(self):
+        idle = ': Ask Codex to do anything\n'
+        for text in (': unfinished draft\n', 'Compacting context\n' + idle):
+            with (patch.object(sessions, 'alive', return_value=True),
+                  patch.object(sessions, 'capture', return_value=text), patch.object(sessions, 'stuff') as stuff):
+                self.assertIsNone(sessions.probe_status_thread(self.target(), Path('/private')))
+                stuff.assert_not_called()
+        with patch.object(sessions, 'alive', return_value=False), patch.object(sessions, 'stuff') as stuff:
+            self.assertIsNone(sessions.probe_status_thread(self.target(), Path('/private')))
+            stuff.assert_not_called()
+
+    def test_status_probe_never_submits_over_a_concurrent_composer_edit_or_guesses_missing_id(self):
+        idle = ': Ask Codex to do anything\n'
+        for changed in (': user edited /status\n', idle):
+            with (patch.object(sessions, 'alive', return_value=True),
+                  patch.object(sessions, 'capture', side_effect=[idle, changed]),
+                  patch.object(sessions.time, 'sleep'), patch.object(sessions, 'stuff') as stuff):
+                self.assertIsNone(sessions.probe_status_thread(self.target(), Path('/private')))
+                self.assertEqual([c.args[1] for c in stuff.call_args_list], ['/status'])
+        with (patch.object(sessions, 'alive', return_value=True),
+              patch.object(sessions, 'capture', side_effect=[idle, ': /status\n'] + [idle]*8),
+              patch.object(sessions.time, 'sleep'), patch.object(sessions, 'stuff')):
+            self.assertIsNone(sessions.probe_status_thread(self.target(), Path('/private')))
+
+    def test_managed_client_identity_is_revalidated_before_quitting(self):
+        target = {**self.target(), 'backend': 'native', 'identity_source': 'screen-status'}
+        with (patch.object(sessions, 'alive', return_value=True),
+              patch.object(sessions, 'probe_status_thread', return_value='other-thread'),
+              patch.object(sessions, 'root_thread') as root,
+              patch.object(sessions, 'enter_command') as enter):
+            with self.assertRaisesRegex(RuntimeError, 'live thread changed'):
+                sessions.reload_target(target, {}, Path('/private'))
+            root.assert_not_called();enter.assert_not_called()
+        with (patch.object(sessions, 'probe_status_thread', return_value='exact-thread'),
+              patch.object(sessions, 'root_thread', return_value=target['thread']) as root):
+            self.assertEqual(sessions.verified_thread(target, Path('/private')), target['thread'])
+            root.assert_called_once_with(Path('/private/state'), 123, 'exact-thread')
+
+    def test_failed_status_probe_never_binds_an_unrelated_tui_to_the_controller(self):
+        proc = Mock();proc.name = '123';proc.stat.return_value.st_uid = sessions.os.getuid()
+        info = {'pid': 123, 'start': 'same', 'screen': '45.example', 'window': '0', 'home': '',
+                'parent': 45, 'args': ['/new/codex']}
+        with (patch.object(sessions.Path, 'iterdir', return_value=iter([proc])),
+              patch.object(sessions, 'command', return_value=' 45.example (Detached)\n'),
+              patch.object(sessions, 'process', return_value=info),
+              patch.object(sessions, 'root_thread', return_value=None) as root,
+              patch.object(sessions, 'probe_status_thread', return_value=None)):
+            self.assertEqual(sessions.inventory('controller-thread', status_directory=Path('/private')), [])
+            root.assert_called_once_with(Path.home() / '.codex', 123)
 
     def test_thread_recovery_overrides_survive_reload_without_affecting_other_sessions(self):
         target = self.target()

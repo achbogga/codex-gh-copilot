@@ -1,0 +1,48 @@
+{
+  "validated_at": "2026-10-26T15:49:50.081969+00:00",
+  "upstream": {
+    "commit": "970111f6cb62cc02fe36a82ea7d71b37a2889c97",
+    "new_commits_merged": 15
+  },
+  "stable_runtimes": {
+    "codex": "0.164.0",
+    "copilot_cli": "1.0.103",
+    "copilot_sdk": "1.0.26",
+    "node": "22.23.4"
+  },
+  "runtime_integrity": {
+    "codex_archive_sha512": true,
+    "copilot_archive_sha256": true,
+    "immutable_installations": true,
+    "code_mode_companion_present": true,
+    "current_managed_native_server_binary_matches": true
+  },
+  "checks": {
+    "bridge_native_official_runtime": {
+      "passed": 141,
+      "failed": 0
+    },
+    "maintenance_including_four_native_screen_regressions": {
+      "passed": 99,
+      "failed": 0
+    },
+    "updater": {
+      "passed": 13,
+      "failed": 0
+    }
+  },
+  "screen_sessions": {
+    "copilot_reloaded_exact_threads": 7,
+    "same_thread_goal_model_and_reasoning_verified": true,
+    "active_goals_with_fresh_tool_results": 4,
+    "completed_goal_preserved": true,
+    "idle_sessions_preserved": true,
+    "fresh_harness_failure_codes": 0,
+    "idle_unsaved_native_client_already_current": 1,
+    "controller_frontend": "pending graceful reload after this turn",
+    "controller_handoff_verified": false
+  },
+  "repair": "Guarded native /status probes identify managed-daemon TUI clients without open rollout descriptors, revalidate exact IDs before restart, preserve drafts and compaction, and never bind a failed probe to an unrelated controller.",
+  "privacy": "Private inventories, Screen captures, goals and handoff reports remain outside the repository.",
+  "test_stabilization": "The native recovery fixture waits for both the blocked goal row and its durable failed-completion event before checking recovery; production recovery still refuses missing evidence."
+}
