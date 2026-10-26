@@ -158,6 +158,21 @@ class ControlCenterTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             center.current_target({**self.row, 'verified': False})
 
+    def test_explicit_reload_can_identify_an_unverified_screen_without_guessing_its_thread(self):
+        row = {'screen': '45.example', 'window': '0', 'verified': False}
+        with patch.object(center.screens, 'inventory', return_value=[self.target]) as inventory:
+            self.assertEqual(center.current_target(row, status_directory=self.root), self.target)
+        self.assertEqual(inventory.call_args.kwargs,
+                         {'status_directory': self.root, 'status_screen': ('45.example', '0')})
+        for targets in ([], [self.target, self.target]):
+            with patch.object(center.screens, 'inventory', return_value=targets), self.assertRaises(RuntimeError):
+                center.current_target(row, status_directory=self.root)
+
+    def test_reload_probe_still_rejects_a_changed_previously_verified_thread(self):
+        changed = {**self.target, 'thread': {**self.target['thread'], 'id': 'other'}}
+        with patch.object(center.screens, 'inventory', return_value=[changed]), self.assertRaises(RuntimeError):
+            center.current_target(self.row, status_directory=self.root)
+
     def run_action(self, action, text, *, goal=None, screens=None, after=None):
         with (patch.object(center, 'current_target', return_value=self.target),
               patch.object(center, 'recovery_config', return_value=self.config),

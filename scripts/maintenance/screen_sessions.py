@@ -74,7 +74,7 @@ def goal(home, thread):
     return dict(row) if row else None
 
 
-def inventory(controller=None, status_directory=None, status_screen=None):
+def inventory(controller=None, status_directory=None, status_screen=None, only=None):
     screens = set(re.findall(r'^\s*(\d+\.[^\s]+)\s', command(['screen', '-ls']), re.M))
     targets = []
     defaults = []
@@ -89,6 +89,8 @@ def inventory(controller=None, status_directory=None, status_screen=None):
             if not args or Path(args[0]).name != 'codex' or any(a in args for a in ('exec', 'app-server', 'mcp-server')):
                 continue
             if info['screen'] not in screens:
+                continue
+            if only and info['screen'] != only and info['screen'].split('.', 1)[1] != only:
                 continue
             home = Path(info['home']) if info['home'] else Path.home() / '.codex'
             backend = 'native'
@@ -111,10 +113,10 @@ def inventory(controller=None, status_directory=None, status_screen=None):
             entry = {k: info[k] for k in ('pid', 'start', 'screen', 'window')}
             entry.update({'home': str(home), 'backend': backend, 'launcher_process': launch_process,
                           'thread': thread, 'controller': bool(thread and thread['id'] == controller)})
-            if (not thread and backend == 'native' and status_directory is not None
+            if (not thread and status_directory is not None
                     and (status_screen is None or (entry['screen'], entry['window']) == status_screen)):
-                # Managed app-server clients hold no rollout descriptor. During
-                # an authorized update, ask the existing TUI for its exact ID.
+                # Managed clients and stalled Copilot frontends can both have
+                # no rollout descriptor. Ask the live TUI during explicit control.
                 identifier = probe_status_thread(entry, status_directory)
                 if identifier:
                     thread = root_thread(home, info['pid'], identifier)
@@ -179,9 +181,18 @@ def probe_status_thread(target, state):
     if not empty_composer(text) or 'Compacting context' in '\n'.join(text.splitlines()[-12:]):
         return None
     stuff(target, '/status')
-    time.sleep(.2)
-    text = capture(target, state)
-    if not alive(target) or not any(re.fullmatch(r'[^\w]{1,6}/status\s*', line) for line in text.splitlines()[-7:]):
+    # Screen input and TUI rendering are asynchronous, especially under disk
+    # pressure. Wait for our exact command to appear before pressing Enter.
+    for _ in range(20):
+        time.sleep(.25)
+        text = capture(target, state)
+        if not alive(target):
+            return None
+        if any(re.fullmatch(r'[^\w]{1,6}/status\s*', line) for line in text.splitlines()[-7:]):
+            break
+        if not empty_composer(text):
+            return None
+    else:
         return None
     stuff(target, '\r')
     for _ in range(8):
@@ -353,8 +364,8 @@ def main():
     parser.add_argument('--only', help='Exact Screen name or suffix to reload.')
     parser.add_argument('--controller-thread', default=os.environ.get('CODEX_THREAD_ID'))
     parser.add_argument('--wait-controller-idle', action='store_true')
-    parser.add_argument('--probe-native', action='store_true',
-                        help='Use guarded /status to identify managed native TUI threads during an update.')
+    parser.add_argument('--probe-status', '--probe-native', dest='probe_status', action='store_true',
+                        help='Use guarded /status to identify native or Copilot TUI threads during an update.')
     parser.add_argument('--continuation')
     args = parser.parse_args()
     os.umask(0o077)
@@ -366,7 +377,8 @@ def main():
         fcntl.flock(controller_guard, fcntl.LOCK_EX | fcntl.LOCK_NB)
     with (args.state_dir / 'reload.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        targets = inventory(args.controller_thread, status_directory=args.state_dir if args.probe_native else None)
+        targets = inventory(args.controller_thread, status_directory=args.state_dir if args.probe_status else None,
+                            only=args.only)
         if args.only:
             targets = [t for t in targets if t['screen'] == args.only or t['screen'].split('.', 1)[1] == args.only]
             if len(targets) != 1:

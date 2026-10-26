@@ -60,7 +60,7 @@ class ScreenSessionTests(unittest.TestCase):
         idle = ': Ask Codex to do anything\n'
         for changed in (': user edited /status\n', idle):
             with (patch.object(sessions, 'alive', return_value=True),
-                  patch.object(sessions, 'capture', side_effect=[idle, changed]),
+                  patch.object(sessions, 'capture', side_effect=[idle] + [changed]*20),
                   patch.object(sessions.time, 'sleep'), patch.object(sessions, 'stuff') as stuff):
                 self.assertIsNone(sessions.probe_status_thread(self.target(), Path('/private')))
                 self.assertEqual([c.args[1] for c in stuff.call_args_list], ['/status'])
@@ -68,6 +68,47 @@ class ScreenSessionTests(unittest.TestCase):
               patch.object(sessions, 'capture', side_effect=[idle, ': /status\n'] + [idle]*8),
               patch.object(sessions.time, 'sleep'), patch.object(sessions, 'stuff')):
             self.assertIsNone(sessions.probe_status_thread(self.target(), Path('/private')))
+
+    def test_status_probe_waits_for_delayed_screen_rendering_before_enter(self):
+        identifier = '11111111-2222-3333-4444-555555555555'
+        idle = ': Ask Codex to do anything\n'
+        with (patch.object(sessions, 'alive', return_value=True),
+              patch.object(sessions, 'capture', side_effect=[idle, idle, idle, ': /status\n',
+                                                            f'Session: {identifier}\n' + idle]),
+              patch.object(sessions.time, 'sleep'), patch.object(sessions, 'stuff') as stuff):
+            self.assertEqual(sessions.probe_status_thread(self.target(), Path('/private')), identifier)
+        self.assertEqual([c.args[1] for c in stuff.call_args_list], ['/status', '\r'])
+
+    def test_explicit_probe_identifies_native_and_copilot_clients_without_rollout_descriptors(self):
+        for backend in ('native', 'copilot'):
+            with self.subTest(backend=backend):
+                proc = Mock();proc.name = '123';proc.stat.return_value.st_uid = sessions.os.getuid()
+                info = {'pid': 123, 'start': 'same', 'screen': '45.example', 'window': '0', 'home': '/private/state',
+                        'parent': 99 if backend == 'copilot' else 45, 'args': ['/new/codex']}
+                launcher = {'pid': 99, 'start': 'launcher', 'parent': 45, 'args': ['node', '/repo/host-run.mjs']}
+                thread = self.target()['thread']
+                with (patch.object(sessions.Path, 'iterdir', return_value=iter([proc])),
+                      patch.object(sessions, 'command', return_value=' 45.example (Detached)\n'),
+                      patch.object(sessions, 'process', side_effect=lambda pid: info if pid == 123 else launcher),
+                      patch.object(sessions, 'root_thread', side_effect=[None, thread]) as root,
+                      patch.object(sessions, 'goal', return_value=None),
+                      patch.object(sessions, 'probe_status_thread', return_value=thread['id'])):
+                    result = sessions.inventory(status_directory=Path('/private'), only='example')
+                self.assertEqual(len(result), 1)
+                self.assertEqual(result[0]['backend'], backend)
+                self.assertEqual(result[0]['identity_source'], 'screen-status')
+                self.assertEqual(result[0]['thread']['id'], thread['id'])
+                root.assert_called_with(Path('/private/state'), 123, thread['id'])
+
+    def test_targeted_inventory_does_not_probe_another_screen(self):
+        proc = Mock();proc.name = '123';proc.stat.return_value.st_uid = sessions.os.getuid()
+        info = {'pid': 123, 'screen': '45.example', 'args': ['/new/codex']}
+        with (patch.object(sessions.Path, 'iterdir', return_value=iter([proc])),
+              patch.object(sessions, 'command', return_value=' 45.example (Detached)\n'),
+              patch.object(sessions, 'process', return_value=info),
+              patch.object(sessions, 'probe_status_thread') as probe):
+            self.assertEqual(sessions.inventory(status_directory=Path('/private'), only='other'), [])
+            probe.assert_not_called()
 
     def test_managed_client_identity_is_revalidated_before_quitting(self):
         target = {**self.target(), 'backend': 'native', 'identity_source': 'screen-status'}

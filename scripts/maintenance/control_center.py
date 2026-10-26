@@ -213,14 +213,18 @@ def recovery_config(target, state_root):
             'min_free_gib': 4}
 
 
-def current_target(row):
-    if not row.get('verified'):
-        raise RuntimeError('Native thread is not verified; attach to inspect this Screen.')
-    matches = [t for t in screens.inventory(os.environ.get('CODEX_THREAD_ID'))
+def current_target(row, status_directory=None):
+    if not row.get('verified') and status_directory is None:
+        raise RuntimeError('Native thread is not verified; reload to identify it or attach to inspect this Screen.')
+    probe = ({'status_directory': status_directory, 'status_screen': (row['screen'], str(row['window']))}
+             if status_directory is not None else {})
+    matches = [t for t in screens.inventory(os.environ.get('CODEX_THREAD_ID'), **probe)
                if t['screen'] == row['screen'] and str(t['window']) == str(row['window'])]
-    if (len(matches) != 1 or matches[0]['pid'] != row['pid']
+    if len(matches) != 1:
+        raise RuntimeError('Native thread could not be verified; attach to inspect this Screen.')
+    if (row.get('verified') and (matches[0]['pid'] != row['pid']
             or matches[0]['start'] != row['target']['start']
-            or matches[0]['thread']['id'] != row['thread_id']):
+            or matches[0]['thread']['id'] != row['thread_id'])):
         raise RuntimeError('Session changed; refresh and select it again.')
     return matches[0]
 
@@ -240,7 +244,12 @@ def owns_dashboard(pid):
 
 
 def act(row, action, state_root, update_config):
-    target = current_target(row)
+    # Only an explicit reload may type /status. Background inventory remains
+    # read-only, and other controls still require an already identified thread.
+    probe = state_root / 'identity' if action == 'reload' else None
+    if probe is not None:
+        probe.mkdir(parents=True, exist_ok=True, mode=0o700)
+    target = current_target(row, status_directory=probe)
     config = recovery_config(target, state_root)
     state = Path(config['state_dir'])
     state.mkdir(parents=True, exist_ok=True, mode=0o700)

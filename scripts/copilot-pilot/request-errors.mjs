@@ -48,7 +48,7 @@ const descriptions = {
   COPILOT_RUNTIME_CONTENT_TYPE:
     "Copilot returned an unexpected response format instead of an event stream.",
   COPILOT_SDK_CREATE_FAILED:
-    "Copilot could not create its transport session. Check stream-diagnostics.jsonl, then restart cxf if its runtime has stopped.",
+    "Copilot could not create its transport session. Check local disk space and stream-diagnostics.jsonl; reload this cxf session if the error persists.",
   COPILOT_SDK_SEND_FAILED:
     "Copilot could not submit the transport request. Check stream-diagnostics.jsonl, then restart cxf if its runtime has stopped.",
   COPILOT_SDK_QUERY_FAILED:
