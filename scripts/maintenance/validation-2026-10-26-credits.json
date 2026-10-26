@@ -1,0 +1,35 @@
+{
+  "validated_at": "2026-10-26T15:13:23.568990+00:00",
+  "feature": "cxf top Copilot AI credits and seat entitlement",
+  "checks": {
+    "python_maintenance": {
+      "passed": 90,
+      "skipped_optional_native_screen_tests": 4,
+      "failed": 0
+    },
+    "node_quota_and_host_routing": {
+      "passed": 9,
+      "failed": 0
+    },
+    "live_alias_table": true,
+    "live_alias_json_preserves_array": true,
+    "live_alias_budget_json": true,
+    "live_official_sdk_account_quota_without_inference": true,
+    "interactive_80_column_read_only_display_filter_and_quit": true,
+    "read_only_compact_key_rejected": true,
+    "all_verified_copilot_roots_have_reported_charges": true,
+    "duplicate_charge_assignments": 0,
+    "history_sources_indexed": 64,
+    "matched_provider_receipts": 37801,
+    "private_billing_cache": true,
+    "running_agents_restarted": false,
+    "git_diff_check": true
+  },
+  "reporting_limits": [
+    "Session totals link uniquely matched provider charges to completed native calls and spawned agents.",
+    "Unknown or missing receipts and retained history are marked incomplete, never estimated or shown as zero.",
+    "Session lifetime charges and seat billing-period usage cover different scopes.",
+    "Read-only quota can be unavailable or delayed; a stale cached reading is marked.",
+    "Seat entitlement does not assert the enterprise pool has no additional limits."
+  ]
+}

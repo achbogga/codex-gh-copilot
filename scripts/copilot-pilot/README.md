@@ -23,6 +23,7 @@ cxf models --json
 cxf top                   # Interactive control center for existing Screen sessions
 cxf top --once            # One terminal snapshot; no model calls
 cxf top --json            # Structured local metadata
+cxf top --budget-json     # Copilot seat usage and entitlement
 cxf -m claude-sonnet-5.5   # Select the initial model directly
 cxf -m grok-4.7
 cxf resume SESSION_ID
@@ -35,7 +36,11 @@ The complete update command verifies release checksums and installs immutable ve
 
 ### Screen control center
 
-Run `cxf top` in your SSH terminal. It refreshes local native state every two seconds and shows each Screen/window, current work state, model and reasoning, context usage, last tool result, and configured watcher status. Selected-session details include its native thread/goal IDs, workspace and goal budget. A busy user turn is shown as working even when its background goal remains blocked. The current Screen footer resolves long turns whose start record has left the bounded history suffix. A watcher report older than three minutes is visibly stale. Screens without a verified root writer remain visible as `unverified`, with native controls disabled. Viewing makes no model calls and does not need Copilot discovery or login.
+Run `cxf top` in your SSH terminal. It refreshes local native state every two seconds and shows each Screen/window, current work state, Copilot AI credits, context usage, model and reasoning, last tool result, and configured watcher status. The top line shows your seat's provider-reported used credits, entitlement and remaining percentage. Selected-session details include its native thread/goal IDs, workspace, goal budget and credit coverage. A busy user turn is shown as working even when its background goal remains blocked. The current Screen footer resolves long turns whose start record has left the bounded history suffix. A watcher report older than three minutes is visibly stale. Screens without a verified root writer remain visible as `unverified`, with native controls disabled. Viewing makes no model calls and does not need Copilot model discovery. Seat quota requires an existing Copilot login; missing quota never disables the local dashboard.
+
+Credits are actual `total_nano_aiu` receipts from the local Copilot usage database, divided by one billion. They are linked to native completed calls only when model, token counts and time uniquely match in both directions. Each session includes its spawned agents, excluding independent CLI forks and inherited fork history. The initial history scan runs in the background; `+` marks missing receipts or history still being indexed. `-` means unknown, not zero. The selected row shows linked versus recorded calls. These lifetime completed-call totals may exclude failed calls or deleted history and need not sum to the seat's billing-period usage. No token-price estimates or ambiguous charges are attributed to a session.
+
+The dashboard refreshes local receipts about every 30 seconds and seat quota at most once per five minutes through the official SDK's read-only `account.getQuota` RPC, without creating an inference session. Stale readings are marked. The quota's reported unit is preserved: legacy premium requests are not relabeled as AI credits. If GitHub omits an entitlement, the dashboard says the budget was not reported rather than inventing one. Enterprise pool or organization limits may also apply beyond the seat entitlement. Private, content-free billing indexes and cached quota live under `~/.local/state/cxf-control/billing/`; prompts, credentials and provider response IDs are not retained there. Reopen an existing dashboard to load changes; running agents do not need a restart. `--json` keeps its array format and adds each row's `copilot_credits`; `--budget-json` prints the separate account reading.
 
 | Key | Action |
 | --- | --- |

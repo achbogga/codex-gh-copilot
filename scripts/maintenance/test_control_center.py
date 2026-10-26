@@ -2,8 +2,10 @@ import importlib.util
 import json
 from pathlib import Path
 import tempfile
+import threading
+from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 spec = importlib.util.spec_from_file_location('control_center', Path(__file__).with_name('control_center.py'))
 center = importlib.util.module_from_spec(spec)
@@ -53,6 +55,69 @@ class ControlCenterTests(unittest.TestCase):
         read.assert_called_once()
         self.assertNotIn('target', center.public_rows(rows)[0])
         self.assertIn('gpt-6.1-sol max', center.text_table(rows))
+
+    def test_credit_totals_in_json_and_visible_at_left_of_model_with_seat_budget_on_top(self):
+        billing = Mock()
+        billing.sessions.return_value = {'thread': {'text': '12.34+', 'nano_aiu': 12340000000,
+                                                   'partial': True, 'reported_calls': 2, 'native_calls': 3}}
+        row = {**self.row, 'backend': 'copilot', 'model': 'gpt-6.1-sol', 'reasoning': 'max',
+               'goal': self.goal, 'evidence': {}, 'watch': None, 'state': 'working'}
+        rows = [row, {**row, 'thread_id': 'native-thread', 'backend': 'native'},
+                {**row, 'thread_id': None, 'verified': False}]
+        collector = center.Collector(billing)
+        self.addCleanup(collector.captures.cleanup)
+        collector.add_credits(rows)
+        public = center.public_rows(rows)
+        self.assertEqual(public[0]['copilot_credits']['text'], '12.34+')
+        self.assertEqual(public[1]['copilot_credits']['text'], 'n/a')
+        self.assertEqual(public[2]['copilot_credits']['text'], '-')
+        self.assertNotIn('target', json.dumps(public))
+        table = center.text_table(rows, {'state': 'available', 'unit': 'AI credits',
+                                        'used': 123, 'entitlement': 456})
+        self.assertIn('123 / 456', table.splitlines()[1])
+        line = center.table_row(row)
+        self.assertLess(line.index('12.34+'), 65)
+        self.assertLess(line.index('12.34+'), line.index('gpt-6.1-sol'))
+
+    def test_missing_billing_database_does_not_disable_control_center(self):
+        billing = Mock();billing.sessions.side_effect = OSError('not readable')
+        rows = [{**self.row, 'backend': 'copilot'}]
+        collector = center.Collector(billing)
+        self.addCleanup(collector.captures.cleanup)
+        collector.add_credits(rows)
+        self.assertEqual(rows[0]['copilot_credits']['state'], 'unavailable')
+
+    def test_slow_billing_refresh_does_not_block_keyboard_and_read_only_controls_stay_disabled(self):
+        started, release = threading.Event(), threading.Event()
+        billing = Mock()
+        def refresh(rows):
+            started.set()
+            release.wait(timeout=2)
+        billing.refresh.side_effect = refresh
+        billing.account.return_value = {'state': 'available', 'unit': 'AI credits', 'used': 12, 'entitlement': 34}
+        row = {**self.row, 'attachment': 'Detached', 'goal': self.goal, 'evidence': {}, 'watch': None,
+               'model': 'model', 'reasoning': 'max', 'state': 'working', 'copilot_credits': {'text': '1.23+'}}
+        collector = Mock();collector.snapshot.return_value = [row]
+        window = Mock();window.getmaxyx.return_value = (30, 120)
+        keys = iter((ord('c'), ord('q')))
+        def getch():
+            self.assertTrue(started.wait(timeout=1))
+            key = next(keys)
+            if key == ord('q'):
+                release.set()
+            return key
+        window.getch.side_effect = getch
+        args = SimpleNamespace(billing=billing, interval=2, read_only=True,
+                               state_root=self.root, config=self.root / 'unused.json')
+        with (patch.object(center, 'Collector', return_value=collector), patch.object(center, 'draw_line') as draw,
+              patch.object(center.curses, 'curs_set'), patch.object(center, 'act') as act):
+            center.interactive(window, args)
+        act.assert_not_called()
+        self.assertEqual(window.getch.call_count, 2)
+        text = '\n'.join(str(call.args[2]) for call in draw.call_args_list)
+        self.assertIn('12 / 34', text)
+        self.assertIn('1.23+', text)
+        self.assertIn('Read-only mode; no native input submitted.', text)
 
     def test_stale_or_corrupt_watch_report_cannot_appear_healthy(self):
         state = Path(self.config['state_dir']);state.mkdir()

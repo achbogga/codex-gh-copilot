@@ -18,6 +18,7 @@ import time
 
 import goal_recovery_watch as recovery
 import screen_sessions as screens
+from credits import Billing, budget_text
 
 
 def clean(value):
@@ -72,8 +73,9 @@ def watch_configs():
 
 
 class Collector:
-    def __init__(self):
+    def __init__(self, billing=None):
         self.cache = {}
+        self.billing = billing
         self.captures = tempfile.TemporaryDirectory(prefix='cxf-top-')
 
     def __del__(self):
@@ -146,7 +148,20 @@ class Collector:
                              'model': None, 'reasoning': None, 'cwd': None, 'backend': None,
                              'attachment': attachment, 'verified': False, 'goal': None,
                              'evidence': {}, 'watch': None, 'state': 'unverified'})
+        self.add_credits(rows)
         return sorted(rows, key=lambda row: (row['screen'].split('.', 1)[-1], row['window']))
+
+    def add_credits(self, rows):
+        try:
+            totals = self.billing.sessions() if self.billing else {}
+        except Exception:
+            totals = {}
+        for row in rows:
+            if row.get('verified') and row.get('backend') != 'copilot':
+                row['copilot_credits'] = {'text': 'n/a', 'state': 'not-copilot'}
+            else:
+                row['copilot_credits'] = totals.get(row.get('thread_id'),
+                                                  {'text': '-', 'state': 'unavailable', 'partial': True})
 
 
 def context_text(row):
@@ -163,16 +178,26 @@ def public_rows(rows):
     return [{key: value for key, value in row.items() if key != 'target'} for row in rows]
 
 
-def text_table(rows):
+TABLE_HEADER = f'{"SCREEN":21} {"STATE":11} {"AI CREDITS*":13} {"CONTEXT":19} {"MODEL / EFFORT":24} {"LAST TOOL":9} WATCH'
+CREDIT_LEGEND = '* Lifetime matched completed-call credits, including subagents; + incomplete history. Seat budget is for its billing period.'
+
+
+def table_row(row):
+    name = row['screen'].split('.', 1)[-1]
+    model = f'{row["model"] or "-"} {row["reasoning"] or ""}'
+    watch = row['watch']['status'] if row['watch'] else '-'
+    amount = row.get('copilot_credits', {}).get('text', '-')
+    return (f'{clean(name)[:20]:21} {clean(row["state"])[:10]:11} {clean(amount):13} '
+            f'{context_text(row):19} {clean(model)[:23]:24} '
+            f'{age(row["evidence"].get("tool_result_at")):9} {clean(watch)}')
+
+
+def text_table(rows, account=None):
     lines = ['CXF control center — local native state; no model calls',
-             f'{"SCREEN":24} {"STATE":11} {"MODEL / EFFORT":24} {"CONTEXT":20} {"LAST TOOL":9} WATCH']
+             budget_text(account or {}), TABLE_HEADER]
     for row in rows:
-        name = row['screen'].split('.', 1)[-1]
-        model = f'{row["model"] or "-"} {row["reasoning"] or ""}'
-        watch = row['watch']['status'] if row['watch'] else '-'
-        lines.append(f'{clean(name)[:23]:24} {clean(row["state"])[:10]:11} '
-                     f'{clean(model)[:23]:24} {context_text(row):20} '
-                     f'{age(row["evidence"].get("tool_result_at")):9} {clean(watch)}')
+        lines.append(table_row(row))
+    lines.append(CREDIT_LEGEND)
     return '\n'.join(lines)
 
 
@@ -290,11 +315,11 @@ def interactive(window, args):
     except curses.error:
         pass
     window.timeout(150)
-    collector = Collector()
+    collector = Collector(args.billing)
     rows, selected, selection_key, refreshed = [], 0, None, 0
     message, query, editing, frozen, preview = '', '', False, False, False
-    future = None
-    with ThreadPoolExecutor(max_workers=1) as worker:
+    future, billing_future, billing_checked = None, None, 0
+    with ThreadPoolExecutor(max_workers=2) as worker:
         while True:
             if future and future.done():
                 try:
@@ -303,12 +328,24 @@ def interactive(window, args):
                     message = str(error) if type(error) is RuntimeError else type(error).__name__
                 future = None
                 refreshed = 0
+            if billing_future and billing_future.done():
+                try:
+                    billing_future.result()
+                except Exception:
+                    pass  # Missing billing metadata must never disable native controls.
+                billing_future = None
+                collector.add_credits(rows)
+                billing_checked = time.monotonic()
             if not frozen and time.monotonic() - refreshed >= args.interval:
                 try:
                     rows = collector.snapshot()
                 except Exception as error:
                     message = 'Snapshot unavailable: ' + type(error).__name__
                 refreshed = time.monotonic()
+            backfilling = any(row.get('copilot_credits', {}).get('indexing') for row in rows)
+            if (args.billing and not frozen and not billing_future
+                    and time.monotonic() - billing_checked >= (1 if backfilling else 30)):
+                billing_future = worker.submit(args.billing.refresh, rows)
             visible = [row for row in rows if query.casefold() in
                        (row['screen'] + ' ' + str(row.get('model')) + ' ' + row['state']).casefold()]
             if selection_key:
@@ -322,17 +359,13 @@ def interactive(window, args):
             draw_line(window, 0, f' CXF control center | {len(rows)} Screens/windows | '
                       + ('READ ONLY | ' if args.read_only else '')
                       + ('FROZEN' if frozen else datetime.datetime.now().strftime('%H:%M:%S')), curses.A_BOLD)
-            draw_line(window, 1, ' Screen                  State       Model / reasoning        Context               Last tool   Watch', curses.A_UNDERLINE)
-            table_height = max(1, height - 13)
+            draw_line(window, 1, ' ' + budget_text(args.billing.account() if args.billing else {}), curses.A_BOLD)
+            draw_line(window, 2, ' ' + TABLE_HEADER, curses.A_UNDERLINE)
+            table_height = max(1, height - 14)
             start = max(0, selected - table_height + 1)
             for offset, item in enumerate(visible[start:start + table_height]):
-                name = item['screen'].split('.', 1)[-1]
-                model = f'{item["model"] or "-"} {item["reasoning"] or ""}'
-                text = (f' {name[:23]:23} {item["state"][:11]:11} {model[:24]:24} '
-                        f'{context_text(item):21} {age(item["evidence"].get("tool_result_at")):11} '
-                        + (item['watch']['status'] if item['watch'] else '-'))
-                draw_line(window, 2 + offset, text, curses.A_REVERSE if start + offset == selected else 0)
-            y = min(height - 10, 3 + min(len(visible), table_height))
+                draw_line(window, 3 + offset, ' ' + table_row(item), curses.A_REVERSE if start + offset == selected else 0)
+            y = min(height - 11, 4 + min(len(visible), table_height))
             if row:
                 goal = row.get('goal') or {}
                 draw_line(window, y, ' Selected: ' + row['screen'] + ' / window ' + str(row['window']) + ' [' + row['attachment'] + ']', curses.A_BOLD)
@@ -341,6 +374,12 @@ def interactive(window, args):
                 draw_line(window, y + 3, ' Directory: ' + str(row.get('cwd') or '-'))
                 completion = row['evidence'].get('completion') or {}
                 draw_line(window, y + 4, ' Last failure: ' + str(completion.get('failure_code') or ('unclassified rejection' if completion.get('failed') else 'none')))
+                credits = row.get('copilot_credits', {})
+                detail = (f' Copilot AI credits: {credits.get("text", "-")} | '
+                          f'{credits.get("reported_calls", 0)}/{credits.get("native_calls", 0)} completed calls linked'
+                          + (' | indexing history' if credits.get('indexing') else '')
+                          + (' | STALE receipts' if credits.get('stale') else ''))
+                draw_line(window, y + 5, detail)
                 if preview and row.get('verified'):
                     try:
                         capture_dir = args.state_root / 'preview'
@@ -350,6 +389,7 @@ def interactive(window, args):
                             draw_line(window, y + 1 + index, ' ' + line)
                     except Exception as error:
                         draw_line(window, y + 1, ' Preview unavailable: ' + type(error).__name__)
+            draw_line(window, height - 5, ' Credits*: matched completed calls + subagents; + incomplete history.')
             draw_line(window, height - 4, (' Filter: ' + query + '_' if editing else ' ' + message), curses.A_BOLD)
             draw_line(window, height - 3, ' Arrows/jk select  / filter  Space freeze  v preview  '
                       + ('' if args.read_only else 'Enter attach  ') + 'q quit')
@@ -421,6 +461,7 @@ def interactive(window, args):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--json', action='store_true', help='Print one metadata-only JSON snapshot.')
+    parser.add_argument('--budget-json', action='store_true', help='Print Copilot account budget metadata only.')
     parser.add_argument('--once', action='store_true', help='Print one table without a terminal UI.')
     parser.add_argument('--read-only', action='store_true', help='Disable all native control actions.')
     parser.add_argument('--interval', type=float, default=2, help='Refresh interval in seconds (0.5–60).')
@@ -431,13 +472,29 @@ def main(argv=None):
         parser.error('--interval must be between 0.5 and 60 seconds')
     os.umask(0o077)
     args.state_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        args.billing = Billing(args.state_root / 'billing')
+    except Exception:
+        args.billing = None
+    if args.budget_json:
+        if args.billing:
+            args.billing.refresh_account()
+        print(json.dumps(args.billing.account() if args.billing else {'state': 'unavailable'}, indent=2))
+        return 0
     if args.json or args.once or not (sys.stdin.isatty() and sys.stdout.isatty()):
         try:
-            rows = Collector().snapshot()
+            collector = Collector(args.billing)
+            rows = collector.snapshot()
         except Exception as error:
             print('Local session snapshot unavailable: ' + type(error).__name__, file=sys.stderr)
             return 1
-        print(json.dumps(public_rows(rows), indent=2) if args.json else text_table(rows))
+        if args.billing:
+            try:
+                args.billing.refresh(rows)
+                collector.add_credits(rows)
+            except Exception:
+                pass
+        print(json.dumps(public_rows(rows), indent=2) if args.json else text_table(rows, args.billing.account() if args.billing else {}))
         return 0
     try:
         curses.wrapper(interactive, args)
