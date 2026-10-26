@@ -253,8 +253,9 @@ def act(row, action, state_root, update_config):
                 if goal['token_budget'] is not None and goal['tokens_used'] >= goal['token_budget']:
                     return 'Native goal budget reached; no resume submitted.'
                 evidence = recovery.rollout_evidence(Path(target['thread']['rollout_path']))
-                if recovery.needs_compaction(config, evidence):
-                    return 'Context needs compaction; use r for guarded recovery or c to compact.'
+                if ((evidence.get('completion') or {}).get('failure_code')
+                        and recovery.needs_compaction(config, evidence)):
+                    return 'Context needs compaction; use c before resuming, or r for a blocked recoverable failure.'
         command = {'pause': '/goal pause', 'resume': '/goal resume', 'compact': '/compact'}[action]
         if not screens.alive(target):
             return 'Native process changed; no command submitted.'
@@ -389,6 +390,9 @@ def interactive(window, args):
             elif key in (10, 13, ord('a')) and row:
                 if args.read_only:
                     message = 'Read-only mode; attachment disabled. Use v for a Screen preview.'
+                    continue
+                if row['screen'] == os.environ.get('STY'):
+                    message = 'Already inside this Screen; use v, or attach from a separate SSH terminal.'
                     continue
                 if future:
                     message = 'Wait for the current control action to finish.'

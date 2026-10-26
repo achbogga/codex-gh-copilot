@@ -1,5 +1,5 @@
 {
-  "validated_at": "2026-10-26T14:07:29.960590+00:00",
+  "validated_at": "2026-10-26T14:14:52.001400+00:00",
   "commands": [
     "cxf top",
     "cxf top --once",
@@ -41,7 +41,9 @@
     "one_control_action_at_a_time": true,
     "self_owned_native_reload_refused": true,
     "unverified_screens_visible_with_controls_disabled": true,
-    "stale_watch_reports_not_shown_as_current_protection": true
+    "stale_watch_reports_not_shown_as_current_protection": true,
+    "manual_project_block_resume_not_gated_by_context_size_alone": true,
+    "recursive_attachment_to_dashboard_own_screen_refused": true
   },
   "recovery_audit": {
     "malformed_rollout_shapes_timestamps_and_nonfinite_usage_fail_closed": true,
@@ -54,7 +56,7 @@
     "policy_auth_quota_encrypted_outputs_and_unknown_rejections_not_blindly_retried": true
   },
   "tests": {
-    "python_maintenance_passed": 72,
+    "python_maintenance_passed": 73,
     "includes_installed_native_screen_cases": 4,
     "host_cli_and_control_routing_passed": 5,
     "failed": 0,

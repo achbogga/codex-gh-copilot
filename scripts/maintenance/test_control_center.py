@@ -124,6 +124,21 @@ class ControlCenterTests(unittest.TestCase):
         self.assertEqual(calls, ['/compact', '\r'])
         self.assertIn('verified native session', result)
 
+    def test_manual_resume_of_real_project_block_is_not_gated_only_by_context_size(self):
+        idle = ': Ask Codex to do anything\n'
+        self.config['compact_after_transport_failure'] = True
+        evidence = {'input_tokens': 700000, 'context_window': 997500,
+                    'completion': {'failed': False, 'failure_code': None}}
+        with patch.object(center.recovery, 'rollout_evidence', return_value=evidence):
+            result, calls = self.run_action('resume', idle, screens=[idle, ': /goal resume\n'])
+        self.assertEqual(calls, ['/goal resume', '\r'])
+        self.assertIn('submitted', result)
+        evidence['completion'] = {'failed': True, 'failure_code': 'CONTEXT_WINDOW_EXCEEDED'}
+        with patch.object(center.recovery, 'rollout_evidence', return_value=evidence):
+            result, calls = self.run_action('resume', idle)
+        self.assertEqual(calls, [])
+        self.assertIn('needs compaction', result)
+
     def test_goal_change_or_composer_edit_after_typing_prevents_enter(self):
         idle = ': Ask Codex to do anything\n'
         _, calls = self.run_action('compact', idle, screens=[idle, ': /compact\n'], after={**self.goal, 'goal_id': 'other'})
