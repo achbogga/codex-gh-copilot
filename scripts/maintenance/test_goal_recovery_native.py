@@ -14,6 +14,7 @@ import threading
 import time
 import unittest
 from unittest.mock import patch
+import control_center
 
 spec = importlib.util.spec_from_file_location('recovery_watch_native', Path(__file__).with_name('goal_recovery_watch.py'))
 watch = importlib.util.module_from_spec(spec)
@@ -32,7 +33,10 @@ class NativeRecoveryTests(unittest.TestCase):
     def test_typed_native_overflow_with_a_replaced_goal_compacts_then_runs_tools(self):
         self.run_native_recovery(compact=True, overflow=True, follow_replaced=True)
 
-    def run_native_recovery(self, compact, overflow=False, follow_replaced=False):
+    def test_control_center_pauses_compacts_and_resumes_the_exact_native_goal(self):
+        self.run_native_recovery(compact=False, controls=True)
+
+    def run_native_recovery(self, compact, overflow=False, follow_replaced=False, controls=False):
         with tempfile.TemporaryDirectory(prefix='codex-watch-native-') as directory:
             root = Path(directory)
             home = root / 'state'
@@ -42,6 +46,7 @@ class NativeRecoveryTests(unittest.TestCase):
             (home / 'config.toml').write_text(f'[projects.{json.dumps(str(root))}]\ntrust_level="trusted"\n')
             marker = root / 'native-tool-result.txt'
             recovered = threading.Event()
+            finish = threading.Event()
             request_count = []
             compaction_requests = []
 
@@ -60,7 +65,7 @@ class NativeRecoveryTests(unittest.TestCase):
                         events = [{'type': 'response.failed', 'response': {'error': {
                             'code': 'context_length_exceeded' if overflow else 'stream_interrupted',
                             'message': 'Copilot stream ended before completion (UND_ERR_SOCKET).'}}}]
-                    elif compact and not compaction_requests and 'CONTEXT CHECKPOINT COMPACTION' in json.dumps(body):
+                    elif (compact or controls) and not compaction_requests and 'CONTEXT CHECKPOINT COMPACTION' in json.dumps(body):
                         compaction_requests.append(True)
                         events = [{'type': 'response.output_item.done', 'item': {
                             'type': 'message', 'id': 'summary', 'role': 'assistant',
@@ -78,7 +83,7 @@ class NativeRecoveryTests(unittest.TestCase):
                     else:
                         # Hold this synthetic turn until the test closes its own
                         # Screen. No remote model or goal continuation is needed.
-                        time.sleep(2)
+                        finish.wait(timeout=10) if controls else time.sleep(2)
                         events = [{'type': 'response.failed', 'response': {'error': {
                             'code': 'invalid_prompt', 'message': 'Synthetic test finished.'}}}]
                     try:
@@ -179,7 +184,33 @@ class NativeRecoveryTests(unittest.TestCase):
                                  'A failed inference must stop before the watcher controls recovery.')
                 identity = watch.native_identity(config, session, rollout)
                 self.assertEqual(identity[0], result['native_pid'])
+                if controls:
+                    target = next(t for t in control_center.screens.inventory() if t['screen'] == session)
+                    row = {'screen': session, 'window': '0', 'pid': target['pid'], 'thread_id': config['thread_id'],
+                           'verified': True, 'target': target}
+                    self.assertIn('/goal pause submitted', control_center.act(row, 'pause', state, root / 'unused.json'))
+                    deadline = time.monotonic() + 10
+                    while time.monotonic() < deadline:
+                        paused, _ = watch.read_native(config)
+                        if paused['status'] == 'paused' and not control_center.screens.busy(watch.capture_screen(session, 0, state)):
+                            break
+                        time.sleep(.1)
+                    self.assertEqual(paused['status'], 'paused')
+                    self.assertIn('/compact submitted', control_center.act(row, 'compact', state, root / 'unused.json'))
+                    deadline = time.monotonic() + 15
+                    while time.monotonic() < deadline:
+                        _, rollout = watch.read_native(config)
+                        evidence = watch.rollout_evidence(rollout)
+                        if evidence['compacted_at'] and evidence['completion'] and evidence['completion']['at'] >= evidence['compacted_at']:
+                            break
+                        time.sleep(.1)
+                    self.assertEqual(len(compaction_requests), 1)
+                    self.assertEqual(watch.read_native(config)[0]['status'], 'paused')
+                    self.assertIn('/goal resume submitted', control_center.act(row, 'resume', state, root / 'unused.json'))
+                    self.assertEqual(watch.wait_for_active(config), 'resume-accepted')
+                    self.assertEqual(watch.read_native(config)[0]['goal_id'], goal['goal_id'])
             finally:
+                finish.set()
                 subprocess.run(['screen', '-S', name, '-X', 'quit'], check=False,
                                capture_output=True, timeout=10)
                 server.shutdown()

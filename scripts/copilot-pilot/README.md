@@ -20,6 +20,9 @@ source ~/.bashrc
 cxf                       # Use /model to switch inside Codex
 cxf models                # List your seat's models, context and default reasoning
 cxf models --json
+cxf top                   # Interactive control center for existing Screen sessions
+cxf top --once            # One terminal snapshot; no model calls
+cxf top --json            # Structured local metadata
 cxf -m claude-sonnet-5.5   # Select the initial model directly
 cxf -m grok-4.7
 cxf resume SESSION_ID
@@ -29,6 +32,27 @@ cxf update --sync         # Synchronize source only
 ```
 
 The complete update command verifies release checksums and installs immutable version directories, preserving old running executables until each session reloads. It runs bridge/native/official-runtime smoke checks and maintenance regressions before changing Screens. Each replacement resumes its recorded root thread, model, reasoning and workspace in the existing Screen shell; completed goals and actual user pauses remain preserved. A busy turn can be interrupted through native Codex after a short drain; pending drafts and active compaction defer that reload. It waits for the old writer and launcher to exit before starting the replacement. The controlling session uses a separate supervisor after its current turn completes, then receives a continuation asking it to verify the saved reports. Private reports live beside the configured runtime installation. The command requires a clean `main`; it commits only SDK dependency pins it changes after validation, and does not push automatically.
+
+### Screen control center
+
+Run `cxf top` in your SSH terminal. It refreshes local native state every two seconds and shows each Screen/window, current work state, model and reasoning, context usage, last tool result, and configured watcher status. Selected-session details include its native thread/goal IDs, workspace and goal budget. A busy user turn is shown as working even when its background goal remains blocked. The current Screen footer resolves long turns whose start record has left the bounded history suffix. A watcher report older than three minutes is visibly stale. Screens without a verified root writer remain visible as `unverified`, with native controls disabled. Viewing makes no model calls and does not need Copilot discovery or login.
+
+| Key | Action |
+| --- | --- |
+| Up/Down or `j`/`k` | Select a session |
+| `/` | Filter by name, model or state; Enter finishes filtering |
+| Space | Freeze/unfreeze the display |
+| `v` | Toggle the selected Screen preview |
+| Enter or `a` | Attach to that Screen; **Ctrl-a, then d** returns without stopping it |
+| `r` | Run guarded recovery, sharing the automatic watcher's lock and allowance |
+| `c` | Submit native `/compact` to an idle session |
+| `p` | Explicitly pause its active native goal |
+| `g` | Explicitly resume its paused/blocked goal, respecting native budgets and required compaction |
+| `R` | Reload its exact native thread using the private update configuration |
+| `f` | Refresh now |
+| `q` | Quit the dashboard |
+
+Use `cxf top --read-only` to disable native controls. `--once` prints a table and `--json` prints metadata; a noninteractive terminal defaults to a single snapshot. `--interval 1` selects a one-second refresh. Pending drafts, dialogs, running compaction, changed writers and goal replacement prevent unsafe control input. Commands go through the existing native process, never a second writer. One control action runs at a time while the display stays responsive. The dashboard refuses to reload a native process that owns the dashboard itself. Watching is free of inference; explicit compact/resume/recovery actions can run native model work.
 
 The October 20 seat check advertised 16 concrete models: GPT, Claude, Grok and MAI. The earlier October 17 catalog contained 21; models removed by the provider are not invented or re-enabled locally. Discovery refreshes on each launch. Explicitly disabled models stay excluded; a missing raw policy field is accepted only when the official SDK also lists the model. The seat's `auto` router does not advertise a concrete context window or transport and is not included as a model with invented limits.
 
@@ -104,7 +128,7 @@ The opt-in host tools in `scripts/maintenance/` are installed for this host. `de
 
 Recovery has a 15-minute cooldown, at most two attempts without new native tool-result progress, and a six-per-day ceiling. Goal replacement clears obsolete pending actions and incident latches while retaining the cross-goal cooldown and daily allowance. Pauses, completed goals and native budgets prevent automatic resumption. A strategy instruction to reassess every five million tokens and then proceed does not impose a watcher approval gate; the previous `review_at_tokens` setting is ignored. An older failure from before the current native process started is excluded, preserving the startup dialog's "Leave paused" choice even when native state still says blocked. Authentication, policy, quota, TLS, refusal, malformed-protocol and unclassified gateway errors require review. A submission is reported as accepted only after native state becomes active; that does not claim successful inference.
 
-Fastpath opts into native `/compact` after a confirmed transport failure when the last reported input uses at least 65% of its effective context window. The watcher persists the recovery phase before input, waits for both a native compaction record and a successful completion, then resumes the same goal in the same process. It never interrupts an ongoing compaction. A failed, superseded or unconfirmed compaction stops automatic recovery; one hour without confirmed completion also stops it. The regression suite includes actual installed Codex TUI and Screen tests for direct recovery, compaction followed by shell-tool execution, and typed context overflow after goal replacement, using only synthetic local model endpoints.
+Fastpath opts into native `/compact` after a confirmed transport failure when the last reported input uses at least 65% of its effective context window. The watcher persists the recovery phase before input, waits for both a native compaction record and a successful completion, then resumes the same goal in the same process. It never interrupts an ongoing compaction. Failed or superseded compaction stops recovery. One hour without confirmation raises an alert while preserving the pending record; a later check can still verify a successful compaction and recover the same unchanged goal. An attached or temporarily busy Screen and pending input defer that verified resumption instead of discarding it. Resume submissions remain recorded until native acknowledgement. One lost submission can be retried after 60 seconds only with the same idle writer and unchanged goal, no newer turn/user input, available disk and a remaining native budget. A new turn proves delivery and prevents replay. The regression suite includes installed Codex TUI and Screen tests for direct recovery, compaction, typed overflow after goal replacement, and dashboard pause/compact/resume controls, using only synthetic local model endpoints.
 
 Fastpath's private update configuration also sets `thread_recovery_overrides` for this exact thread: normal compaction at 750,000 tokens and `model_providers.copilot-pilot.stream_max_retries=0`. Its advertised context window and max reasoning remain enabled. Earlier compaction reserves space for long reasoning; stopping after one broken stream lets the watcher compact a large failed history before replaying it. The October 26 incident accumulated partial reasoning across two approximately 631-second remote socket failures before a confirmed context overflow. Native local compaction then removed one oldest history item per rejected summary request, which makes late recovery slow. These settings prevent the reproduced sequence of automatic replays; they do not override a remote connection deadline. `screen_sessions.py` reapplies only the allowlisted, bounded overrides to the identified thread during future `cxf update` reloads. Other threads keep their existing settings.
 

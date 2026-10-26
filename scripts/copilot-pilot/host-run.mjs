@@ -10,6 +10,7 @@ import { codexInvocation } from "./run.mjs";
 import { createSdkTransport } from "./sdk-transport.mjs";
 import { runUpdate, updateArguments } from "./update-command.mjs";
 import { catalogArguments, reasoningForModel } from "./model-config.mjs";
+import { controlArguments, runControl } from "./control-command.mjs";
 import {
   efficiencyArguments,
   efficiencyCommand,
@@ -209,6 +210,15 @@ async function main() {
     (arg) =>
       !["--yolo", "--dangerously-bypass-approvals-and-sandbox"].includes(arg),
   );
+  const control = controlArguments(commands);
+  if (control !== null) {
+    process.exitCode = await runControl([
+      ...control,
+      ...(values.json && !control.includes('--json') ? ['--json'] : []),
+      ...(values.help && !control.includes('--help') ? ['--help'] : []),
+    ]);
+    return;
+  }
   if (commands[0] === "models") {
     process.exitCode = await runHost({
       directory: values.directory,
@@ -248,7 +258,7 @@ async function main() {
   }
   if (values.help) {
     console.log(
-      "Usage: cxf [-C DIRECTORY] [-m ID] [--reasoning max] [-- CODEX_ARGS]\n       cxf models [--json]\n       cxf update [--check | --show]\n       cxf efficiency [on | off | status]\nUse /model inside Codex to switch between the models advertised by your seat. Each model uses its full context and strongest supported reasoning. Default: GPT-6.1 Sol/max, YOLO, full exported environment, home and PATH access. For container isolation use codex-copilot-docker.",
+      "Usage: cxf [-C DIRECTORY] [-m ID] [--reasoning max] [-- CODEX_ARGS]\n       cxf top [--once | --json | --read-only]\n       cxf models [--json]\n       cxf update [--check | --show]\n       cxf efficiency [on | off | status]\nUse /model inside Codex to switch between the models advertised by your seat. Each model uses its full context and strongest supported reasoning. Default: GPT-6.1 Sol/max, YOLO, full exported environment, home and PATH access. For container isolation use codex-copilot-docker.",
     );
     return;
   }

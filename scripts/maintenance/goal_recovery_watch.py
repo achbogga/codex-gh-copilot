@@ -10,6 +10,7 @@ import argparse
 import datetime
 import fcntl
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -22,6 +23,19 @@ TRANSIENT = re.compile(
     r'stream disconnected before completion: Copilot stream ended before completion '
     r'\((COPILOT_UNEXPECTED_EOF|UND_ERR_SOCKET|UND_ERR_BODY_TIMEOUT|ECONNRESET|ETIMEDOUT)\)\.'
 )
+
+
+def failure_code(error):
+    if not isinstance(error, dict):
+        return None
+    kind = error.get('codex_error_info')
+    if kind == 'context_window_exceeded':
+        return 'CONTEXT_WINDOW_EXCEEDED'
+    if kind in ('internal_server_error', 'server_overloaded'):
+        return 'UPSTREAM_SERVER_ERROR'
+    message = error.get('message')
+    match = TRANSIENT.fullmatch(message) if isinstance(message, str) else None
+    return match[1] if match else None
 
 
 def read_native(config):
@@ -52,23 +66,26 @@ def rollout_evidence(path):
         for line in lines:
             try:
                 event = json.loads(line)
-                timestamp = datetime.datetime.fromisoformat(
-                    event['timestamp'].replace('Z', '+00:00')).timestamp()
+                if not isinstance(event, dict) or not isinstance(event.get('timestamp'), str):
+                    continue
+                at = datetime.datetime.fromisoformat(event['timestamp'].replace('Z', '+00:00'))
+                if at.tzinfo is None:
+                    continue
+                timestamp = at.timestamp()
                 payload = event['payload']
+                if not isinstance(payload, dict):
+                    continue
             except (ValueError, KeyError, TypeError):
                 continue
             if event.get('type') == 'event_msg':
                 kind = payload.get('type')
                 if kind == 'task_complete':
                     error = payload.get('error') or {}
-                    match = TRANSIENT.fullmatch(error.get('message', ''))
                     # Native Codex zeros its token counters when context is
                     # exhausted. Use its typed error, never prose or that zero,
                     # to authorize local compaction after a confirmed overflow.
-                    context_full = error.get('codex_error_info') == 'context_window_exceeded'
                     result['completion'] = {
-                        'at': timestamp, 'failure_code': (
-                            'CONTEXT_WINDOW_EXCEEDED' if context_full else match[1] if match else None),
+                        'at': timestamp, 'failure_code': failure_code(error),
                         'failed': bool(error)}
                 elif kind == 'task_started':
                     result['started_at'] = timestamp
@@ -76,8 +93,15 @@ def rollout_evidence(path):
                     result['user_message_at'] = timestamp
                 elif kind == 'token_count':
                     info = payload.get('info') or {}
-                    result['input_tokens'] = (info.get('last_token_usage') or {}).get('input_tokens')
-                    result['context_window'] = info.get('model_context_window')
+                    if not isinstance(info, dict):
+                        continue
+                    usage = info.get('last_token_usage') or {}
+                    if not isinstance(usage, dict):
+                        continue
+                    for key, value in [('input_tokens', usage.get('input_tokens')),
+                                       ('context_window', info.get('model_context_window'))]:
+                        if type(value) in (int, float) and math.isfinite(value) and value >= 0:
+                            result[key] = value
             elif event.get('type') == 'compacted':
                 result['compacted_at'] = timestamp
             elif event.get('type') == 'response_item' and payload.get('type') in (
@@ -235,12 +259,16 @@ def needs_compaction(config, evidence):
 
 def submit_command(config, state, goal, rollout, session, identity, text):
     assert text in ('/goal resume', '/compact')
+    observed = rollout_evidence(rollout)
     command = ['screen', '-S', session, '-p', str(config.get('window', 0)), '-X', 'stuff']
     subprocess.run([*command, text], check=True, timeout=10)
     time.sleep(.4)  # Codex paste detection requires a separate Enter.
     current, _ = read_native(config)
+    latest = rollout_evidence(rollout)
     if (current != goal or detached_screen(config['screen_name']) != session
-            or native_identity(config, session, rollout) != identity):
+            or native_identity(config, session, rollout) != identity
+            or latest['started_at'] != observed['started_at']
+            or latest['user_message_at'] != observed['user_message_at']):
         return 'state-changed-before-enter-needs-review'
     pending = capture_screen(session, config.get('window', 0), state).splitlines()[-7:]
     if not any(re.fullmatch(r'[^\w]{1,6}' + re.escape(text) + r'\s*', line) for line in pending):
@@ -261,6 +289,56 @@ def wait_for_active(config):
     return 'resume-not-confirmed-needs-review'
 
 
+def request_resume(config, state, goal, rollout, session, identity, ledger, now):
+    pending = ledger.get('pending_resume', {})
+    ledger['pending_resume'] = {
+        'at': now, 'goal_id': goal['goal_id'], 'goal_updated_at_ms': goal['updated_at_ms'],
+        'native_identity': list(identity), 'submissions': pending.get('submissions', 0) + 1}
+    # Keep the transaction until native state acknowledges it. A process crash
+    # or swallowed terminal input must not lose a completed compaction forever.
+    save_json(state / 'recovery.json', ledger)
+    issue = submit_command(config, state, goal, rollout, session, identity, '/goal resume')
+    status = issue or wait_for_active(config)
+    if status == 'resume-accepted':
+        ledger.pop('pending_resume', None)
+        save_json(state / 'recovery.json', ledger)
+    elif issue:
+        ledger['halted_reason'] = issue
+        save_json(state / 'recovery.json', ledger)
+    return {'status': status, 'native_pid': identity[0]}
+
+
+def continue_resume(config, state, goal, rollout, evidence, ledger, now, apply):
+    pending = ledger['pending_resume']
+    if (pending['goal_id'] != goal['goal_id']
+            or pending['goal_updated_at_ms'] != goal['updated_at_ms']
+            or evidence.get('user_message_at', 0) > pending['at']):
+        return {'status': 'resume-state-changed-needs-review'}
+    if ledger.get('halted_reason'):
+        return {'status': ledger['halted_reason']}
+    if now - pending['at'] < 60:
+        return {'status': 'resume-confirmation-pending'}
+    if pending['submissions'] >= 2:
+        return {'status': 'resume-not-confirmed-needs-review'}
+    free = os.statvfs(config['project'])
+    if free.f_bavail * free.f_frsize / 1024**3 < config.get('min_free_gib', 4):
+        return {'status': 'disk-pressure-needs-review'}
+    session = detached_screen(config['screen_name'])
+    identity = native_identity(config, session, rollout)
+    if list(identity) != pending['native_identity']:
+        return {'status': 'resume-process-changed-needs-review'}
+    if not idle_stalled_prompt(capture_screen(session, config.get('window', 0), state)):
+        return {'status': 'resume-waiting-for-idle-screen'}
+    if not apply:
+        return {'status': 'would-retry-unacknowledged-resume', 'native_pid': identity[0]}
+    current, current_rollout = read_native(config)
+    if (current != goal or current_rollout != rollout
+            or native_identity(config, session, rollout) != identity
+            or detached_screen(config['screen_name']) != session):
+        return {'status': 'resume-state-changed-needs-review'}
+    return request_resume(config, state, goal, rollout, session, identity, ledger, now)
+
+
 def continue_compaction(config, state, goal, rollout, evidence, ledger, now, apply):
     pending = ledger['pending_compaction']
 
@@ -275,8 +353,6 @@ def continue_compaction(config, state, goal, rollout, evidence, ledger, now, app
             or pending['goal_updated_at_ms'] != goal['updated_at_ms']
             or evidence.get('user_message_at', 0) > pending['at']):
         return halt('compaction-state-changed-needs-review')
-    if now - pending['at'] > 3600:
-        return halt('compaction-timeout-needs-review')
     free = os.statvfs(config['project'])
     if free.f_bavail * free.f_frsize / 1024**3 < config.get('min_free_gib', 4):
         return {'status': 'disk-pressure-needs-review'}
@@ -292,6 +368,10 @@ def continue_compaction(config, state, goal, rollout, evidence, ledger, now, app
              and completion['at'] >= compacted_at and completion.get('failed') is False
              and evidence['started_at'] <= completion['at'])
     screen = capture_screen(session, config.get('window', 0), state)
+    if now - pending['at'] > 3600 and not ready:
+        # Keep observing an existing compaction without interrupting it or
+        # submitting another one. A delayed cron run can still verify success.
+        return {'status': 'compaction-timeout-needs-review'}
     if not ready:
         if 'Compacting context' in '\n'.join(screen.splitlines()[-12:]):
             return {'status': 'compaction-in-progress'}
@@ -299,7 +379,7 @@ def continue_compaction(config, state, goal, rollout, evidence, ledger, now, app
             return {'status': 'compaction-in-progress'}
         return halt('compaction-not-confirmed-needs-review')
     if not idle_stalled_prompt(screen):
-        return halt('compaction-screen-changed-needs-review')
+        return {'status': 'compaction-waiting-for-idle-screen'}
     if not apply:
         return {'status': 'would-resume-after-compaction', 'native_pid': identity[0]}
     current, current_rollout = read_native(config)
@@ -308,11 +388,9 @@ def continue_compaction(config, state, goal, rollout, evidence, ledger, now, app
             or native_identity(config, session, rollout) != identity
             or not idle_stalled_prompt(capture_screen(session, config.get('window', 0), state))):
         return halt('compaction-state-changed-needs-review')
-    # Clear the pending action before input: a crash can never replay it.
+    # Atomically replace compaction bookkeeping with a resume transaction.
     ledger.pop('pending_compaction')
-    save_json(state / 'recovery.json', ledger)
-    issue = submit_command(config, state, goal, rollout, session, identity, '/goal resume')
-    return {'status': issue or wait_for_active(config), 'native_pid': identity[0]}
+    return request_resume(config, state, goal, rollout, session, identity, ledger, now)
 
 
 def check(config, state, apply=False):
@@ -341,14 +419,16 @@ def check(config, state, apply=False):
             save_json(ledger_path, ledger)
     else:
         ledger = {**ledger, 'goal_id': goal['goal_id']}
-    evidence = rollout_evidence(rollout) if goal['status'] == 'blocked' or ledger.get('consecutive_attempts') or ledger.get('pending_compaction') else {}
+    evidence = rollout_evidence(rollout) if goal['status'] == 'blocked' or ledger.get('consecutive_attempts') or ledger.get('pending_compaction') or ledger.get('pending_resume') else {}
     if (ledger.get('attempts') and evidence.get('tool_result_at', 0) > ledger['attempts'][-1]['at']):
         ledger['consecutive_attempts'] = 0
         ledger.pop('halted_reason', None)
         if apply:
             save_json(ledger_path, ledger)
     if goal['status'] != 'blocked':
-        if ledger.pop('pending_compaction', None) and apply:
+        changed = ledger.pop('pending_compaction', None) or ledger.get('pending_resume')
+        ledger.pop('pending_resume', None)
+        if changed and apply:
             save_json(ledger_path, ledger)
         return {**result, 'status': 'goal-' + goal['status']}
     guard = goal_guard(config, goal)
@@ -356,8 +436,29 @@ def check(config, state, apply=False):
         return {**result, 'status': guard}
     if ledger.get('pending_compaction'):
         return {**result, **continue_compaction(config, state, goal, rollout, evidence, ledger, now, apply)}
+    if ledger.get('pending_resume'):
+        pending = ledger['pending_resume']
+        if evidence['started_at'] > pending['at']:
+            # A new native turn proves the command reached Codex. Never replay
+            # it over a later inference failure or real project blocker.
+            ledger.pop('pending_resume')
+            if apply:
+                save_json(ledger_path, ledger)
+        else:
+            return {**result, **continue_resume(config, state, goal, rollout, evidence, ledger, now, apply)}
+    completion = evidence.get('completion')
+    if completion and evidence['started_at'] > completion['at']:
+        return {**result, 'status': 'foreground-turn-in-progress'}
+    if completion and completion.get('failed') is False:
+        return {**result, 'status': 'goal-blocked-without-runtime-error'}
     reason = blocked_reason(config, goal, evidence, ledger, now)
     if reason:
+        if reason in ('no-confirmed-recoverable-failure', 'failure-is-not-current'):
+            session = detached_screen(config['screen_name'])
+            native_identity(config, session, rollout)
+            footer = capture_screen(session, config.get('window', 0), state).splitlines()[-12:]
+            if re.search(r'Working \(|Waiting for background|Compacting context', '\n'.join(footer)):
+                return {**result, 'status': 'foreground-turn-in-progress'}
         return {**result, 'status': reason}
     result['failure'] = evidence['completion']
     free = os.statvfs(config['project'])
@@ -394,13 +495,15 @@ def check(config, state, apply=False):
         ledger['pending_compaction'] = {
             'at': now, 'goal_id': goal['goal_id'], 'goal_updated_at_ms': goal['updated_at_ms'],
             'native_identity': list(identity)}
+    if not compact:
+        return {**result, **request_resume(config, state, goal, rollout, session, identity, ledger, now)}
     save_json(ledger_path, ledger)
-    issue = submit_command(config, state, goal, rollout, session, identity, '/compact' if compact else '/goal resume')
+    issue = submit_command(config, state, goal, rollout, session, identity, '/compact')
     if issue and compact:
         ledger.pop('pending_compaction', None)
         ledger['halted_reason'] = issue
         save_json(ledger_path, ledger)
-    status = issue or ('compaction-requested' if compact else wait_for_active(config))
+    status = issue or 'compaction-requested'
     return {**result, 'status': status, 'native_pid': identity[0]}
 
 
@@ -433,6 +536,9 @@ def main():
                                          'would-resume',
                                          'resume-accepted', 'recovery-cooldown', 'would-compact',
                                          'compaction-requested', 'compaction-in-progress',
+                                         'foreground-turn-in-progress', 'compaction-waiting-for-idle-screen',
+                                         'resume-confirmation-pending', 'resume-waiting-for-idle-screen',
+                                         'would-retry-unacknowledged-resume',
                                          'would-resume-after-compaction')
         if alert:
             (state / 'alert.txt').write_text(json.dumps(result, indent=2) + '\n')

@@ -1,0 +1,73 @@
+{
+  "validated_at": "2026-10-26T14:07:29.960590+00:00",
+  "commands": [
+    "cxf top",
+    "cxf top --once",
+    "cxf top --json",
+    "cxf top --read-only"
+  ],
+  "live_snapshot_screen_rows": 9,
+  "view_makes_model_calls": false,
+  "sources": [
+    "existing Screen windows",
+    "verified native root process identities",
+    "read-only native SQLite state",
+    "bounded rollout metadata",
+    "current Screen footer"
+  ],
+  "display": [
+    "screen/window",
+    "foreground work and native goal state",
+    "model and reasoning",
+    "context usage",
+    "last tool result age",
+    "watch status and staleness",
+    "selected native identities and workspace"
+  ],
+  "controls": [
+    "attach/detach",
+    "guarded recovery",
+    "native compact",
+    "explicit goal pause/resume",
+    "exact-thread reload"
+  ],
+  "guards": {
+    "no_second_native_writer": true,
+    "native_process_start_thread_and_goal_identity_rechecked": true,
+    "pending_drafts_dialogs_and_compaction_preserved": true,
+    "native_goal_budgets_preserved": true,
+    "read_only_disables_native_input_and_attach": true,
+    "automatic_and_manual_recovery_share_lock_and_allowance": true,
+    "one_control_action_at_a_time": true,
+    "self_owned_native_reload_refused": true,
+    "unverified_screens_visible_with_controls_disabled": true,
+    "stale_watch_reports_not_shown_as_current_protection": true
+  },
+  "recovery_audit": {
+    "malformed_rollout_shapes_timestamps_and_nonfinite_usage_fail_closed": true,
+    "typed_transient_server_errors_recognized": true,
+    "busy_user_turns_distinguished_from_blocked_goals_even_when_start_metadata_leaves_tail": true,
+    "successful_compaction_survives_delayed_cron_and_pending_user_input": true,
+    "resume_transaction_persisted_until_native_acknowledgement": true,
+    "one_unacknowledged_submission_retry_requires_same_idle_writer_no_new_turn_or_user_activity": true,
+    "user_activity_during_paste_prevents_enter": true,
+    "policy_auth_quota_encrypted_outputs_and_unknown_rejections_not_blindly_retried": true
+  },
+  "tests": {
+    "python_maintenance_passed": 72,
+    "includes_installed_native_screen_cases": 4,
+    "host_cli_and_control_routing_passed": 5,
+    "failed": 0,
+    "skipped": 0,
+    "native_pause_compact_resume_same_goal_verified": true,
+    "real_pty_render_filter_read_only_and_quit_verified": true,
+    "live_bash_cxf_alias_and_json_verified": true,
+    "synthetic_native_tests_call_remote_model_backend": false
+  },
+  "phone_pairing_and_credential_automation": "Deferred at user request; not installed or activated.",
+  "limits": [
+    "This is local session monitoring and guarded control, not a guarantee against all provider or infrastructure failures.",
+    "Screens whose native root cannot be identified remain unverified; attach from normal mode to inspect them.",
+    "Automatic recovery retains bounded retries and preserves actual external access blockers."
+  ]
+}

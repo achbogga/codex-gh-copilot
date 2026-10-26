@@ -417,9 +417,11 @@ class RecoveryTests(unittest.TestCase):
         result, calls = self.exercise_check(apply=True, ledger=ledger)
         self.assertEqual(result['status'], 'compaction-process-changed-needs-review')
         self.assertEqual(calls, [])
+        self.evidence = {**self.completed_compaction(), 'compacted_at': 0, 'completion': self.evidence['completion']}
         result, calls = self.exercise_check(apply=True, ledger=self.pending_ledger(), now=5000)
         self.assertEqual(result['status'], 'compaction-timeout-needs-review')
         self.assertEqual(calls, [])
+        self.assertIn('pending_compaction', json.loads((self.root / 'recovery.json').read_text()))
         result, calls = self.exercise_check(apply=True, ledger=self.pending_ledger(),
                                             native=[({**self.goal, 'token_budget': 1}, self.root)])
         self.assertEqual(result['status'], 'native-budget-reached')
@@ -432,8 +434,94 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(calls, [])
         self.evidence = self.completed_compaction()
         result, calls = self.exercise_check(apply=True, ledger=self.pending_ledger(), screens=[': unfinished human draft\n'])
-        self.assertEqual(result['status'], 'compaction-screen-changed-needs-review')
+        self.assertEqual(result['status'], 'compaction-waiting-for-idle-screen')
         self.assertEqual(calls, [])
+        self.assertIn('pending_compaction', json.loads((self.root / 'recovery.json').read_text()))
+
+    def test_completed_compaction_can_resume_after_a_delayed_cron_check(self):
+        self.evidence = self.completed_compaction()
+        native = [(self.goal, self.root)] * 3 + [({**self.goal, 'status': 'active'}, self.root)]
+        result, calls = self.exercise_check(apply=True, ledger=self.pending_ledger(), now=5000, native=native)
+        self.assertEqual(result['status'], 'resume-accepted')
+        self.assertEqual([call.args[0][-1] for call in calls], ['/goal resume', '\r'])
+
+    def resume_ledger(self, **changes):
+        return {'goal_id': 'goal', 'attempts': [{'at': 950}], 'consecutive_attempts': 1,
+                'pending_resume': {'at': 1000, 'goal_id': 'goal',
+                                   'goal_updated_at_ms': self.goal['updated_at_ms'],
+                                   'native_identity': [456, '12345'], 'submissions': 1, **changes}}
+
+    def test_late_native_acknowledgement_clears_pending_resume_without_resubmitting(self):
+        result, calls = self.exercise_check(apply=True, ledger=self.resume_ledger(),
+            native=[({**self.goal, 'status': 'active'}, self.root)])
+        self.assertEqual(result['status'], 'goal-active')
+        self.assertEqual(calls, [])
+        self.assertNotIn('pending_resume', json.loads((self.root / 'recovery.json').read_text()))
+
+    def test_unacknowledged_resume_is_retried_once_only_with_the_same_idle_native_writer(self):
+        native = [(self.goal, self.root)] * 3 + [({**self.goal, 'status': 'active'}, self.root)]
+        result, calls = self.exercise_check(apply=True, ledger=self.resume_ledger(), native=native,
+                                            screens=[EMPTY_SCREEN, PENDING_SCREEN])
+        self.assertEqual(result['status'], 'resume-accepted')
+        self.assertEqual([call.args[0][-1] for call in calls], ['/goal resume', '\r'])
+        result, calls = self.exercise_check(apply=True, ledger=self.resume_ledger(submissions=2))
+        self.assertEqual(result['status'], 'resume-not-confirmed-needs-review')
+        self.assertEqual(calls, [])
+
+    def test_new_user_turn_draft_and_process_replacement_prevent_pending_resume_replay(self):
+        self.evidence['started_at'] = 1001
+        result, calls = self.exercise_check(apply=True, ledger=self.resume_ledger())
+        self.assertEqual(result['status'], 'foreground-turn-in-progress')
+        self.assertEqual(calls, [])
+        self.evidence['started_at'] = 900
+        result, calls = self.exercise_check(apply=True, ledger=self.resume_ledger(), screens=[': unfinished draft\n'])
+        self.assertEqual(result['status'], 'resume-waiting-for-idle-screen')
+        self.assertEqual(calls, [])
+        result, calls = self.exercise_check(apply=True, ledger=self.resume_ledger(native_identity=[999, 'old']))
+        self.assertEqual(result['status'], 'resume-process-changed-needs-review')
+        self.assertEqual(calls, [])
+
+    def test_user_turn_during_paste_cannot_be_resumed_even_if_goal_state_is_unchanged(self):
+        with (patch.object(watch, 'rollout_evidence', side_effect=[self.evidence, {**self.evidence, 'started_at': 1001}]),
+              patch.object(watch, 'read_native', return_value=(self.goal, self.root)),
+              patch.object(watch, 'detached_screen', return_value='123.fastpath'),
+              patch.object(watch, 'native_identity', return_value=(456, '12345')),
+              patch.object(watch.time, 'sleep'), patch.object(watch.subprocess, 'run') as run):
+            result = watch.submit_command(self.config, self.root, self.goal, self.root, '123.fastpath', (456, '12345'), '/goal resume')
+        self.assertEqual(result, 'state-changed-before-enter-needs-review')
+        self.assertEqual(len(run.call_args_list), 1)
+
+    def test_foreground_user_turn_and_real_project_block_are_distinguished(self):
+        self.evidence.update({'started_at': 1001})
+        result, calls = self.exercise_check(apply=True)
+        self.assertEqual(result['status'], 'foreground-turn-in-progress')
+        self.assertEqual(calls, [])
+
+    def test_long_foreground_turn_is_not_misreported_when_its_start_is_outside_history_tail(self):
+        self.evidence.update({'started_at': 0, 'completion': None})
+        result, calls = self.exercise_check(apply=True, screens=['Working (8m, esc to interrupt)\n' + EMPTY_SCREEN])
+        self.assertEqual(result['status'], 'foreground-turn-in-progress')
+        self.assertEqual(calls, [])
+        self.evidence.update({'started_at': 900, 'completion': {'at': 1000, 'failed': False, 'failure_code': None}})
+        result, calls = self.exercise_check(apply=True)
+        self.assertEqual(result['status'], 'goal-blocked-without-runtime-error')
+        self.assertEqual(calls, [])
+
+    def test_corrupt_or_unexpected_rollout_values_cannot_trigger_input(self):
+        path = self.root / 'rollout.jsonl'
+        malformed = [None, [], {'timestamp': None},
+                     {'timestamp': '2026-01-01T00:00:00', 'payload': {}},
+                     {'timestamp': '2026-01-01T00:00:00Z', 'payload': None},
+                     {'timestamp': '2026-01-01T00:00:00Z', 'type': 'event_msg',
+                      'payload': {'type': 'token_count', 'info': []}},
+                     {'timestamp': '2026-01-01T00:00:00Z', 'type': 'event_msg',
+                      'payload': {'type': 'token_count', 'info': {'last_token_usage': {'input_tokens': float('nan')}}}}]
+        path.write_text('\n'.join(map(json.dumps, malformed))+'\n')
+        evidence = watch.rollout_evidence(path)
+        self.assertIsNone(evidence['completion'])
+        self.assertIsNone(evidence['input_tokens'])
+        self.assertIsNone(watch.failure_code({'message': 'quota exhausted', 'codex_error_info': 'invalid_prompt'}))
+        self.assertEqual(watch.failure_code({'codex_error_info': 'server_overloaded'}), 'UPSTREAM_SERVER_ERROR')
 
 
 if __name__ == '__main__':
