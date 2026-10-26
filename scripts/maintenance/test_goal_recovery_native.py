@@ -1,6 +1,7 @@
 """Opt-in real Codex + Screen test, using only a local synthetic model endpoint."""
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from contextlib import nullcontext
 import importlib.util
 import json
 import os
@@ -28,7 +29,10 @@ class NativeRecoveryTests(unittest.TestCase):
     def test_native_compaction_completes_before_the_same_goal_resumes_and_runs_tools(self):
         self.run_native_recovery(compact=True)
 
-    def run_native_recovery(self, compact):
+    def test_typed_native_overflow_with_a_replaced_goal_compacts_then_runs_tools(self):
+        self.run_native_recovery(compact=True, overflow=True, follow_replaced=True)
+
+    def run_native_recovery(self, compact, overflow=False, follow_replaced=False):
         with tempfile.TemporaryDirectory(prefix='codex-watch-native-') as directory:
             root = Path(directory)
             home = root / 'state'
@@ -54,7 +58,7 @@ class NativeRecoveryTests(unittest.TestCase):
                     self.end_headers()
                     if not recovered.is_set():
                         events = [{'type': 'response.failed', 'response': {'error': {
-                            'code': 'stream_interrupted',
+                            'code': 'context_length_exceeded' if overflow else 'stream_interrupted',
                             'message': 'Copilot stream ended before completion (UND_ERR_SOCKET).'}}}]
                     elif compact and not compaction_requests and 'CONTEXT CHECKPOINT COMPACTION' in json.dumps(body):
                         compaction_requests.append(True)
@@ -138,14 +142,15 @@ class NativeRecoveryTests(unittest.TestCase):
                     time.sleep(.2)
                 self.assertIsNotNone(goal)
                 self.assertEqual(goal['status'], 'blocked')
-                config['goal_id'] = goal['goal_id']
+                config['goal_id'] = 'previous-goal' if follow_replaced else goal['goal_id']
+                config['follow_current_goal'] = follow_replaced
                 config['compact_after_transport_failure'] = compact
                 recovered.set()
                 # Failure-age grace is advanced only for this synthetic check;
                 # all identity, native state, input and acceptance checks are real.
                 original_gate = watch.blocked_reason
                 with (patch.object(watch, 'blocked_reason', side_effect=lambda c, g, e, l, n: original_gate(c, g, e, l, n + 61)),
-                      patch.object(watch, 'needs_compaction', return_value=compact)):
+                      nullcontext() if overflow else patch.object(watch, 'needs_compaction', return_value=compact)):
                     result = watch.check(config, state, apply=True)
                 if compact:
                     self.assertEqual(result['status'], 'compaction-requested', result)
@@ -168,8 +173,10 @@ class NativeRecoveryTests(unittest.TestCase):
                 self.assertEqual(marker.read_text(), 'WATCHDOG_NATIVE_OK')
                 after, rollout = watch.read_native(config)
                 self.assertEqual(after['thread_id'], config['thread_id'])
-                self.assertEqual(after['goal_id'], config['goal_id'])
+                self.assertEqual(after['goal_id'], goal['goal_id'])
                 self.assertTrue(any(request_count))
+                self.assertEqual(request_count.count(False), 1,
+                                 'A failed inference must stop before the watcher controls recovery.')
                 identity = watch.native_identity(config, session, rollout)
                 self.assertEqual(identity[0], result['native_pid'])
             finally:

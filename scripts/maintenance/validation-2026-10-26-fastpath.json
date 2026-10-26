@@ -1,0 +1,69 @@
+{
+  "validated_at": "2026-10-26T01:31:47.085581+00:00",
+  "phase": "prevention tested and watch deployed; existing native compaction still running; runtime overrides await safe reload",
+  "observed_failure": {
+    "native_error": "context_window_exceeded",
+    "upstream_status": 400,
+    "upstream_code": "invalid_request_body",
+    "confirmed_context_exceeded": true,
+    "last_successful_input_tokens": 824164,
+    "last_successful_total_tokens": 851464,
+    "effective_context_window_tokens": 997500,
+    "previous_auto_compact_threshold": 875900,
+    "preceding_socket_failures_ms": [
+      631068,
+      631165
+    ],
+    "preceding_request_bytes": [
+      17633340,
+      19589491
+    ],
+    "overflow_request_bytes": 21473231,
+    "sdk_caller_and_session_cancellation_flags": false,
+    "native_token_usage_stayed_at_last_success_during_partial_stream_failures": true,
+    "native_stream_retries_before_repair": 3,
+    "watcher_bound_to_replaced_goal": true,
+    "watcher_previously_excluded_typed_context_errors": true,
+    "native_compaction_retry_behavior": "Removes one oldest history item after each context-overflow rejection.",
+    "local_32_MiB_ceiling_was_not_reached": true,
+    "disk_was_not_full": true
+  },
+  "prevention": {
+    "watch_interval_seconds": 60,
+    "follow_current_goal_within_pinned_thread": true,
+    "typed_context_failure_requires_native_compaction_even_with_zero_usage": true,
+    "old_goal_pending_actions_and_incident_latches_do_not_follow_replacements": true,
+    "cross_goal_daily_limit_and_cooldown_preserved": true,
+    "explicit_user_pauses_native_budgets_completion_and_pending_input_preserved": true,
+    "goal_binding_mismatch_alerts_instead_of_silent_watch_disable": true,
+    "thread_scoped_native_auto_compact_threshold": 750000,
+    "thread_scoped_native_stream_retries": 0,
+    "full_model_context_and_max_reasoning_preserved": true,
+    "future_cxf_update_preserves_allowlisted_thread_recovery_overrides": true,
+    "invalid_override_rejected_before_quitting_old_writer": true,
+    "other_screen_processes_untouched": true
+  },
+  "tests": {
+    "python_maintenance_passed": 52,
+    "includes_installed_native_screen_tests": 3,
+    "bridge_native_recovery_and_model_configuration_passed": 18,
+    "updater_passed": 11,
+    "failed": 0,
+    "skipped": 0,
+    "model_inference_in_synthetic_tests": false,
+    "cron_minimal_environment_watch_verified": true
+  },
+  "recovery": {
+    "same_native_thread_and_current_goal_preserved": true,
+    "native_rollout_and_databases_not_edited": true,
+    "active_compaction_not_interrupted": true,
+    "fresh_real_tool_results_after_recovery_verified": false,
+    "runtime_overrides_verified_in_replacement": false
+  },
+  "limits": [
+    "The socket failures arrived after about 631 seconds without local cancellation. The exact remote server or intermediary responsible is not established.",
+    "These safeguards do not guarantee uninterrupted remote inference; unknown policy, authentication, encryption and quota errors remain terminal.",
+    "Watch recovery remains bounded: 15-minute cooldown, two attempts without real tool progress, six attempts per day.",
+    "Current native compaction must finish before the replacement process and final live progress can be verified."
+  ]
+}

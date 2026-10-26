@@ -42,6 +42,7 @@ for (const mode of [
   "after-tool",
   "interrupted",
   "exhausted",
+  "external-watch",
   "http-denied",
   "quota-denied",
   "generic-denied",
@@ -182,6 +183,9 @@ for (const mode of [
         stateDir: state,
         args: [
           "--yolo",
+          ...(mode === "external-watch"
+            ? ["-c", "model_providers.copilot-pilot.stream_max_retries=0"]
+            : []),
           "exec",
           "--skip-git-repo-check",
           "--json",
@@ -210,12 +214,12 @@ for (const mode of [
       const text = output.stdout + output.stderr;
       assert.equal(
         failed,
-        mode === "exhausted" || mode.endsWith("denied"),
+        mode === "exhausted" || mode === "external-watch" || mode.endsWith("denied"),
         text,
       );
       assert.equal(
         requests.length,
-        mode === "exhausted" ? 4 : mode.endsWith("denied") ? 1 : 2,
+        mode === "exhausted" ? 4 : mode === "external-watch" || mode.endsWith("denied") ? 1 : 2,
         text,
       );
       assert.doesNotMatch(text, /private upstream denial|PRIVATE_/);

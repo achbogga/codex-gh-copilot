@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""Bounded, opt-in Screen recovery for an exact native goal's transport failure.
+"""Bounded, opt-in Screen recovery for native transport and context failures.
 
 Healthy checks make no model calls. Native state is read-only; recovery uses the
 existing, verified, detached Screen window. Large failed histories may opt into
@@ -62,8 +62,13 @@ def rollout_evidence(path):
                 if kind == 'task_complete':
                     error = payload.get('error') or {}
                     match = TRANSIENT.fullmatch(error.get('message', ''))
+                    # Native Codex zeros its token counters when context is
+                    # exhausted. Use its typed error, never prose or that zero,
+                    # to authorize local compaction after a confirmed overflow.
+                    context_full = error.get('codex_error_info') == 'context_window_exceeded'
                     result['completion'] = {
-                        'at': timestamp, 'failure_code': match[1] if match else None,
+                        'at': timestamp, 'failure_code': (
+                            'CONTEXT_WINDOW_EXCEEDED' if context_full else match[1] if match else None),
                         'failed': bool(error)}
                 elif kind == 'task_started':
                     result['started_at'] = timestamp
@@ -99,7 +104,7 @@ def blocked_reason(config, goal, evidence, ledger, now):
         return ledger['halted_reason']
     completion = evidence['completion']
     if not completion or not completion['failure_code']:
-        return 'no-confirmed-transport-failure'
+        return 'no-confirmed-recoverable-failure'
     failed_at = completion['at']
     if (failed_at < evidence['started_at'] or failed_at < evidence['user_message_at']
             or abs(goal['updated_at_ms'] / 1000 - failed_at) > 30):
@@ -218,6 +223,8 @@ def save_json(path, value):
 
 
 def needs_compaction(config, evidence):
+    if (evidence.get('completion') or {}).get('failure_code') == 'CONTEXT_WINDOW_EXCEEDED':
+        return True
     fraction = config.get('compact_failure_context_fraction', .65)
     tokens, window = evidence.get('input_tokens'), evidence.get('context_window')
     return bool(config.get('compact_after_transport_failure')
@@ -315,8 +322,25 @@ def check(config, state, apply=False):
     goal, rollout = read_native(config)
     result = {'checked_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
               'thread_id': config['thread_id'], 'goal': goal}
-    if not goal or goal['goal_id'] != config['goal_id'] or not rollout:
+    if not goal or not rollout:
         return {**result, 'status': 'goal-absent-or-replaced'}
+    configured_goal = config['goal_id']
+    if goal['goal_id'] != configured_goal:
+        if not config.get('follow_current_goal'):
+            return {**result, 'status': 'goal-absent-or-replaced'}
+        # Explicitly watch the current goal of this one pinned native thread.
+        # This never changes native goal state; all pause, budget, live writer,
+        # detached Screen and empty-composer guards still run before any input.
+        config = {**config, 'goal_id': goal['goal_id']}
+    if ledger.get('goal_id', configured_goal) != goal['goal_id']:
+        # A replaced goal must not inherit a pending command or halted incident.
+        # Keep the cross-goal daily allowance and cooldown so replacing a goal
+        # cannot turn bounded recovery into an unbounded model-call loop.
+        ledger = {'goal_id': goal['goal_id'], 'attempts': ledger.get('attempts', [])}
+        if apply and ledger_path.exists():
+            save_json(ledger_path, ledger)
+    else:
+        ledger = {**ledger, 'goal_id': goal['goal_id']}
     evidence = rollout_evidence(rollout) if goal['status'] == 'blocked' or ledger.get('consecutive_attempts') or ledger.get('pending_compaction') else {}
     if (ledger.get('attempts') and evidence.get('tool_result_at', 0) > ledger['attempts'][-1]['at']):
         ledger['consecutive_attempts'] = 0
@@ -361,7 +385,9 @@ def check(config, state, apply=False):
         return {**result, 'status': 'screen-changed-before-resume'}
     # Persist the allowance before sending input so a crash cannot replay it.
     ledger['attempts'] = [item for item in ledger.get('attempts', []) if item['at'] > now - 86400]
-    ledger['attempts'].append({'at': now, 'failure_at': evidence['completion']['at']})
+    ledger['attempts'].append({'at': now, 'failure_at': evidence['completion']['at'],
+                               'goal_id': goal['goal_id'],
+                               'failure_code': evidence['completion']['failure_code']})
     ledger['consecutive_attempts'] = ledger.get('consecutive_attempts', 0) + 1
     ledger['last_failure_at'] = evidence['completion']['at']
     if compact:
@@ -404,7 +430,7 @@ def main():
         save_json(state / 'latest.json', result)
         alert = result['status'] not in ('goal-active', 'goal-paused', 'goal-complete',
                                          'goal-completed', 'goal-usage_limited',
-                                         'goal-absent-or-replaced', 'would-resume',
+                                         'would-resume',
                                          'resume-accepted', 'recovery-cooldown', 'would-compact',
                                          'compaction-requested', 'compaction-in-progress',
                                          'would-resume-after-compaction')

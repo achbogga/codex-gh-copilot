@@ -35,6 +35,36 @@ class ScreenSessionTests(unittest.TestCase):
         self.assertTrue(sessions.busy('Compacting context (2m, esc to interrupt)\n' + idle))
         self.assertFalse(sessions.empty_composer(idle.replace('Ask Codex to do anything', 'unsent draft')))
 
+    def test_thread_recovery_overrides_survive_reload_without_affecting_other_sessions(self):
+        target = self.target()
+        overrides = {'model_auto_compact_token_limit': 750000,
+                     'model_providers.copilot-pilot.stream_max_retries': 0}
+        config = {'codex_bin': '/new/codex', 'thread_recovery_overrides': {'exact-thread': overrides}}
+        args = sessions.launch_arguments(target, config)
+        self.assertIn('model_auto_compact_token_limit=750000', args)
+        self.assertIn('model_providers.copilot-pilot.stream_max_retries=0', args)
+        self.assertEqual(args[-2:], ['resume', 'exact-thread'])
+        target['thread']['id'] = 'unrelated-thread'
+        self.assertNotIn('model_auto_compact_token_limit=750000', sessions.launch_arguments(target, config))
+
+    def test_recovery_overrides_reject_unsafe_or_malformed_settings(self):
+        for overrides in ({'model_providers.copilot-pilot.base_url': 'http://unapproved'},
+                          {'model_auto_compact_token_limit': 0},
+                          {'model_auto_compact_token_limit': True},
+                          {'model_providers.copilot-pilot.stream_max_retries': 99}):
+            with self.subTest(overrides=overrides), self.assertRaises(RuntimeError):
+                sessions.launch_arguments(self.target(), {'thread_recovery_overrides': {'exact-thread': overrides}})
+
+    def test_invalid_recovery_config_never_quits_the_old_writer(self):
+        target = self.target()
+        config = {'thread_recovery_overrides': {'exact-thread': {'model_auto_compact_token_limit': 0}}}
+        with (patch.object(sessions, 'alive', return_value=True),
+              patch.object(sessions, 'root_thread', return_value=target['thread']),
+              patch.object(sessions, 'enter_command') as enter):
+            with self.assertRaises(RuntimeError):
+                sessions.reload_target(target, config, Path('/unused'), drain_seconds=0)
+            enter.assert_not_called()
+
     def test_active_goals_restore_before_any_prompt_can_suppress_the_resume_dialog(self):
         for status in ('active', 'blocked'):
             self.assertEqual(sessions.continuation_policy({'status': status}, True, None), (None, None))

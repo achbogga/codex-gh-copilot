@@ -50,9 +50,9 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(self.reason(goal={**self.goal, 'tokens_used': 12_300_779, 'token_budget': 10_000_000}), 'native-budget-reached')
 
     def test_old_scrollback_real_blockers_and_later_user_activity_cannot_authorize_resume(self):
-        self.assertEqual(self.reason(evidence={**self.evidence, 'completion': None}), 'no-confirmed-transport-failure')
+        self.assertEqual(self.reason(evidence={**self.evidence, 'completion': None}), 'no-confirmed-recoverable-failure')
         for code in (None, ''):
-            self.assertEqual(self.reason(evidence={**self.evidence, 'completion': {'at': 1000, 'failure_code': code}}), 'no-confirmed-transport-failure')
+            self.assertEqual(self.reason(evidence={**self.evidence, 'completion': {'at': 1000, 'failure_code': code}}), 'no-confirmed-recoverable-failure')
         for change in ({'started_at': 1001}, {'user_message_at': 1001}):
             self.assertEqual(self.reason(evidence={**self.evidence, **change}), 'failure-is-not-current')
         self.assertEqual(self.reason(goal={**self.goal, 'updated_at_ms': 1_100_000}), 'failure-is-not-current')
@@ -94,6 +94,19 @@ class RecoveryTests(unittest.TestCase):
         self.assertGreater(evidence['started_at'], evidence['tool_result_at'])
         self.assertGreater(evidence['user_message_at'], evidence['started_at'])
         self.assertNotIn('private', json.dumps(evidence))
+
+    def test_typed_native_context_overflow_requires_compaction_even_after_counters_are_zeroed(self):
+        path = self.root / 'rollout.jsonl'
+        for info, expected in [('context_window_exceeded', 'CONTEXT_WINDOW_EXCEEDED'),
+                               ('invalid_prompt', None), ('server_error', None), (None, None)]:
+            with self.subTest(info=info):
+                path.write_text(json.dumps({'timestamp': '2026-10-22T18:49:06Z', 'type': 'event_msg',
+                    'payload': {'type': 'task_complete', 'error': {
+                        'message': 'Codex ran out of room in the model context.', 'codex_error_info': info}}}) + '\n')
+                evidence = watch.rollout_evidence(path)
+                self.assertEqual(evidence['completion']['failure_code'], expected)
+                evidence.update({'input_tokens': 0, 'context_window': 997500})
+                self.assertEqual(watch.needs_compaction(self.config, evidence), expected is not None)
 
     def test_read_only_native_queries_do_not_modify_state(self):
         goal_db = self.root / 'goals_1.sqlite'
@@ -184,6 +197,37 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(result['status'], 'would-resume')
         self.assertEqual(calls, [])
         self.assertFalse((self.root / 'recovery.json').exists())
+
+    def test_following_replaced_goal_is_explicit_and_preserves_pauses_and_budgets(self):
+        replacement = {**self.goal, 'goal_id': 'replacement'}
+        result, calls = self.exercise_check(apply=True, native=[(replacement, self.root)])
+        self.assertEqual(result['status'], 'goal-absent-or-replaced')
+        self.assertEqual(calls, [])
+        self.config['follow_current_goal'] = True
+        result, calls = self.exercise_check(apply=False, native=[(replacement, self.root)])
+        self.assertEqual(result['status'], 'would-resume')
+        self.assertEqual(calls, [])
+        self.assertEqual(self.config['goal_id'], 'goal', 'Never mutate the configured anchor in memory.')
+        for change, status in [({'status': 'paused'}, 'goal-paused'),
+                               ({'status': 'complete'}, 'goal-complete'),
+                               ({'token_budget': 1}, 'native-budget-reached')]:
+            result, calls = self.exercise_check(apply=True, native=[({**replacement, **change}, self.root)])
+            self.assertEqual(result['status'], status)
+            self.assertEqual(calls, [])
+
+    def test_replaced_goal_clears_old_pending_recovery_but_retains_daily_limit(self):
+        self.config['follow_current_goal'] = True
+        replacement = {**self.goal, 'goal_id': 'replacement'}
+        ledger = {**self.pending_ledger(), 'goal_id': 'goal', 'halted_reason': 'old-incident',
+                  'attempts': [{'at': -1000}] * 6}
+        result, calls = self.exercise_check(apply=True, native=[(replacement, self.root)], ledger=ledger)
+        self.assertEqual(result['status'], 'daily-recovery-limit')
+        self.assertEqual(calls, [])
+        saved = json.loads((self.root / 'recovery.json').read_text())
+        self.assertEqual(saved['goal_id'], 'replacement')
+        self.assertNotIn('pending_compaction', saved)
+        self.assertNotIn('halted_reason', saved)
+        self.assertEqual(len(saved['attempts']), 6)
 
     def test_leave_paused_after_restart_cannot_be_overridden_using_old_failure(self):
         result, calls = self.exercise_check(apply=True, started_at=1050)
@@ -314,6 +358,15 @@ class RecoveryTests(unittest.TestCase):
         ledger = json.loads((self.root / 'recovery.json').read_text())
         self.assertEqual(ledger['consecutive_attempts'], 1)
         self.assertEqual(ledger['pending_compaction']['native_identity'], [456, '12345'])
+
+    def test_confirmed_context_overflow_compacts_before_resume_without_transport_opt_in(self):
+        self.evidence.update({'completion': {'at': 1000, 'failed': True,
+                              'failure_code': 'CONTEXT_WINDOW_EXCEEDED'},
+                              'input_tokens': 0, 'context_window': 997500})
+        result, calls = self.exercise_check(apply=True, screens=[EMPTY_SCREEN, EMPTY_SCREEN,
+                                          PENDING_SCREEN.replace('/goal resume', '/compact')])
+        self.assertEqual(result['status'], 'compaction-requested')
+        self.assertEqual([call.args[0][-1] for call in calls], ['/compact', '\r'])
 
     def test_pending_compaction_is_observed_without_resubmitting_or_interrupting_it(self):
         self.evidence['started_at'] = 1060
