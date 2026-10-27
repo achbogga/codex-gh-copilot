@@ -23,6 +23,12 @@ TRANSIENT = re.compile(
     r'stream disconnected before completion: Copilot stream ended before completion '
     r'\((COPILOT_UNEXPECTED_EOF|UND_ERR_SOCKET|UND_ERR_BODY_TIMEOUT|ECONNRESET|ETIMEDOUT)\)\.'
 )
+EARLY_CONNECTION = re.compile(
+    r'unexpected status 502 Bad Gateway: Connecting to Copilot failed before a response '
+    r'\((ECONNRESET|ECONNREFUSED|EPIPE|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|ENETUNREACH|'
+    r'EHOSTUNREACH|UND_ERR_SOCKET|UND_ERR_CONNECT_TIMEOUT|UND_ERR_HEADERS_TIMEOUT|UND_ERR_BODY_TIMEOUT)\)\., '
+    r'url: http://127\.0\.0\.1:[1-9][0-9]{0,4}/v1/responses'
+)
 
 
 def failure_code(error):
@@ -34,6 +40,12 @@ def failure_code(error):
     if kind in ('internal_server_error', 'server_overloaded'):
         return 'UPSTREAM_SERVER_ERROR'
     message = error.get('message')
+    # Before headers, Codex wraps the bridge's fixed connection error as a typed
+    # HTTP 502. Require both forms; a generic gateway or denial is not recovery
+    # evidence. Pause, goal freshness and bounded-attempt guards still apply.
+    if kind == {'http_connection_failed': {'http_status_code': 502}}:
+        match = EARLY_CONNECTION.fullmatch(message) if isinstance(message, str) else None
+        return match[1] if match else None
     match = TRANSIENT.fullmatch(message) if isinstance(message, str) else None
     return match[1] if match else None
 

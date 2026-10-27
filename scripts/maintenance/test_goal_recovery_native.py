@@ -27,6 +27,9 @@ class NativeRecoveryTests(unittest.TestCase):
     def test_native_goal_recovers_in_the_same_screen_and_runs_a_real_shell_tool(self):
         self.run_native_recovery(compact=False)
 
+    def test_native_connection_timeout_recovers_without_restarting_the_writer(self):
+        self.run_native_recovery(compact=False, early_connection=True)
+
     def test_native_compaction_completes_before_the_same_goal_resumes_and_runs_tools(self):
         self.run_native_recovery(compact=True)
 
@@ -36,7 +39,7 @@ class NativeRecoveryTests(unittest.TestCase):
     def test_control_center_pauses_compacts_and_resumes_the_exact_native_goal(self):
         self.run_native_recovery(compact=False, controls=True)
 
-    def run_native_recovery(self, compact, overflow=False, follow_replaced=False, controls=False):
+    def run_native_recovery(self, compact, overflow=False, follow_replaced=False, controls=False, early_connection=False):
         with tempfile.TemporaryDirectory(prefix='codex-watch-native-') as directory:
             root = Path(directory)
             home = root / 'state'
@@ -57,6 +60,16 @@ class NativeRecoveryTests(unittest.TestCase):
                 def do_POST(self):
                     body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
                     request_count.append(recovered.is_set())
+                    if early_connection and not recovered.is_set():
+                        self.send_response(502)
+                        self.send_header('Content-Type', 'application/json')
+                        self.send_header('Connection', 'close')
+                        self.end_headers()
+                        self.wfile.write(json.dumps({'error': {
+                            'message': 'Connecting to Copilot failed before a response (UND_ERR_CONNECT_TIMEOUT).',
+                            'type': 'copilot_pilot_error'}}).encode())
+                        self.wfile.flush()
+                        return
                     self.send_response(200)
                     self.send_header('Content-Type', 'text/event-stream')
                     self.send_header('Connection', 'close')
@@ -102,7 +115,7 @@ class NativeRecoveryTests(unittest.TestCase):
                        '-c', 'features.multi_agent=false', '-c', 'model_provider="synthetic"',
                        '-c', 'model="gpt-6.1-sol"', '-c', 'model_providers.synthetic={name="Synthetic",'
                        f'base_url="http://127.0.0.1:{server.server_port}/v1",wire_api="responses",'
-                       'requires_openai_auth=false,stream_max_retries=0}']
+                       'requires_openai_auth=false,request_max_retries=0,stream_max_retries=0}']
             try:
                 subprocess.run(['screen', '-U', '-dmS', name, *command],
                                env=env, check=True, timeout=10)

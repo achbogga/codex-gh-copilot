@@ -95,6 +95,32 @@ class RecoveryTests(unittest.TestCase):
         self.assertGreater(evidence['user_message_at'], evidence['started_at'])
         self.assertNotIn('private', json.dumps(evidence))
 
+    def test_bridge_connection_failures_require_typed_502_and_an_exact_safe_message(self):
+        def error(code='UND_ERR_CONNECT_TIMEOUT'):
+            return {'message': 'unexpected status 502 Bad Gateway: Connecting to Copilot failed before a response '
+                    f'({code})., url: http://127.0.0.1:36535/v1/responses',
+                    'codex_error_info': {'http_connection_failed': {'http_status_code': 502}}}
+
+        path = self.root / 'rollout.jsonl'
+        for code in ('UND_ERR_CONNECT_TIMEOUT', 'ECONNRESET', 'EAI_AGAIN'):
+            with self.subTest(code=code):
+                path.write_text(json.dumps({'timestamp': '2026-10-27T18:08:28.736Z', 'type': 'event_msg',
+                    'payload': {'type': 'task_complete', 'error': error(code)}}) + '\n')
+                self.assertEqual(watch.rollout_evidence(path)['completion']['failure_code'], code)
+
+        for code in ('CERT_HAS_EXPIRED', 'ENOSPC', 'ABORT_ERR', 'COPILOT_SDK_QUOTA', 'UNKNOWN'):
+            with self.subTest(rejected_code=code):
+                self.assertIsNone(watch.failure_code(error(code)))
+        for kind in (None, 'invalid_prompt', {'http_connection_failed': {'http_status_code': 403}},
+                     {'http_connection_failed': {'http_status_code': 429}}):
+            with self.subTest(kind=kind):
+                self.assertIsNone(watch.failure_code({**error(), 'codex_error_info': kind}))
+        for message in ('502 Bad Gateway', 'private ' + error()['message'], error()['message'] + ' private',
+                        error()['message'].replace('127.0.0.1', 'upstream.example'),
+                        error()['message'].replace('/v1/responses', '/v1/responses?private=1')):
+            with self.subTest(message=message):
+                self.assertIsNone(watch.failure_code({**error(), 'message': message}))
+
     def test_typed_native_context_overflow_requires_compaction_even_after_counters_are_zeroed(self):
         path = self.root / 'rollout.jsonl'
         for info, expected in [('context_window_exceeded', 'CONTEXT_WINDOW_EXCEEDED'),

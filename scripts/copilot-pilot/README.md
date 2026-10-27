@@ -145,6 +145,8 @@ Fastpath's private update configuration also sets `thread_recovery_overrides` fo
 
 Private configuration is in `~/.config/codex-copilot/fastpath-goal-watch.json`; inspect with `fastpath-goal-watch`, or enable the bounded action with `fastpath-goal-watch --apply`. Reports and explicit alerts are under `~/.local/state/fastpath-goal-watch/`, backed by the data volume so a full root filesystem cannot fill that report directory. An exhausted incident remains stopped until intervention or verified new native tool progress. The schedule is scoped to this native thread; it does not monitor every `cxf` session. Remote Copilot disconnects remain possible.
 
+Connection failures before response headers use a different native error format from dropped streams. The watcher now recognizes a typed HTTP 502 only when its entire message matches the bridge's fixed connection-failure description, an allowlisted network code, and the loopback Responses URL. The October 27 `UND_ERR_CONNECT_TIMEOUT` incident exposed this missing classification. Generic gateway errors, TLS, storage, policy and quota failures remain excluded; goal freshness and all recovery limits still apply. The live incident also had a goal timestamp older than the failed turn, so recovery required an explicit same-thread resume. Background tests survived because the native process was kept running.
+
 ### Opus 5.5 option
 
 ```bash
