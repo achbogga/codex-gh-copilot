@@ -16,21 +16,24 @@ import subprocess
 import sys
 import time
 
+import preserve_oci
+
 USER_HOME = Path('/home/aboggaram')
 STATE = USER_HOME / '.local/state/dev-cache-cleanup'
 CACHE_ROOTS = [Path('/mnt/av-data/cache'), USER_HOME / '.cache']
 BAZEL_AGE_HOURS = 24
 PACKAGE_AGE_DAYS = 7
 LOG = logging.getLogger('cache-cleanup')
-PRESSURE_FREE_BYTES = 80 * 1024**3
+PRESSURE_FREE_BYTES = 120 * 1024**3
+TARGET_FREE_BYTES = 160 * 1024**3
 
 
-def unique_dirs(paths):
+def unique_dirs(paths, device=None):
     seen = set()
     for path in paths:
         if path.is_dir():
             resolved = path.resolve()
-            if resolved not in seen:
+            if resolved not in seen and (device is None or resolved.stat().st_dev == device):
                 seen.add(resolved)
                 yield resolved
 
@@ -198,19 +201,50 @@ def docker_untagged_images(docker, dry_run, now=None):
                 LOG.info('Removed image reference and %d unused layers', result.stdout.count('Deleted:'))
 
 
+def preserve_snapshots(dry_run):
+    # Daily and pressure cache sweeps can overlap; snapshot publication cannot.
+    with (STATE / 'snapshot-preservation.lock').open('a') as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            LOG.info('Snapshot preservation is already running')
+            return
+        docker = ['/usr/bin/docker', '--host', 'unix:///var/run/docker.sock']
+        containers = docker_read(docker, ['container', 'ls', '--all', '--quiet']).split()
+        inspected = json.loads(docker_read(docker, ['container', 'inspect', *containers])) if containers else []
+        mounts = [Path(mount['Source']) for item in inspected for mount in item.get('Mounts', [])
+                  if mount.get('Source')]
+        preserve_oci.cleanup(dry_run, TARGET_FREE_BYTES, mounts)
+
+
+def record_status(pressure, status, before, errors=()):
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    free = shutil.disk_usage(USER_HOME).free
+    label = 'last-pressure-run' if pressure else 'last-run'
+    preserve_oci.save(STATE / (label + '.json'), {
+        'checked_at': now, 'status': status, 'root_free_bytes': free,
+        'root_free_before_bytes': before, 'root_free_change_bytes': free - before,
+        'trigger_free_bytes': PRESSURE_FREE_BYTES, 'target_free_bytes': TARGET_FREE_BYTES,
+        'failed_tasks': list(errors),
+    })
+    (STATE / (label + '.txt')).write_text(f'{now} {status}\n')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--dry-run', action='store_true')
     parser.add_argument('--pressure', action='store_true',
-                        help='Run only when the root filesystem has less than 80 GiB available')
+                        help='Run below 120 GiB root free space, or finish interrupted snapshot preservation')
     args = parser.parse_args()
     if os.getuid() != USER_HOME.stat().st_uid:
         parser.error('Run as aboggaram, not root')
-    if args.pressure and shutil.disk_usage(USER_HOME).free >= PRESSURE_FREE_BYTES:
+    before = shutil.disk_usage(USER_HOME).free
+    if args.pressure and before >= PRESSURE_FREE_BYTES and not preserve_oci.pending():
         STATE.mkdir(parents=True, exist_ok=True)
         if not args.dry_run:
-            (STATE / 'last-pressure-run.txt').write_text(
-                f'{datetime.datetime.now(datetime.timezone.utc).isoformat()} healthy\n')
+            record_status(True, 'healthy', before)
+        else:
+            print(f'Root pressure check healthy: {before / 1024**3:.1f} GiB available')
         return 0
     STATE.mkdir(parents=True, exist_ok=True)
     # Pressure recovery must not wait up to six hours behind a daily data-volume
@@ -245,47 +279,52 @@ def main():
         # Fast native cache pruning runs before potentially large Bazel trees.
         task('Docker', docker_cleanup, args.dry_run)
         roots = list(unique_dirs(CACHE_ROOTS))
-        if args.pressure:
-            # Freeing the data volume cannot fix root ENOSPC. Avoid expensive
-            # unrelated scans during a pressure-triggered root cleanup.
-            device = USER_HOME.stat().st_dev
-            roots = [root for root in roots if root.stat().st_dev == device]
+        # Filter each resolved leaf: a root-resident ~/.cache can contain links
+        # to another filesystem. Filtering only its parent did not exclude them.
+        device = USER_HOME.stat().st_dev if args.pressure else None
         for root in unique_dirs([r / name for r in roots for name in
                                  ('pip', 'pip-tools', 'gh', 'black', 'YAPF',
                                   'fontconfig', 'matplotlib', 'virtualenv/wheel')]
-                                + [USER_HOME / '.npm/_logs']):
+                                + [USER_HOME / '.npm/_logs'], device=device):
             task(str(root), expire_files, root, PACKAGE_AGE_DAYS * 86400, args.dry_run)
-        for root in unique_dirs([r / name for r in roots for name in ('uv', 'sml5669-uv-cache')]):
+        for root in unique_dirs([r / name for r in roots for name in ('uv', 'sml5669-uv-cache')], device=device):
             task(str(root), run, [str(USER_HOME / '.local/bin/uv'), '--no-config', '--offline',
                                  'cache', 'prune', '--cache-dir', str(root)], args.dry_run)
-        output_roots = list(unique_dirs([r / 'bazel/_bazel_aboggaram' for r in roots]))
+        all_output_roots = list(unique_dirs([r / 'bazel/_bazel_aboggaram' for r in roots]))
+        output_roots = list(unique_dirs(all_output_roots, device=device))
         cutoff = time.time() - BAZEL_AGE_HOURS * 3600
         for root in output_roots:
             for base in sorted(root.iterdir()):
                 task(str(base), clean_output_base, base, args.dry_run, cutoff)
         # The shared repository cache can be read by live servers; only expire
         # those files when all output bases are idle. The next daily job retries.
-        live = any(has_live_server(base) for r in output_roots for base in r.iterdir()
+        live = any(has_live_server(base) for r in all_output_roots for base in r.iterdir()
                    if base.is_dir() and not base.is_symlink()
                    and re.fullmatch('[0-9a-f]{32}', base.name))
         if live:
             LOG.info('Deferring shared Bazel disk/repository cache cleanup while servers are live')
         else:
             for root in unique_dirs([r / 'bazel-cache' for r in roots]
-                                    + [r / 'cache' for r in output_roots]):
+                                    + [r / 'cache' for r in all_output_roots], device=device):
                 task(str(root), expire_files, root, BAZEL_AGE_HOURS * 3600, args.dry_run)
+        if shutil.disk_usage(USER_HOME).free < TARGET_FREE_BYTES or preserve_oci.pending():
+            task('OCI snapshot preservation', preserve_snapshots, args.dry_run)
         for root in (Path('/mnt/av-data'), USER_HOME):
             usage = shutil.disk_usage(root)
             LOG.info('Disk %s: %.1f GiB free / %.1f GiB total', root,
                      usage.free / 1024**3, usage.total / 1024**3)
-        if args.pressure and not args.dry_run and shutil.disk_usage(USER_HOME).free < PRESSURE_FREE_BYTES:
-            LOG.error('Root space remains below 80 GiB after safe cache cleanup; inspect current writers and retained artifacts')
+        if not args.dry_run and shutil.disk_usage(USER_HOME).free < PRESSURE_FREE_BYTES:
+            LOG.error('Root space remains below 120 GiB after cleanup and snapshot preservation; inspect current writers and retained artifacts')
             errors.append('root-space-remains-low')
         status = 'failed' if errors else 'success'
         LOG.info('Cleanup complete; status=%s; failed tasks=%s', status, errors)
         if not args.dry_run:
-            (STATE / ('last-pressure-run.txt' if args.pressure else 'last-run.txt')).write_text(
-                f'{datetime.datetime.now(datetime.timezone.utc).isoformat()} {status}\n')
+            record_status(args.pressure, status, before, errors)
+        if errors:
+            # Cron discards stdout; failures must also reach its stderr log.
+            print(f'Developer cache cleanup failed: {", ".join(errors)}. '
+                  f'Root free: {shutil.disk_usage(USER_HOME).free / 1024**3:.1f} GiB; see {STATE / "daily.log"}',
+                  file=sys.stderr)
         return 1 if errors else 0
 
 
