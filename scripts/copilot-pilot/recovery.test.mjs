@@ -44,6 +44,8 @@ for (const mode of [
   "exhausted",
   "external-watch",
   "http-denied",
+  "http-cancelled",
+  "http-cancelled-exhausted",
   "quota-denied",
   "generic-denied",
   "encrypted-agent-denied",
@@ -99,6 +101,11 @@ for (const mode of [
             });
           if (mode === "http-denied")
             return new Response("private upstream denial", { status: 403 });
+          if (
+            mode === "http-cancelled-exhausted" ||
+            (mode === "http-cancelled" && requests.length === 1)
+          )
+            return new Response("PRIVATE_UPSTREAM_CANCELLATION", { status: 499 });
           let body;
           if (mode === "generic-denied")
             body = encode([
@@ -214,12 +221,12 @@ for (const mode of [
       const text = output.stdout + output.stderr;
       assert.equal(
         failed,
-        mode === "exhausted" || mode === "external-watch" || mode.endsWith("denied"),
+        mode.endsWith("exhausted") || mode === "external-watch" || mode.endsWith("denied"),
         text,
       );
       assert.equal(
         requests.length,
-        mode === "exhausted" ? 4 : mode === "external-watch" || mode.endsWith("denied") ? 1 : 2,
+        mode.endsWith("exhausted") ? 4 : mode === "external-watch" || mode.endsWith("denied") ? 1 : 2,
         text,
       );
       assert.doesNotMatch(text, /private upstream denial|PRIVATE_/);

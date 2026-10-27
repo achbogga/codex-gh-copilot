@@ -217,6 +217,8 @@ export async function startBridge({
           upstream_status: result.status,
           upstream_code: rejection.code,
           context_exceeded: rejection.contextExceeded,
+          caller_cancelled: controller.signal.aborted,
+          caller_closed: response.destroyed,
           ...(rejection.encryptedOutputUnreadable
             ? { encrypted_output_unreadable: true }
             : {}),
@@ -243,6 +245,17 @@ export async function startBridge({
               "Copilot cannot decode a saved encrypted function or agent output. Retrying or increasing context will not decrypt it. The original session is preserved; use an explicitly verified plaintext recovery record.",
               "invalid_prompt",
             ),
+          );
+        }
+        // An upstream 499 before any model output is a transport failure, not
+        // an invalid prompt. Leave retries to Codex's bounded recovery. A
+        // cancelled native caller must stay cancelled.
+        if (status === 499) {
+          if (response.destroyed) return;
+          return fail(
+            response,
+            502,
+            "Copilot returned HTTP 499 before starting a response. Native Codex may retry within its configured limit.",
           );
         }
         const message = `Copilot returned HTTP ${result.status}; check authentication, policy, model compatibility, or budget.`;

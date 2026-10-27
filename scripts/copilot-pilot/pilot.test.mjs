@@ -274,6 +274,63 @@ test("redacts errors and makes no retries on auth, policy, quota or compatibilit
   }
 });
 
+test("upstream HTTP 499 enters native recovery without a bridge retry or leaked error body", async (t) => {
+  let count = 0;
+  const diagnostics = [];
+  const bridge = await fixture(
+    t,
+    (_req, res) => {
+      count++;
+      res.writeHead(499);
+      res.end("PRIVATE_PROMPT upstream-test-secret");
+    },
+    { onDiagnostic: (entry) => diagnostics.push(entry) },
+  );
+  const result = await send(bridge.url);
+  const text = await result.text();
+  assert.equal(result.status, 502);
+  assert.match(text, /HTTP 499/);
+  assert.doesNotMatch(
+    text,
+    /invalid_prompt|authentication|budget|PRIVATE_|upstream-test-secret/,
+  );
+  assert.equal(count, 1);
+  assert.equal(diagnostics.at(-1).upstream_status, 499);
+  assert.equal(diagnostics.at(-1).context_exceeded, false);
+});
+
+test("HTTP 499 after caller cancellation leaves the caller cancelled", { timeout: 5000 }, async (t) => {
+  const entered = Promise.withResolvers();
+  const diagnosed = Promise.withResolvers();
+  let count = 0;
+  const bridge = await fixture(t, () => {}, {
+    transport: async (_url, init) => {
+      count++;
+      const aborted = new Promise((resolve) =>
+        init.signal.addEventListener("abort", resolve, { once: true }),
+      );
+      entered.resolve();
+      await aborted;
+      return new Response("PRIVATE_CANCELLATION", { status: 499 });
+    },
+    onDiagnostic: (entry) => {
+      if (entry.code === "COPILOT_HTTP_ERROR") diagnosed.resolve(entry);
+    },
+  });
+  const controller = new AbortController();
+  const rejected = assert.rejects(
+    send(bridge.url, payload, { signal: controller.signal }),
+    { name: "AbortError" },
+  );
+  await entered.promise;
+  controller.abort();
+  await rejected;
+  const diagnostic = await diagnosed.promise;
+  assert.equal(diagnostic.upstream_status, 499);
+  assert.equal(diagnostic.caller_closed, true);
+  assert.equal(count, 1);
+});
+
 test("does not follow upstream redirects", async (t) => {
   let count = 0;
   const bridge = await fixture(t, (_req, res) => {
