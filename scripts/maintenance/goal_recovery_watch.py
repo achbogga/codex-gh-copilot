@@ -169,6 +169,49 @@ def detached_screen(name):
     return matches[0][0]
 
 
+def owned_rollouts(config, rollout, rollouts):
+    """Accept extra open histories only with a verified lineage to this root."""
+    if rollouts == {rollout}:
+        return True
+    if rollout not in rollouts or len(rollouts) > 128:
+        return False
+    paths = tuple(str(path) for path in rollouts)
+    database = Path(config['codex_home']) / 'state_5.sqlite'
+    try:
+        with sqlite3.connect(database.as_uri() + '?mode=ro', uri=True, timeout=5) as connection:
+            rows = connection.execute(
+                'SELECT id,rollout_path,source FROM threads WHERE rollout_path IN ('
+                + ','.join('?' for _ in paths) + ')', paths).fetchall()
+            records = {row[1]: row for row in rows}
+            root = records.get(str(rollout))
+            if (len(rows) != len(paths) or set(records) != set(paths)
+                    or not root or root[0] != config['thread_id'] or root[2] != 'cli'):
+                return False
+            sources = {row[0]: row[2] for row in rows}
+            for identifier, _, _ in rows:
+                seen = set()
+                for _ in range(32):
+                    if identifier == root[0]:
+                        break
+                    if identifier in seen:
+                        return False
+                    seen.add(identifier)
+                    if identifier not in sources:
+                        parent = connection.execute('SELECT source FROM threads WHERE id=?',
+                                                    (identifier,)).fetchone()
+                        if not parent:
+                            return False
+                        sources[identifier] = parent[0]
+                    identifier = json.loads(sources[identifier])['subagent']['thread_spawn']['parent_thread_id']
+                    if not isinstance(identifier, str):
+                        return False
+                else:
+                    return False
+        return True
+    except (sqlite3.Error, ValueError, TypeError, KeyError):
+        return False
+
+
 def native_identity(config, session, rollout, proc=Path('/proc')):
     """Require one foreground native process with this rollout open in this window.
 
@@ -214,12 +257,15 @@ def native_identity(config, session, rollout, proc=Path('/proc')):
                     continue
                 if 'rollout-' in target:
                     rollouts.add(Path(target))
-            if rollouts != {rollout}:
+            if rollout not in rollouts:
                 continue
-            matches.append((int(entry.name), fields[19]))  # PID + Linux start time
+            # Count every writer holding the watched root. An unverified extra
+            # history cannot hide a second writer and make another look unique.
+            matches.append((int(entry.name), fields[19])
+                           if owned_rollouts(config, rollout, rollouts) else None)
         except (OSError, ValueError, IndexError):
             continue
-    if len(matches) != 1:
+    if len(matches) != 1 or matches[0] is None:
         raise RuntimeError('native-thread-window-or-foreground-not-verified')
     return matches[0]
 

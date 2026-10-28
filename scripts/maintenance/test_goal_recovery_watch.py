@@ -201,6 +201,56 @@ class RecoveryTests(unittest.TestCase):
                 if change == 'different-rollout':
                     (entry / 'fd/35').unlink(); (entry / 'fd/35').symlink_to(rollout)
 
+    def thread_records(self, rows):
+        database = self.root / 'state_5.sqlite'
+        with sqlite3.connect(database) as connection:
+            connection.execute('CREATE TABLE threads (id PRIMARY KEY, rollout_path, source)')
+            connection.executemany('INSERT INTO threads VALUES (?,?,?)', rows)
+        return database
+
+    def test_native_identity_accepts_owned_child_and_nested_histories_without_changing_state(self):
+        rollout = self.root / 'rollout-thread.jsonl'
+        child = self.root / 'rollout-child.jsonl'
+        nested = self.root / 'rollout-nested.jsonl'
+        def source(parent):
+            return json.dumps({'subagent': {'thread_spawn': {'parent_thread_id': parent}}})
+        database = self.thread_records([
+            ('thread', str(rollout), 'cli'), ('child', str(child), source('thread')),
+            ('closed-parent', str(self.root / 'rollout-closed.jsonl'), source('thread')),
+            ('nested', str(nested), source('closed-parent'))])
+        entry = self.make_proc(456, 123, rollout)
+        (entry / 'fd/36').symlink_to(child)
+        (entry / 'fd/37').symlink_to(nested)
+        before = database.read_bytes()
+        self.assertEqual(watch.native_identity(self.config, '123.fastpath', rollout, self.root / 'proc'),
+                         (456, '12345'))
+        self.assertEqual(database.read_bytes(), before)
+
+    def test_extra_histories_cannot_hide_another_root_unknown_owner_or_duplicate_writer(self):
+        rollout = self.root / 'rollout-thread.jsonl'
+        child = self.root / 'rollout-child.jsonl'
+        database = self.thread_records([
+            ('thread', str(rollout), 'cli'), ('other', str(self.root / 'rollout-other.jsonl'), 'cli'),
+            ('child', str(child), 'cli')])
+        entry = self.make_proc(456, 123, rollout)
+        (entry / 'fd/36').symlink_to(child)
+        for source in ('cli', 'not-json', '{}',
+                       json.dumps({'subagent': {'thread_spawn': {'parent_thread_id': 'other'}}}),
+                       json.dumps({'subagent': {'thread_spawn': {'parent_thread_id': 'missing'}}}),
+                       json.dumps({'subagent': {'thread_spawn': {'parent_thread_id': 'child'}}})):
+            with self.subTest(source=source):
+                with sqlite3.connect(database) as connection:
+                    connection.execute('UPDATE threads SET source=? WHERE id=\'child\'', (source,))
+                with self.assertRaises(RuntimeError):
+                    watch.native_identity(self.config, '123.fastpath', rollout, self.root / 'proc')
+        with sqlite3.connect(database) as connection:
+            connection.execute('DELETE FROM threads WHERE id=\'child\'')
+        with self.assertRaises(RuntimeError):
+            watch.native_identity(self.config, '123.fastpath', rollout, self.root / 'proc')
+        self.make_proc(789, 123, rollout)
+        with self.assertRaises(RuntimeError):
+            watch.native_identity(self.config, '123.fastpath', rollout, self.root / 'proc')
+
     def exercise_check(self, *, apply, native=None, screens=None, ledger=None, started_at=900, now=1100):
         if ledger:
             (self.root / 'recovery.json').write_text(json.dumps(ledger))
