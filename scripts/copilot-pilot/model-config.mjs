@@ -1,12 +1,27 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { usesMessages } from "./anthropic-request.mjs";
 
+// Native retries retain partial output. Keep this bound and the compaction
+// reserve together so a reconnect cannot silently consume all summary space.
+export const STREAM_MAX_RETRIES = 1;
+
 export function modelInputLimit(model) {
   const limits = model.capabilities?.limits ?? {};
   return Math.min(
     limits.max_prompt_tokens ?? Infinity,
     (limits.max_context_window_tokens ?? Infinity) -
       (limits.max_output_tokens ?? 0),
+  );
+}
+
+export function modelCompactLimit(model) {
+  const input = modelInputLimit(model);
+  const output = model.capabilities?.limits?.max_output_tokens ?? 0;
+  // Reserve the failed attempt and its retry before another native turn can
+  // compact. Small-window models retain at least half their input budget; this
+  // is headroom, not a guarantee that arbitrary tool output will fit.
+  return Math.floor(
+    Math.max(input * 0.5, input * 0.95 - output * (STREAM_MAX_RETRIES + 1)),
   );
 }
 
@@ -83,7 +98,7 @@ export async function catalogArguments(
       default_service_tier: null,
       context_window: limits.max_context_window_tokens,
       max_context_window: limits.max_context_window_tokens,
-      auto_compact_token_limit: Math.floor(modelInputLimit(model) * 0.95),
+      auto_compact_token_limit: modelCompactLimit(model),
       effective_context_window_percent: 95,
       input_modalities: model.capabilities.supports.vision
         ? ["text", "image"]
@@ -110,7 +125,7 @@ export async function modelArguments(
   visibleCatalogPath = catalogPath,
 ) {
   const limits = model.capabilities.limits;
-  const compact = Math.floor(modelInputLimit(model) * 0.95);
+  const compact = modelCompactLimit(model);
   const args = [
     "-c",
     `model_reasoning_effort=${JSON.stringify(reasoning)}`,

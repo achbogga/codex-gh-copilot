@@ -23,11 +23,7 @@ export function modelStateOwner(item) {
   return undefined;
 }
 
-// Codex already selects the source for a smaller total window. Equal/larger
-// windows can still have a smaller input allowance. Keep that *native* compact
-// request with the source too; never add a second summarization/model call.
-export function compactionModel(payload, permittedModels) {
-  const current = permittedModels.find((model) => model.id === payload.model);
+function nativeRequestKind(payload) {
   let kind = payload.client_metadata?.request_kind;
   if (!kind) {
     try {
@@ -36,7 +32,18 @@ export function compactionModel(payload, permittedModels) {
       ).request_kind;
     } catch {} // Missing/unknown metadata must not change the selected model.
   }
-  if (!current || kind !== "compaction" || !Array.isArray(payload.input))
+  return kind;
+}
+
+// Codex already selects the source for a smaller total window. Equal/larger
+// windows can still have a smaller input allowance. Keep that *native* compact
+// request with the source too; never add a second summarization/model call.
+export function compactionModel(payload, permittedModels) {
+  const current = permittedModels.find((model) => model.id === payload.model);
+  if (
+    !current || nativeRequestKind(payload) !== "compaction" ||
+    !Array.isArray(payload.input)
+  )
     return current;
   const owner = payload.input.map(modelStateOwner).findLast(Boolean);
   const source = permittedModels.find((model) => model.id === owner);
@@ -47,6 +54,35 @@ export function compactionModel(payload, permittedModels) {
   )
     return source;
   return current;
+}
+
+export function compactionHistory(payload) {
+  if (
+    nativeRequestKind(payload) !== "compaction" ||
+    !payload.model?.startsWith("gpt-") || !Array.isArray(payload.input)
+  ) return payload;
+  let omitted = 0;
+  const input = payload.input.filter((item) => {
+    // Only known GPT assistant reasoning with no visible summary is optional.
+    // Agent messages, tools, visible text and unknown ciphertext are untouched.
+    if (
+      item?.type === "reasoning" && !item.summary?.length && !item.content?.length &&
+      item.encrypted_content?.startsWith(modelStatePrefix) &&
+      modelStateOwner(item)?.startsWith("gpt-")
+    ) {
+      omitted++;
+      return false;
+    }
+    return true;
+  });
+  if (!omitted) return payload;
+  return { ...payload, input: [{
+    type: "message", role: "developer", content: [{ type: "input_text", text:
+      `For this context summary, the harness omitted ${omitted} opaque assistant reasoning items with no visible text. ` +
+      "The original native records are preserved. Visible messages and tool results are unchanged. " +
+      "Summarize the retained evidence; do not reconstruct omitted reasoning.",
+    }],
+  }, ...input] };
 }
 
 export function responseHistoryItem(item) {

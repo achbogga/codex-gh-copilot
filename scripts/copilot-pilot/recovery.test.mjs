@@ -11,6 +11,7 @@ import { responsesResponse } from "./responses-stream.mjs";
 import { codexInvocation } from "./run.mjs";
 import { portableAgentMessage } from "./agent-messages.mjs";
 import { requestError } from "./request-errors.mjs";
+import { modelCompactLimit } from "./model-config.mjs";
 
 const encode = (events) =>
   Buffer.from(
@@ -41,6 +42,7 @@ for (const mode of [
   "before-tool",
   "after-tool",
   "socket-after-tool",
+  "socket-after-compaction",
   "socket-exhausted",
   "interrupted",
   "exhausted",
@@ -75,6 +77,7 @@ for (const mode of [
       const requests = [];
       const socketFailure = mode.startsWith("socket-");
       const exhausted = mode.endsWith("exhausted");
+      const compactFirst = mode === "socket-after-compaction";
       bridge = await startBridge({
         getToken: async () => "synthetic",
         localToken: "local",
@@ -131,9 +134,15 @@ for (const mode of [
                 },
               },
             ]);
-          else if (requests.length > 1 && !exhausted)
-            body = encode(success);
-          else if (socketFailure && requests.length > 1)
+          else if (compactFirst && requests.length === 2)
+            body = encode([
+              { ...success[0], item: { ...success[0].item, content: [
+                { type: "output_text", text: "The counter command already ran once. Do not repeat it. Continue the synthetic check." },
+              ] } },
+              done,
+            ]);
+          else if ((compactFirst && requests.length === 3) ||
+                   (socketFailure && exhausted && requests.length > 1))
             body = new ReadableStream({
               start(controller) {
                 controller.error(
@@ -143,6 +152,8 @@ for (const mode of [
                 );
               },
             });
+          else if (requests.length > 1 && !exhausted)
+            body = encode(success);
           else if (mode === "interrupted")
             body = encode([
               {
@@ -183,7 +194,14 @@ for (const mode of [
                   } catch {}
                   await delay(25);
                 }
-                if (socketFailure)
+                if (compactFirst) {
+                  controller.enqueue(encode([{
+                    ...done, response: { ...done.response, usage: {
+                      input_tokens: 700000, output_tokens: 1, total_tokens: 700001,
+                    } },
+                  }]));
+                  controller.close();
+                } else if (socketFailure)
                   controller.error(
                     Object.assign(new Error("PRIVATE_SOCKET_DETAIL"), {
                       code: "UND_ERR_SOCKET",
@@ -215,8 +233,11 @@ for (const mode of [
             : []),
           ...(socketFailure
             ? [
-                "-c", "model_providers.copilot-pilot.stream_max_retries=1",
-                "-c", "model_auto_compact_token_limit=600000",
+                "-c", "model_context_window=1050000",
+                "-c", `model_auto_compact_token_limit=${modelCompactLimit({ capabilities: { limits: {
+                  max_context_window_tokens: 1050000, max_prompt_tokens: 922000, max_output_tokens: 128000,
+                } } })}`,
+                "-c", 'model_auto_compact_token_limit_scope="total"',
               ]
             : []),
           "exec",
@@ -252,11 +273,19 @@ for (const mode of [
       );
       assert.equal(
         requests.length,
-        exhausted ? (socketFailure ? 2 : 4) : mode === "external-watch" || mode.endsWith("denied") ? 1 : 2,
+        compactFirst ? 4 : mode === "external-watch" || mode.endsWith("denied") ? 1 : 2,
         text,
       );
       assert.doesNotMatch(text, /private upstream denial|PRIVATE_/);
       if (mode === "socket-exhausted") assert.match(text, /UND_ERR_SOCKET/);
+      if (compactFirst) {
+        assert.match(JSON.stringify(requests[1].input), /CONTEXT CHECKPOINT COMPACTION/,
+          "Native compaction must run before the next inference.");
+        for (const request of requests.slice(2)) {
+          assert.doesNotMatch(JSON.stringify(request.input), /CONTEXT CHECKPOINT COMPACTION/);
+          assert.match(JSON.stringify(request.input), /The counter command already ran once/);
+        }
+      }
       if (!failed) assert.match(output.stdout, /RECOVERED_OK/);
       if (mode === "after-tool" || socketFailure) {
         assert.equal(await readFile(join(root, "counter.txt"), "utf8"), "once");

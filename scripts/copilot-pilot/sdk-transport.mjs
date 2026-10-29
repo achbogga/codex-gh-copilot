@@ -24,6 +24,7 @@ import {
   modelStatePrefix,
   responseHistoryItem,
   compactionModel,
+  compactionHistory,
 } from "./model-state.mjs";
 import {
   portableAgentTools,
@@ -320,6 +321,16 @@ export async function createSdkTransport({
         });
         payload = { ...payload, model: model.id };
         init = { ...init, body: JSON.stringify(payload) };
+      }
+      const compactedHistory = compactionHistory(payload);
+      if (compactedHistory !== payload) {
+        payload = compactedHistory;
+        init = { ...init, body: JSON.stringify(payload) };
+        diagnose({
+          code: "COMPACTION_OPAQUE_REASONING_OMITTED",
+          model: model.id,
+          request_bytes: Buffer.byteLength(init.body),
+        });
       }
       let reasoningEffort;
       const recovered = recoverAgentProgress(payload, agentRecovery);

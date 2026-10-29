@@ -16,6 +16,7 @@ from pathlib import Path
 import re
 import sqlite3
 import subprocess
+import sys
 import time
 
 TAIL_BYTES = 2 * 1024**2
@@ -600,6 +601,9 @@ def main():
                                          'would-resume-after-compaction')
         if alert:
             (state / 'alert.txt').write_text(json.dumps(result, indent=2) + '\n')
+            # Cron discards routine stdout. Keep a fixed, actionable signal in
+            # its error log as well as the dashboard's structured alert file.
+            print(f"Goal recovery needs attention: {result['status']}. See {state / 'alert.txt'}.", file=sys.stderr)
         else:
             (state / 'alert.txt').unlink(missing_ok=True)
         print(json.dumps(result))

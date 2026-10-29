@@ -545,7 +545,7 @@ test("a fresh SDK replays durable GPT ciphertext across GPT models and omits unk
   assert.equal(input[3].id, call.id);
 });
 
-test("native compaction uses the authorized source's larger input budget with one real accounted request", async (t) => {
+test("native compaction retains visible evidence and uses the authorized source with one accounted request", async (t) => {
   const models = [
     {
       id: "gpt-destination",
@@ -580,10 +580,13 @@ test("native compaction uses the authorized source's larger input budget with on
   };
   const sdk = await fixture(
     t,
-    () =>
-      new Response(`data: ${JSON.stringify(done)}\n\n`, {
+    async (request) => {
+      assert.ok((await request.text()).length < 16384,
+        "Opaque reasoning must not exhaust the summary request before visible history can be summarized.");
+      return new Response(`data: ${JSON.stringify(done)}\n\n`, {
         headers: { "content-type": "text/event-stream" },
-      }),
+      });
+    },
     false,
     false,
     undefined,
@@ -599,9 +602,11 @@ test("native compaction uses the authorized source's larger input budget with on
     reasoning: { effort: "max" },
     input: [
       sealModelState(
-        { type: "reasoning", encrypted_content: "exact-source-bytes" },
+        { type: "reasoning", encrypted_content: "exact-source-bytes".repeat(500000) },
         models[1].id,
       ),
+      { type: "custom_tool_call", call_id: "write-once", name: "exec", input: "Already executed." },
+      { type: "custom_tool_call_output", call_id: "write-once", output: "The publication succeeded." },
       { role: "user", content: "Native compact prompt" },
     ],
   };
@@ -622,7 +627,9 @@ test("native compaction uses the authorized source's larger input budget with on
   assert.equal(sdk.requests.length, 1);
   const actual = JSON.parse(sdk.requests[0].body);
   assert.equal(actual.model, models[1].id);
-  assert.equal(actual.input[0].encrypted_content, "exact-source-bytes");
+  assert.match(actual.input[0].content[0].text, /omitted 1 opaque assistant reasoning/);
+  assert.deepEqual(actual.input.slice(1), original.input.slice(1));
+  assert.equal(original.input[0].encrypted_content.endsWith("exact-source-bytes"), true);
   assert.equal(original.model, models[0].id);
   assert.deepEqual(sdk.acknowledgements[0].usage, done.response.usage);
 });

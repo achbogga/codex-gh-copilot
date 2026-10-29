@@ -8,6 +8,7 @@ import {
   modelArguments,
   catalogArguments,
   reasoningForModel,
+  modelCompactLimit,
 } from "./model-config.mjs";
 
 test("switchable catalogs keep context and reasoning limits per model without global overrides", async (t) => {
@@ -48,7 +49,8 @@ test("switchable catalogs keep context and reasoning limits per model without gl
   ).models;
   assert.equal(entries[0].context_window, 1000000);
   assert.equal(entries[1].context_window, 200000);
-  assert.equal(entries[1].auto_compact_token_limit, 129200);
+  assert.equal(entries[0].auto_compact_token_limit, 572400);
+  assert.equal(entries[1].auto_compact_token_limit, 68000);
   assert.equal(entries[1].default_reasoning_level, "high");
   assert.equal(entries[0].priority, 0);
   assert.equal(reasoningForModel(small, "max"), "high");
@@ -75,7 +77,7 @@ test("context configuration reserves output space and uses the container catalog
     "-c",
     "model_context_window=1000000",
     "-c",
-    "model_auto_compact_token_limit=828400",
+    "model_auto_compact_token_limit=572400",
     "-c",
     'model_auto_compact_token_limit_scope="total"',
     "-c",
@@ -120,9 +122,17 @@ test("provider limits override bundled GPT context caps while retaining native m
           ...original,
           context_window: 1050000,
           max_context_window: 1050000,
-          auto_compact_token_limit: 875900,
+          auto_compact_token_limit: 619900,
         },
       ],
     },
   );
+});
+
+test("compaction reserves two maximum outputs when possible and handles absent output limits", () => {
+  const limits = { max_context_window_tokens: 1050000, max_prompt_tokens: 922000, max_output_tokens: 128000 };
+  const compact = modelCompactLimit({ capabilities: { limits } });
+  assert.ok(compact + 2 * limits.max_output_tokens < limits.max_prompt_tokens);
+  assert.equal(modelCompactLimit({ capabilities: { limits: { max_prompt_tokens: 100000 } } }), 95000);
+  assert.equal(modelCompactLimit({ capabilities: { limits: { max_context_window_tokens: 200000, max_output_tokens: 64000 } } }), 68000);
 });

@@ -7,6 +7,7 @@ import {
   modelStatePrefix,
   responseHistoryItem,
   compactionModel,
+  compactionHistory,
 } from "./model-state.mjs";
 import { thinkingPrefix, messagesRequest } from "./anthropic-request.mjs";
 import { model as claude } from "./anthropic-fixtures.mjs";
@@ -29,6 +30,36 @@ const models = [
   "grok-4.7",
   "mai-code-1.1-flash",
 ];
+
+test("native GPT compaction preserves visible history and marks omitted owned reasoning without mutating records", () => {
+  const opaque = sealModelState({ type: "reasoning", encrypted_content: "private-reasoning", summary: [] }, "gpt-source");
+  const retained = [
+    { type: "message", role: "user", content: "Keep the current goal." },
+    { type: "custom_tool_call", call_id: "once", name: "exec", input: "already executed" },
+    { type: "custom_tool_call_output", call_id: "once", output: "completed" },
+    { type: "agent_message", author: "/root/review", content: [{ type: "encrypted_content", encrypted_content: "protected-report" }] },
+    { type: "reasoning", encrypted_content: "unknown-owner" },
+    { ...opaque, summary: [{ type: "summary_text", text: "Visible summary stays." }] },
+    { ...opaque, content: [{ type: "reasoning_text", text: "Visible reasoning stays." }] },
+    sealModelState({ type: "reasoning", encrypted_content: "foreign-owner" }, "claude-source"),
+  ];
+  const payload = { model: "gpt-source", input: [opaque, ...retained],
+    client_metadata: { request_kind: "compaction" } };
+  const original = structuredClone(payload);
+  const result = compactionHistory(payload);
+  assert.deepEqual(payload, original);
+  assert.deepEqual(result.input.slice(1), retained);
+  assert.match(result.input[0].content[0].text, /omitted 1 opaque assistant reasoning/);
+  assert.doesNotMatch(JSON.stringify(result.input[0]), /private-reasoning|protected-report/);
+  for (const client_metadata of [{}, { request_kind: "turn" }, { "x-codex-turn-metadata": "broken" }]) {
+    const normal = { ...payload, client_metadata };
+    assert.equal(compactionHistory(normal), normal);
+  }
+  const nested = { ...payload, client_metadata: { "x-codex-turn-metadata": JSON.stringify({ request_kind: "compaction" }) } };
+  assert.deepEqual(compactionHistory(nested).input, result.input);
+  const foreign = { ...payload, model: "claude-source" };
+  assert.equal(compactionHistory(foreign), foreign);
+});
 
 test("native compaction stays with its source when total windows match but input budgets shrink", () => {
   const source = {

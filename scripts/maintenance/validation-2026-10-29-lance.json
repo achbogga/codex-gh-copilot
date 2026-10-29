@@ -1,0 +1,79 @@
+{
+  "checked_at": "2026-10-29T17:03:45.261260+00:00",
+  "incident": "Lance migration stopped on a typed context overflow after repeated streaming failures.",
+  "findings": [
+    "The default three native stream retries accumulated partial reasoning: provider request sizes grew from 13237236 to 22342717 bytes before a context rejection.",
+    "The former three-hour audit remained bound to an obsolete goal and skipped the active thread's replacement goal.",
+    "Native local compaction repeatedly received HTTP 400 context rejections while removing only one small oldest history item per request.",
+    "Root storage remained healthy at approximately 171 GiB available; this was not a reproduced storage failure."
+  ],
+  "shared_changes": {
+    "native_stream_retries": 1,
+    "compaction_threshold": "floor(max(0.5 * input_limit, 0.95 * input_limit - 2 * maximum_output_tokens))",
+    "gpt_threshold_at_observed_limits": 619900,
+    "opus_threshold_at_fixture_limits": 572400,
+    "native_gpt_compaction": "Omit only provenance-tagged GPT opaque assistant reasoning with no visible summary/content; explicitly mark the omission in the summary request. Preserve original records and visible messages/tool results. Normal inference retains owned reasoning.",
+    "alerting": "Recovery guard failures write a structured alert and an actionable cron stderr notice; healthy checks clear the alert."
+  },
+  "deployment": {
+    "lance_settings": {
+      "model_auto_compact_token_limit": 600000,
+      "stream_max_retries": 1,
+      "context_window": 1050000,
+      "reasoning_effort": "max"
+    },
+    "lance_watcher": "Replaced obsolete three-hour model audit with the existing deterministic one-minute recovery watcher; follows goal replacement only within the pinned native thread.",
+    "watcher_safeguards": "Explicit pauses, completion, budgets, detached Screen identity, pending drafts, bounded recovery allowances and a shared lock remain enforced.",
+    "old_audit_records_preserved": true,
+    "other_processes": "No unrelated running session was reloaded. Shared defaults and compaction transformation apply to new launches and reloads."
+  },
+  "live_verification": {
+    "same_thread_and_goal": true,
+    "goal_status": "active",
+    "loaded_settings_checked": true,
+    "normal_reloader_preserves_running_compaction": true,
+    "failed_compaction_intervention": "After confirming repeated size rejections, saved a private receipt, cancelled that failed loop gracefully, reloaded the same thread, and restored only the goal paused by this repair.",
+    "original_native_history_not_edited": true,
+    "compaction_request_bytes_before": 22363232,
+    "compaction_request_bytes_after": 1539299,
+    "compaction_input_tokens": 365322,
+    "compaction_completed_at": [
+      "2026-10-29T17:00:43.499Z"
+    ],
+    "fresh_tool_results": 7,
+    "fresh_tool_results_with_zero_exit": 6,
+    "new_native_error_events": 0,
+    "minute_cron_observed": "2026-10-29T17:02:02.659006+00:00",
+    "minute_cron_status": "goal-active"
+  },
+  "validation": {
+    "regular_bridge": {
+      "passed": 123,
+      "skipped": 24
+    },
+    "installed_native_recovery": {
+      "passed": 20
+    },
+    "watcher_unit_and_installed_native_screen": {
+      "passed": 50
+    },
+    "screen_reload_unit": {
+      "passed": 17
+    },
+    "total_distinct_passed": 210,
+    "key_regressions": [
+      "Installed Codex compacts proactively after simulated near-limit usage, then recovers from a socket failure while preserving an executed side effect exactly once.",
+      "Single native retry exhausts after two failed attempts; terminal denials and user cancellation remain terminal.",
+      "Native GPT compaction keeps visible history, agent messages, unknown/foreign ciphertext and visible reasoning summaries unchanged; it does not mutate saved input.",
+      "The SDK sends one small compaction inference with an explicit omission marker, exact visible tool-result history, authorized source model and real accounting.",
+      "Attached native Screen recovery, replaced-goal recovery, pause/budget/draft guards, and cron stderr alerts."
+    ],
+    "optional_long_running_sdk_tests": "Not rerun; regular SDK transport checks, installed-native checks and live same-thread compaction were verified."
+  },
+  "limits": [
+    "The local harness cannot guarantee that the remote service never disconnects.",
+    "Earlier compaction and a reasoning-free visible-history summary reduce the observed overflow paths; arbitrary visible tool output can still exceed provider limits.",
+    "Opaque assistant reasoning without visible text is excluded from GPT compaction requests, so summaries rely on visible conversation and tool evidence. Original records remain available locally.",
+    "Recovery stays bounded and does not override explicit user pauses or terminal auth/policy/quota errors."
+  ]
+}

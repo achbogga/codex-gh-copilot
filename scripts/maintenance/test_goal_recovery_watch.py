@@ -1,4 +1,6 @@
 import importlib.util
+import io
+from contextlib import redirect_stderr, redirect_stdout
 import json
 import os
 from pathlib import Path
@@ -31,6 +33,22 @@ class RecoveryTests(unittest.TestCase):
 
     def reason(self, goal=None, evidence=None, ledger=None, now=1100):
         return watch.blocked_reason(self.config, goal or self.goal, evidence or self.evidence, ledger or {}, now)
+
+    def test_cron_errors_are_visible_and_healthy_checks_clear_the_alert(self):
+        config = self.root / 'watch.json'
+        config.write_text(json.dumps({**self.config, 'state_dir': str(self.root)}))
+        for status, exit_code in [('goal-absent-or-replaced', 1), ('goal-active', 0)]:
+            stderr = io.StringIO()
+            with (patch.object(watch.sys, 'argv', ['watch', '--config', str(config)]),
+                  patch.object(watch, 'check', return_value={'status': status}),
+                  redirect_stdout(io.StringIO()), redirect_stderr(stderr)):
+                self.assertEqual(watch.main(), exit_code)
+            self.assertEqual((self.root / 'alert.txt').exists(), bool(exit_code))
+            if exit_code:
+                self.assertIn(status, stderr.getvalue())
+                self.assertIn(str(self.root / 'alert.txt'), stderr.getvalue())
+            else:
+                self.assertEqual(stderr.getvalue(), '')
 
     def test_human_pauses_terminal_states_replaced_goals_and_budgets(self):
         for status in ('active', 'paused', 'complete', 'completed', 'usage_limited'):

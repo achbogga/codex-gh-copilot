@@ -6,6 +6,7 @@ import { isAbsolute, join, resolve } from "node:path";
 import { parseArgs, promisify } from "node:util";
 import { pathToFileURL } from "node:url";
 import { listModels, startBridge } from "./bridge.mjs";
+import { STREAM_MAX_RETRIES } from "./model-config.mjs";
 
 export function tokenSource({ command, environment = process.env }) {
   const token = environment.COPILOT_PILOT_TOKEN?.trim();
@@ -58,7 +59,7 @@ export function codexInvocation({
   // This is the child's dedicated Codex configuration directory, not the user's home.
   env.CODEX_HOME = stateDir;
   env.COPILOT_PILOT_LOCAL_TOKEN = localToken;
-  const provider = `{ name = "Copilot pilot", base_url = "${url}", env_key = "COPILOT_PILOT_LOCAL_TOKEN", wire_api = "responses", requires_openai_auth = false, supports_websockets = false, stream_idle_timeout_ms = 360000, request_max_retries = 0, stream_max_retries = 3, capabilities = { remote_compaction = "unsupported" } }`;
+  const provider = `{ name = "Copilot pilot", base_url = "${url}", env_key = "COPILOT_PILOT_LOCAL_TOKEN", wire_api = "responses", requires_openai_auth = false, supports_websockets = false, stream_idle_timeout_ms = 360000, request_max_retries = 0, stream_max_retries = ${STREAM_MAX_RETRIES}, capabilities = { remote_compaction = "unsupported" } }`;
   return {
     env,
     args: [
