@@ -6,6 +6,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import sqlite3
 import subprocess
@@ -30,6 +31,10 @@ class NativeRecoveryTests(unittest.TestCase):
     def test_native_connection_timeout_recovers_without_restarting_the_writer(self):
         self.run_native_recovery(compact=False, early_connection=True)
 
+    @unittest.skipUnless(shutil.which('script'), 'The attached Screen check needs util-linux script.')
+    def test_native_retry_keeps_an_attached_goal_running_without_the_watcher(self):
+        self.run_native_recovery(compact=False, native_retry=True)
+
     def test_native_compaction_completes_before_the_same_goal_resumes_and_runs_tools(self):
         self.run_native_recovery(compact=True)
 
@@ -39,7 +44,7 @@ class NativeRecoveryTests(unittest.TestCase):
     def test_control_center_pauses_compacts_and_resumes_the_exact_native_goal(self):
         self.run_native_recovery(compact=False, controls=True)
 
-    def run_native_recovery(self, compact, overflow=False, follow_replaced=False, controls=False, early_connection=False):
+    def run_native_recovery(self, compact, overflow=False, follow_replaced=False, controls=False, early_connection=False, native_retry=False):
         with tempfile.TemporaryDirectory(prefix='codex-watch-native-') as directory:
             root = Path(directory)
             home = root / 'state'
@@ -78,6 +83,8 @@ class NativeRecoveryTests(unittest.TestCase):
                         events = [{'type': 'response.failed', 'response': {'error': {
                             'code': 'context_length_exceeded' if overflow else 'stream_interrupted',
                             'message': 'Copilot stream ended before completion (UND_ERR_SOCKET).'}}}]
+                        if native_retry:
+                            recovered.set()
                     elif (compact or controls) and not compaction_requests and 'CONTEXT CHECKPOINT COMPACTION' in json.dumps(body):
                         compaction_requests.append(True)
                         events = [{'type': 'response.output_item.done', 'item': {
@@ -96,7 +103,7 @@ class NativeRecoveryTests(unittest.TestCase):
                     else:
                         # Hold this synthetic turn until the test closes its own
                         # Screen. No remote model or goal continuation is needed.
-                        finish.wait(timeout=10) if controls else time.sleep(2)
+                        finish.wait(timeout=10) if controls or native_retry else time.sleep(2)
                         events = [{'type': 'response.failed', 'response': {'error': {
                             'code': 'invalid_prompt', 'message': 'Synthetic test finished.'}}}]
                     try:
@@ -115,7 +122,9 @@ class NativeRecoveryTests(unittest.TestCase):
                        '-c', 'features.multi_agent=false', '-c', 'model_provider="synthetic"',
                        '-c', 'model="gpt-6.1-sol"', '-c', 'model_providers.synthetic={name="Synthetic",'
                        f'base_url="http://127.0.0.1:{server.server_port}/v1",wire_api="responses",'
-                       'requires_openai_auth=false,request_max_retries=0,stream_max_retries=0}']
+                       'requires_openai_auth=false,request_max_retries=0,stream_max_retries='
+                       + ('1}' if native_retry else '0}')]
+            attachment = None
             try:
                 subprocess.run(['screen', '-U', '-dmS', name, *command],
                                env=env, check=True, timeout=10)
@@ -130,6 +139,19 @@ class NativeRecoveryTests(unittest.TestCase):
                         break
                     time.sleep(.2)
                 self.assertIn('Ask Codex to do anything', screen, screen)
+                if native_retry:
+                    # script supplies a controlling PTY without detaching or
+                    # sending input to any real user's Screen.
+                    attachment = subprocess.Popen(
+                        ['script', '-q', '-e', '-c', shlex.join(['screen', '-r', session]), '/dev/null'],
+                        stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
+                    deadline = time.monotonic() + 10
+                    while time.monotonic() < deadline:
+                        listing = subprocess.check_output(['screen', '-ls'], text=True)
+                        if any(session in line and '(Attached)' in line for line in listing.splitlines()):
+                            break
+                        time.sleep(.1)
+                    self.assertTrue(any(session in line and '(Attached)' in line for line in listing.splitlines()), listing)
                 subprocess.run(['screen', '-S', session, '-p', '0', '-X', 'stuff',
                                 '/goal synthetic local transport recovery check'], check=True)
                 time.sleep(.4)
@@ -153,6 +175,8 @@ class NativeRecoveryTests(unittest.TestCase):
                 while time.monotonic() < deadline:
                     try:
                         goal, rollout = watch.read_native(config)
+                        if native_retry and marker.exists():
+                            break
                         if goal and goal['status'] == 'blocked':
                             # The goal SQLite commit can precede the rollout's
                             # failed-completion record. Recovery correctly waits
@@ -164,6 +188,17 @@ class NativeRecoveryTests(unittest.TestCase):
                         pass
                     time.sleep(.2)
                 self.assertIsNotNone(goal)
+                if native_retry:
+                    self.assertEqual(goal['status'], 'active', watch.capture_screen(session, 0, state))
+                    self.assertTrue(marker.exists(), 'Native retry did not execute the continuation tool.')
+                    self.assertEqual(marker.read_text(), 'WATCHDOG_NATIVE_OK')
+                    self.assertEqual(goal['thread_id'], config['thread_id'])
+                    self.assertEqual(request_count.count(False), 1)
+                    self.assertTrue(any(request_count))
+                    self.assertFalse((state / 'recovery.json').exists(), 'Native retry must not need the watcher.')
+                    listing = subprocess.check_output(['screen', '-ls'], text=True)
+                    self.assertTrue(any(session in line and '(Attached)' in line for line in listing.splitlines()), listing)
+                    return
                 self.assertEqual(goal['status'], 'blocked')
                 config['goal_id'] = 'previous-goal' if follow_replaced else goal['goal_id']
                 config['follow_current_goal'] = follow_replaced
@@ -231,6 +266,13 @@ class NativeRecoveryTests(unittest.TestCase):
                 finish.set()
                 subprocess.run(['screen', '-S', name, '-X', 'quit'], check=False,
                                capture_output=True, timeout=10)
+                if attachment:
+                    attachment.stdin.close()
+                    try:
+                        attachment.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        attachment.terminate()
+                        attachment.wait(timeout=5)
                 server.shutdown()
                 server.server_close()
                 time.sleep(.5)

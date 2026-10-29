@@ -1,0 +1,62 @@
+{
+  "checked_at": "2026-10-29T14:42:33.073107+00:00",
+  "incident": "Fastpath stalled after UND_ERR_SOCKET while its Screen was attached.",
+  "findings": [
+    "The running native process had stream_max_retries=0, so the first stream failure was terminal.",
+    "The cron watcher correctly declined to submit terminal input to an attached Screen.",
+    "Diagnostics recorded a non-terminal upstream socket failure after 631232 ms while receiving output; the remote cause is not established.",
+    "The earlier zero-retry workaround prevented repeated large-history retries but left attached sessions without automatic transport recovery."
+  ],
+  "repair": {
+    "scope": "Only the existing Fastpath native thread; other sessions were not reloaded.",
+    "model_auto_compact_token_limit": 600000,
+    "stream_max_retries": 1,
+    "context_window": 1050000,
+    "reasoning_effort": "max",
+    "configuration": "Private thread_recovery_overrides persisted and re-applied by the existing guarded Screen reloader.",
+    "runtime": "Existing latest checked-in bridge loaded by a graceful exact-thread reload; no runtime package update."
+  },
+  "validation": {
+    "regular_bridge": {
+      "passed": 121,
+      "skipped": 23
+    },
+    "installed_native_bridge_recovery": {
+      "passed": 19,
+      "skipped": 0
+    },
+    "installed_native_screen": {
+      "passed": 6,
+      "skipped": 0
+    },
+    "screen_reload_unit": {
+      "passed": 17
+    },
+    "watcher_unit": {
+      "passed": 43
+    },
+    "total_distinct_passed": 206,
+    "new_regressions": [
+      "UND_ERR_SOCKET after a real shell side effect: one native retry includes the completed tool result and the side effect occurs exactly once.",
+      "Two consecutive UND_ERR_SOCKET failures stop at the configured single retry without duplicating the tool side effect.",
+      "An attached real Screen keeps its native goal active across a synthetic stream failure and executes a continuation tool without invoking the watcher."
+    ],
+    "method": "Installed Codex 0.164.0 and synthetic local inference endpoints. No injected failure in the user session."
+  },
+  "live_verification": {
+    "same_thread_and_goal": true,
+    "goal_status": "active",
+    "old_writer_and_launcher_exited_before_replacement": true,
+    "replacement_settings_checked_in_process_arguments": true,
+    "native_compaction_completed": true,
+    "fresh_tool_results": 8,
+    "fresh_tool_results_containing_zero_exit": 7,
+    "new_native_error_events": 0
+  },
+  "limits": [
+    "Remote socket closures cannot be prevented by the local bridge; recovery is bounded.",
+    "Earlier compaction reserves more room for partial reasoning but does not guarantee that arbitrary tool output fits.",
+    "The watcher still preserves attached terminals, pending drafts, user pauses, goal budgets and exhausted retry allowances.",
+    "Optional long-running real SDK tests were not rerun for this private configuration change."
+  ]
+}

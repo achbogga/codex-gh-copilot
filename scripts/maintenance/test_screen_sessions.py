@@ -138,15 +138,15 @@ class ScreenSessionTests(unittest.TestCase):
 
     def test_thread_recovery_overrides_survive_reload_without_affecting_other_sessions(self):
         target = self.target()
-        overrides = {'model_auto_compact_token_limit': 750000,
-                     'model_providers.copilot-pilot.stream_max_retries': 0}
+        overrides = {'model_auto_compact_token_limit': 600000,
+                     'model_providers.copilot-pilot.stream_max_retries': 1}
         config = {'codex_bin': '/new/codex', 'thread_recovery_overrides': {'exact-thread': overrides}}
         args = sessions.launch_arguments(target, config)
-        self.assertIn('model_auto_compact_token_limit=750000', args)
-        self.assertIn('model_providers.copilot-pilot.stream_max_retries=0', args)
+        self.assertIn('model_auto_compact_token_limit=600000', args)
+        self.assertIn('model_providers.copilot-pilot.stream_max_retries=1', args)
         self.assertEqual(args[-2:], ['resume', 'exact-thread'])
         target['thread']['id'] = 'unrelated-thread'
-        self.assertNotIn('model_auto_compact_token_limit=750000', sessions.launch_arguments(target, config))
+        self.assertNotIn('model_auto_compact_token_limit=600000', sessions.launch_arguments(target, config))
 
     def test_recovery_overrides_reject_unsafe_or_malformed_settings(self):
         for overrides in ({'model_providers.copilot-pilot.base_url': 'http://unapproved'},

@@ -40,6 +40,8 @@ const success = [
 for (const mode of [
   "before-tool",
   "after-tool",
+  "socket-after-tool",
+  "socket-exhausted",
   "interrupted",
   "exhausted",
   "external-watch",
@@ -71,6 +73,8 @@ for (const mode of [
       const state = join(root, "state");
       await mkdir(state);
       const requests = [];
+      const socketFailure = mode.startsWith("socket-");
+      const exhausted = mode.endsWith("exhausted");
       bridge = await startBridge({
         getToken: async () => "synthetic",
         localToken: "local",
@@ -127,8 +131,18 @@ for (const mode of [
                 },
               },
             ]);
-          else if (requests.length > 1 && mode !== "exhausted")
+          else if (requests.length > 1 && !exhausted)
             body = encode(success);
+          else if (socketFailure && requests.length > 1)
+            body = new ReadableStream({
+              start(controller) {
+                controller.error(
+                  Object.assign(new Error("PRIVATE_SOCKET_DETAIL"), {
+                    code: "UND_ERR_SOCKET",
+                  }),
+                );
+              },
+            });
           else if (mode === "interrupted")
             body = encode([
               {
@@ -140,7 +154,7 @@ for (const mode of [
                 },
               },
             ]);
-          else if (mode === "after-tool")
+          else if (mode === "after-tool" || socketFailure)
             body = new ReadableStream({
               async start(controller) {
                 controller.enqueue(
@@ -169,7 +183,13 @@ for (const mode of [
                   } catch {}
                   await delay(25);
                 }
-                controller.close();
+                if (socketFailure)
+                  controller.error(
+                    Object.assign(new Error("PRIVATE_SOCKET_DETAIL"), {
+                      code: "UND_ERR_SOCKET",
+                    }),
+                  );
+                else controller.close();
               },
             });
           else
@@ -192,6 +212,12 @@ for (const mode of [
           "--yolo",
           ...(mode === "external-watch"
             ? ["-c", "model_providers.copilot-pilot.stream_max_retries=0"]
+            : []),
+          ...(socketFailure
+            ? [
+                "-c", "model_providers.copilot-pilot.stream_max_retries=1",
+                "-c", "model_auto_compact_token_limit=600000",
+              ]
             : []),
           "exec",
           "--skip-git-repo-check",
@@ -221,17 +247,18 @@ for (const mode of [
       const text = output.stdout + output.stderr;
       assert.equal(
         failed,
-        mode.endsWith("exhausted") || mode === "external-watch" || mode.endsWith("denied"),
+        exhausted || mode === "external-watch" || mode.endsWith("denied"),
         text,
       );
       assert.equal(
         requests.length,
-        mode.endsWith("exhausted") ? 4 : mode === "external-watch" || mode.endsWith("denied") ? 1 : 2,
+        exhausted ? (socketFailure ? 2 : 4) : mode === "external-watch" || mode.endsWith("denied") ? 1 : 2,
         text,
       );
       assert.doesNotMatch(text, /private upstream denial|PRIVATE_/);
+      if (mode === "socket-exhausted") assert.match(text, /UND_ERR_SOCKET/);
       if (!failed) assert.match(output.stdout, /RECOVERED_OK/);
-      if (mode === "after-tool") {
+      if (mode === "after-tool" || socketFailure) {
         assert.equal(await readFile(join(root, "counter.txt"), "utf8"), "once");
         assert.ok(
           requests[1].input.some(
