@@ -1,5 +1,8 @@
 import importlib.util
+import json
 from pathlib import Path
+import sqlite3
+import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
@@ -9,6 +12,35 @@ spec.loader.exec_module(sessions)
 
 
 class ScreenSessionTests(unittest.TestCase):
+    def test_verified_native_editor_thread_is_a_root_but_subagents_are_not(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            database = home / 'state_5.sqlite'
+            with sqlite3.connect(database) as connection:
+                connection.execute('CREATE TABLE threads (id TEXT, source TEXT, cwd TEXT, model TEXT, reasoning_effort TEXT, rollout_path TEXT)')
+                connection.executemany('INSERT INTO threads VALUES (?,?,?,?,?,?)', [
+                    ('editor-root', 'vscode', '/work', 'gpt-6-astra', 'max', '/rollout-editor.jsonl'),
+                    ('cli-root', 'cli', '/work', 'gpt-6.1-sol', 'max', '/rollout-cli.jsonl'),
+                    ('child', '{"sub_agent":{"thread_spawn":{"parent_thread_id":"editor-root"}}}',
+                     '/work', 'gpt-6-astra', 'max', '/rollout-child.jsonl'),
+                ])
+            original = database.read_bytes()
+            for identifier in ('editor-root', 'cli-root', 'child', 'unknown'):
+                with patch.object(sessions.Path, 'iterdir', return_value=iter([])):
+                    found = sessions.root_thread(home, 123, identifier)
+                if identifier in ('editor-root', 'cli-root'):
+                    self.assertEqual(found['id'], identifier)
+                else:
+                    self.assertIsNone(found)
+            with (patch.object(sessions.Path, 'iterdir', return_value=iter([Path('/fd/1'), Path('/fd/2')])),
+                  patch.object(sessions.os, 'readlink', side_effect=['/rollout-editor.jsonl', '/rollout-cli.jsonl'])):
+                with self.assertRaisesRegex(RuntimeError, 'Multiple root threads'):
+                    sessions.root_thread(home, 123)
+            with (patch.object(sessions.Path, 'iterdir', return_value=iter([Path('/fd/1'), Path('/fd/2')])),
+                  patch.object(sessions.os, 'readlink', side_effect=['/rollout-editor.jsonl', '/rollout-cli.jsonl'])):
+                self.assertEqual(sessions.root_thread(home, 123, 'editor-root', verified=True)['id'], 'editor-root')
+            self.assertEqual(database.read_bytes(), original)
+
     def target(self):
         return {'pid': 123, 'start': 'old', 'screen': '45.example', 'window': '0',
                 'home': '/private/state', 'backend': 'copilot', 'controller': False,
@@ -35,6 +67,15 @@ class ScreenSessionTests(unittest.TestCase):
         self.assertTrue(sessions.busy('Compacting context (2m, esc to interrupt)\n' + idle))
         self.assertFalse(sessions.empty_composer(idle.replace('Ask Codex to do anything', 'unsent draft')))
 
+    def test_controller_waits_passively_for_two_idle_captures_before_probing(self):
+        idle = ': Ask Codex to do anything\n'
+        with (patch.object(sessions, 'capture', side_effect=[
+                'Working (1m, esc to interrupt)\n' + idle, idle, ': user draft\n', idle, idle]) as capture,
+              patch.object(sessions.time, 'sleep'), patch.object(sessions, 'stuff') as stuff):
+            sessions.wait_for_idle_screen(self.target(), Path('/private'))
+        self.assertEqual(capture.call_count, 5)
+        stuff.assert_not_called()
+
     def test_status_probe_reads_the_existing_clients_exact_thread_without_a_model_prompt(self):
         identifier = '11111111-2222-3333-4444-555555555555'
         idle = ': Ask Codex to do anything\n'
@@ -47,7 +88,8 @@ class ScreenSessionTests(unittest.TestCase):
 
     def test_status_probe_preserves_drafts_compaction_and_reused_processes(self):
         idle = ': Ask Codex to do anything\n'
-        for text in (': unfinished draft\n', 'Compacting context\n' + idle):
+        for text in (': unfinished draft\n', 'Compacting context\n' + idle,
+                     'This conversation is open in another app\n' + idle):
             with (patch.object(sessions, 'alive', return_value=True),
                   patch.object(sessions, 'capture', return_value=text), patch.object(sessions, 'stuff') as stuff):
                 self.assertIsNone(sessions.probe_status_thread(self.target(), Path('/private')))
@@ -98,7 +140,7 @@ class ScreenSessionTests(unittest.TestCase):
                 self.assertEqual(result[0]['backend'], backend)
                 self.assertEqual(result[0]['identity_source'], 'screen-status')
                 self.assertEqual(result[0]['thread']['id'], thread['id'])
-                root.assert_called_with(Path('/private/state'), 123, thread['id'])
+                root.assert_called_with(Path('/private/state'), 123, thread['id'], verified=True)
 
     def test_targeted_inventory_does_not_probe_another_screen(self):
         proc = Mock();proc.name = '123';proc.stat.return_value.st_uid = sessions.os.getuid()
@@ -122,7 +164,7 @@ class ScreenSessionTests(unittest.TestCase):
         with (patch.object(sessions, 'probe_status_thread', return_value='exact-thread'),
               patch.object(sessions, 'root_thread', return_value=target['thread']) as root):
             self.assertEqual(sessions.verified_thread(target, Path('/private')), target['thread'])
-            root.assert_called_once_with(Path('/private/state'), 123, 'exact-thread')
+            root.assert_called_once_with(Path('/private/state'), 123, 'exact-thread', verified=True)
 
     def test_failed_status_probe_never_binds_an_unrelated_tui_to_the_controller(self):
         proc = Mock();proc.name = '123';proc.stat.return_value.st_uid = sessions.os.getuid()
@@ -175,6 +217,49 @@ class ScreenSessionTests(unittest.TestCase):
         self.assertIsNone(deferred)
         self.assertEqual(sessions.continuation_policy({'status': 'paused'}, False, 'Continue only the user status request.'),
                          ('Continue only the user status request.', None))
+
+    def test_native_ownership_retry_waits_without_forking_or_probing_the_notice(self):
+        target = self.target()
+        target['backend'] = 'native'
+        replacement = {**target, 'pid': 456, 'start': 'new'}
+        idle = ': Ask Codex to do anything\n'
+        with (patch.object(sessions, 'alive', side_effect=[True, True, False]),
+              patch.object(sessions, 'verified_thread', return_value=target['thread']),
+              patch.object(sessions, 'goal', return_value=None),
+              patch.object(sessions, 'capture', side_effect=[idle, 'This conversation is open in another app', idle, idle]),
+              patch.object(sessions, 'inventory', return_value=[replacement]) as inventory,
+              patch.object(sessions, 'enter_command') as enter,
+              patch.object(sessions, 'stuff') as stuff,
+              patch.object(sessions.time, 'sleep'),
+              patch.object(sessions.time, 'monotonic', side_effect=range(10, 100)),
+              patch.object(sessions.os, 'readlink', return_value='/new/codex')):
+            result = sessions.reload_target(target, {'codex_bin': '/new/codex'}, Path('/private'), drain_seconds=0)
+        self.assertEqual(result['status'], 'reloaded-exact-thread')
+        self.assertEqual(result['thread_id'], target['thread']['id'])
+        self.assertEqual([call.args[1] for call in stuff.call_args_list], ['r'])
+        self.assertEqual(inventory.call_count, 2)
+        self.assertEqual(enter.call_args_list[0].args[1], '/quit')
+        self.assertIn('resume exact-thread', enter.call_args_list[1].args[1])
+        self.assertEqual(enter.call_count, 2)
+
+    def test_controller_handoff_refuses_a_changed_thread_or_window(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)
+            config = state / 'config.json'
+            config.write_text(json.dumps({}))
+            target = self.target()
+            for changed in ({**target, 'thread': {**target['thread'], 'id': 'another-thread'}},
+                            {**target, 'window': '1'}):
+                with (patch.object(sessions.os, 'umask'),
+                      patch('sys.argv', ['screen_sessions', '--config', str(config), '--state-dir', str(state),
+                                        '--only', target['screen'], '--controller-thread', target['thread']['id'],
+                                        '--wait-controller-idle', '--apply']),
+                      patch.object(sessions, 'wait_for_idle_screen'),
+                      patch.object(sessions, 'inventory', return_value=[changed]),
+                      patch.object(sessions, 'reload_target') as reload):
+                    with self.assertRaisesRegex(RuntimeError, 'Controller thread or window changed'):
+                        sessions.main()
+                    reload.assert_not_called()
 
     def test_changed_writer_or_thread_prevents_any_screen_input(self):
         target = self.target()

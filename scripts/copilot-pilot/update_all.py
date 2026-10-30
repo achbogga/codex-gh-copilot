@@ -42,6 +42,7 @@ def queue_controller(config_path, maintenance, state, report):
         handoff = subprocess.Popen([sys.executable, str(maintenance), '--config', str(config_path),
                                    '--state-dir', str(state / 'controller'), '--only', target['screen'],
                                    '--controller-thread', target['thread_id'], '--wait-controller-idle',
+                                   '--controller-window', str(target.get('window', '0')),
                                    '--probe-native', '--continuation', note, '--apply'], stdin=subprocess.DEVNULL,
                                   stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
     report['controller_handoff_pid'] = handoff.pid
@@ -100,17 +101,21 @@ def main():
             if diagnostics.exists() and diagnostics.stat().st_size >= 512 * 1024:
                 stamp = datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%S%f')
                 diagnostics.rename(diagnostics.with_name('stream-diagnostics.' + stamp + '.jsonl'))
-        subprocess.run([*inventory_args, '--apply'], check=True)
+        reload_result = subprocess.run([*inventory_args, '--apply'], check=False)
         report_file = state / 'screens/reload-report.json'
         report = json.loads(report_file.read_text())
         report['runtime'] = runtime
+        report['status'] = 'updated-with-session-failures' if reload_result.returncode else 'updated'
+        report['session_reload_exit_code'] = reload_result.returncode
         report['validation'] = 'Bridge/native/official-runtime short streams and maintenance tests passed.'
-        queue_controller(args.config, maintenance, state, report)
         report['finished_at'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
         atomic_text(state / 'update-report.json', json.dumps(report, indent=2) + '\n')
         atomic_text(root / 'latest-report.txt', str(state / 'update-report.json') + '\n')
-        print(json.dumps({'status': 'updated', 'runtime': runtime, 'report': str(state / 'update-report.json')}))
+        queue_controller(args.config, maintenance, state, report)
+        atomic_text(state / 'update-report.json', json.dumps(report, indent=2) + '\n')
+        print(json.dumps({'status': report['status'], 'runtime': runtime, 'report': str(state / 'update-report.json')}))
+        return int(bool(reload_result.returncode))
 
 
 if __name__ == '__main__':
-    main()
+    raise SystemExit(main())

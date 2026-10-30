@@ -242,7 +242,7 @@ In Docker mode, GitHub credentials remain outside the container. A private Unix 
 - ChatGPT-hosted features are not conferred by a Copilot seat. Copilot-specific governance controls are not automatically equivalent to Codex's controls; enterprise approval of this custom client and its data handling remains an organizational question.
 - Access denials and unsupported models fail closed. The adapter forwards each request once; Codex owns the bounded stream recovery described above. Upstream HTTP error bodies are suppressed, inference requests are bounded to 32 MiB, and a disconnected caller cancels inference. Size failures enter Codex's context-limit handling. TLS verification stays enabled.
 
-The SDK transport hook is experimental and pinned to SDK 1.0.25. Its internal completion acknowledgement preserves the real usage/accounting while preventing the runtime from executing Codex tool calls. Native GPT Responses output retains its content and accounting, with portable collaboration metadata and durable ownership around opaque reasoning; Grok and MAI tool events are translated to Codex custom-tool events. Generic protocol errors can be classified into Responses failure events.
+The SDK transport hook is experimental and pinned to SDK 1.0.28. Its Zod dependency is overridden to 4.6.6 to fix GHSA-mrhx-c7xc-m3w5 without downgrading the SDK. Its internal completion acknowledgement preserves the real usage/accounting while preventing the runtime from executing Codex tool calls. Native GPT Responses output retains its content and accounting, with portable collaboration metadata and durable ownership around opaque reasoning; Grok and MAI tool events are translated to Codex custom-tool events. Generic protocol errors can be classified into Responses failure events.
 
 ## Installation and upstream checks on the configured machine
 
@@ -251,19 +251,24 @@ The SDK transport hook is experimental and pinned to SDK 1.0.25. Its internal co
 The `codex-copilot-updates.timer` user service checks daily between 10:00 and 10:30 UTC and catches up after downtime. It fetches the official `upstream/main` reference and compares installed Codex, Copilot CLI and SDK versions with their latest stable GitHub releases. Prereleases are excluded. Fetching does not merge source changes or install packages; upgrades need compatibility checks before adopting them.
 
 ```bash
-cxf update         # Fetch and merge upstream source into this fork, then check runtime releases
+cxf update         # Merge source, install verified runtimes/SDK, test, then reload existing sessions
 cxf update --check # Fetch and check only; no merge or package installation
+cxf update --sync  # Merge source only; running processes keep their loaded runtimes
 cxf update --show  # Read the cached report
 systemctl --user list-timers codex-copilot-updates.timer
 ```
 
 Release reminders appear when launching `codex-copilot`, `cx`, or `cxf` in a terminal. Failed checks and reports older than three days also produce a notice. These are local terminal reminders; they do not send email or chat messages. Configuration and results live in `~/.codex-copilot-pilot/update-config.json` and `update-report.json`. The monitor uses public GitHub metadata and does not read Copilot credentials.
 
-`cxf update` always targets the configured harness checkout, regardless of your current project. It requires a clean `main` branch, preserves fork commits through a normal merge, and stops on conflicts without resetting or stashing work. It runs without a model request or Copilot login. Runtime package upgrades remain separate compatibility-tested changes; merging source does not replace the installed Codex binary. The existing `codex-copilot-updates` command remains a check-only alias.
+`cxf update` always targets the configured harness checkout, regardless of your current project. It requires a clean `main` branch, preserves fork commits through a normal merge, and stops on conflicts without resetting or stashing work. It installs immutable Codex/Copilot bundles and the SDK, runs bridge/native/maintenance checks, then resumes each identified thread in its existing Screen shell. The existing `codex-copilot-updates` command remains a check-only alias.
+
+Threads originally created in the editor are eligible for reload. Ambiguous histories require the live TUI's exact `/status` identity; subagents are excluded. Pending drafts and running compaction defer a reload, with failures retained in the aggregate report and a nonzero exit status. An ownership notice uses bounded native retry without bypassing the other writer's lock. The controlling session reloads last: a detached supervisor waits passively for its turn to finish, verifies the same thread and window, then resumes verification. A changed thread or window cancels that handoff. Private reports are saved under the configured runtime directory's sibling `updates/`; `latest-report.txt` points to the latest aggregate report.
 
 Stop scheduled checks with `systemctl --user disable --now codex-copilot-updates.timer`. To adopt upstream source, first review `git log HEAD..upstream/main`; fetching alone does not update the installed Codex binary.
 
 ## Validation
+
+The [October 30 update report](validation-2026-10-30-updates.json) records upstream synchronization through `a727f1f11ae0`, Codex 0.166.0, Copilot CLI 1.0.105, SDK 1.0.28, and Node 22.23.4. All 150 bridge/native/official-runtime checks, 129 maintenance checks, and 14 updater checks passed with none skipped. Official-runtime synthetic streams used five seconds. The scoped Zod 4.6.6 override passed the same bridge checks, and npm reported zero known vulnerabilities. The report tracks exact-session reload verification and the final controller handoff separately.
 
 The October 22 update merged 82 upstream commits through `342ed69a174c`, upgraded Copilot CLI to 1.0.102, SDK to 1.0.25 and host Node to 22.23.4. Codex 0.163.0 remained the latest stable binary. The installed host and Docker launchers use the new Node version; existing sessions continue with their already-loaded runtimes. The [update validation report](validation-2026-10-22-updates.json) records the verified artifact checksums and compatibility results. All 123 unit/native checks and 15 updater/maintenance Python checks passed, including HTTP 400/413 context recovery and compaction. Both 660-second synthetic full-bridge stream checks passed on the installed native Codex, official Copilot runtime and new SDK, each with one inference request, one runtime request, accepted accounting and no reconnects. All 256 synthetic transitions across the 16-model seat passed, including source-model compaction with simulated near-limit usage. Four live GPT-6.1 Sol/Opus 5.5 transitions verified the served model, native tools, saved history and patched files. Both generated sessions also passed all six fresh-process resume/switch stages. These results do not measure physical maximum-context capacity or resolve the previously recorded Opus 5 provider refusals.
 

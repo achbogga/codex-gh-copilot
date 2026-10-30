@@ -7,5 +7,10 @@
   },
   "dependencies": {
     "@github/copilot-sdk": "1.0.28"
+  },
+  "overrides": {
+    "@github/copilot-sdk": {
+      "zod": "4.6.6"
+    }
   }
 }

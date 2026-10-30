@@ -1,0 +1,73 @@
+{
+  "validated_at": "2026-10-30T17:13:03.217557+00:00",
+  "status": "controller-handoff-pending",
+  "upstream": {
+    "repository": "https://github.com/openai/codex",
+    "commit": "a727f1f11ae06dcb196cd028a31900dbfd2f68ed",
+    "merge_commit": "4d2a77e82",
+    "installed_rust_binary_rebuilt": false
+  },
+  "installed": {
+    "codex": "0.166.0",
+    "copilot_cli": "1.0.105",
+    "copilot_sdk": "1.0.28",
+    "node": "22.23.4"
+  },
+  "artifacts": {
+    "codex_sha512_verified": true,
+    "copilot_sha256_verified": true,
+    "old_running_executables_overwritten": false
+  },
+  "validation": {
+    "bridge_native_and_official_runtime": {
+      "passed": 150,
+      "failed": 0,
+      "skipped": 0,
+      "synthetic_stream_duration_ms": 5000
+    },
+    "maintenance_including_native_screen": {
+      "passed": 129,
+      "failed": 0,
+      "skipped": 0
+    },
+    "updater": {
+      "passed": 14,
+      "failed": 0,
+      "skipped": 0
+    },
+    "npm_audit": {
+      "known_vulnerabilities": 0,
+      "scoped_override": "@github/copilot-sdk -> zod 4.6.6"
+    }
+  },
+  "sessions": {
+    "verified_reloads": 9,
+    "controller_pending": 1,
+    "exact_current_threads_preserved": true,
+    "models_and_reasoning_preserved": true,
+    "paused_and_complete_goals_preserved": true,
+    "older_auto_labels_blocked_goal_preserved": true,
+    "copilot_runtime_executables_verified": 8,
+    "fresh_tool_results": {
+      "lance_migration": 16,
+      "fastpath": 13,
+      "auto_labels_removal": 13
+    },
+    "auto_labels_latest_turn_completed": true,
+    "native_cdx_verified_after_ownership_retry": true
+  },
+  "fixes": [
+    "Include verified editor-origin root threads in Screen inventory while excluding subagents.",
+    "Isolate ambiguous histories and require live /status to select a thread.",
+    "Preserve aggregate reports and controller handoff when another session defers its reload.",
+    "Wait passively for the controller turn to finish, then reject changed thread/window identity.",
+    "Retry the native ownership notice within the reload deadline without bypassing locks.",
+    "Patch the SDK Zod dependency without downgrading the SDK."
+  ],
+  "limits": [
+    "The controller is intentionally pending until this turn finishes; the resumed controller must record its final verification.",
+    "Synthetic stream checks used five-second streams, not the opt-in eleven-minute duration.",
+    "Fresh real tool results establish successful continuation at the recorded check time; remote service availability cannot be guaranteed."
+  ],
+  "private_data_included": false
+}

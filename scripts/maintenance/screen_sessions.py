@@ -2,6 +2,7 @@
 """Inventory and reload exact native threads in existing GNU Screen shells."""
 
 import argparse
+from contextlib import nullcontext
 import datetime
 import fcntl
 import json
@@ -37,7 +38,7 @@ def alive(identity):
         return False
 
 
-def root_thread(home, pid, controller=None):
+def root_thread(home, pid, controller=None, *, verified=False):
     database = home / 'state_5.sqlite'
     if not database.is_file():
         return None
@@ -53,9 +54,12 @@ def root_thread(home, pid, controller=None):
         connection.row_factory = sqlite3.Row
         rows = [dict(row) for row in connection.execute(
             'SELECT id,source,cwd,model,reasoning_effort,rollout_path FROM threads '
-            'WHERE source=\'cli\' AND rollout_path IN (' + ','.join('?' for _ in paths) + ')', tuple(paths))] if paths else []
-        if not rows and controller:
-            row = connection.execute('SELECT id,source,cwd,model,reasoning_effort,rollout_path FROM threads WHERE id=? AND source=\'cli\'',
+            'WHERE source IN (\'cli\',\'vscode\') AND rollout_path IN (' + ','.join('?' for _ in paths) + ')', tuple(paths))] if paths else []
+        if controller and (verified or not rows):
+            # A native TUI can resume a thread originally created in the editor.
+            # Its exact live /status ID (or explicit controlling thread) still
+            # binds this lookup; sub-agent histories must never become roots.
+            row = connection.execute('SELECT id,source,cwd,model,reasoning_effort,rollout_path FROM threads WHERE id=? AND source IN (\'cli\',\'vscode\')',
                                      (controller,)).fetchone()
             rows = [dict(row)] if row else []
     if len(rows) > 1:
@@ -109,7 +113,13 @@ def inventory(controller=None, status_directory=None, status_screen=None, only=N
                 parent = ancestor['parent']
             if parent != screen_pid:
                 continue
-            thread = root_thread(home, info['pid'])
+            try:
+                thread = root_thread(home, info['pid'])
+            except RuntimeError:
+                # A TUI can retain multiple human-origin histories. Only its
+                # live /status may select one; ambiguity must not hide other
+                # sessions from inventory or authorize a guessed restart.
+                thread = None
             entry = {k: info[k] for k in ('pid', 'start', 'screen', 'window')}
             entry.update({'home': str(home), 'backend': backend, 'launcher_process': launch_process,
                           'thread': thread, 'controller': bool(thread and thread['id'] == controller)})
@@ -119,7 +129,7 @@ def inventory(controller=None, status_directory=None, status_screen=None, only=N
                 # no rollout descriptor. Ask the live TUI during explicit control.
                 identifier = probe_status_thread(entry, status_directory)
                 if identifier:
-                    thread = root_thread(home, info['pid'], identifier)
+                    thread = root_thread(home, info['pid'], identifier, verified=True)
                     entry.update({'thread': thread, 'identity_source': 'screen-status',
                                   'controller': bool(thread and thread['id'] == controller)})
             if thread:
@@ -178,7 +188,8 @@ def probe_status_thread(target, state):
     if not alive(target):
         return None
     text = capture(target, state)
-    if not empty_composer(text) or 'Compacting context' in '\n'.join(text.splitlines()[-12:]):
+    if (not empty_composer(text) or 'Compacting context' in '\n'.join(text.splitlines()[-12:])
+            or 'This conversation is open in another app' in text):
         return None
     stuff(target, '/status')
     # Screen input and TUI rendering are asynchronous, especially under disk
@@ -211,7 +222,7 @@ def verified_thread(target, state):
     if target.get('identity_source') == 'screen-status':
         if probe_status_thread(target, state) != identifier:
             return None
-        return root_thread(Path(target['home']), target['pid'], identifier)
+        return root_thread(Path(target['home']), target['pid'], identifier, verified=True)
     return root_thread(Path(target['home']), target['pid'], identifier if target['controller'] else None)
 
 
@@ -301,9 +312,18 @@ def reload_target(target, config, state, drain_seconds=45, continuation=None):
     selected = False
     updated = None
     replacement_seen_at = None
+    ownership_retry_at = 0
     while time.monotonic() < deadline:
         time.sleep(.5)
         text = capture(target, state)
+        if 'This conversation is open in another app' in text:
+            # The old frontend can exit before its backend releases ownership.
+            # Retry the native ownership check; never fork or bypass its lock,
+            # and never paste /status into this read-only notice.
+            if time.monotonic() - ownership_retry_at >= 5:
+                stuff(target, 'r')
+                ownership_retry_at = time.monotonic()
+            continue
         if 'Resume paused goal?' in text and not selected:
             if not before or before['status'] not in ('active', 'blocked'):
                 stuff(target, '\x1b[B')
@@ -312,7 +332,7 @@ def reload_target(target, config, state, drain_seconds=45, continuation=None):
             selected = True
         # Probe only this replacement's TUI when its daemon owns the rollout.
         status_args = ({'status_directory': state, 'status_screen': (target['screen'], target['window'])}
-                       if target.get('identity_source') == 'screen-status' else {})
+                       if target['backend'] == 'native' or target.get('identity_source') == 'screen-status' else {})
         for candidate in inventory(current['id'] if target['controller'] else None, **status_args):
             if candidate['screen'] == target['screen'] and candidate['window'] == target['window']:
                 if candidate['pid'] != target['pid'] and candidate['thread']['id'] == current['id']:
@@ -356,6 +376,19 @@ def save(path, value):
     temporary.replace(path)
 
 
+def wait_for_idle_screen(target, state):
+    # Observe the controller without sending /status while its current turn is
+    # still using tools. Identify the live thread only after the turn finishes.
+    deadline = time.monotonic() + 7200
+    stable = 0
+    while time.monotonic() < deadline and stable < 2:
+        text = capture(target, state)
+        stable = stable + 1 if empty_composer(text) and not busy(text) else 0
+        time.sleep(2)
+    if stable < 2:
+        raise RuntimeError('Controller never became idle; no restart was attempted.')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', type=Path, required=True)
@@ -364,6 +397,7 @@ def main():
     parser.add_argument('--only', help='Exact Screen name or suffix to reload.')
     parser.add_argument('--controller-thread', default=os.environ.get('CODEX_THREAD_ID'))
     parser.add_argument('--wait-controller-idle', action='store_true')
+    parser.add_argument('--controller-window', default='0')
     parser.add_argument('--probe-status', '--probe-native', dest='probe_status', action='store_true',
                         help='Use guarded /status to identify native or Copilot TUI threads during an update.')
     parser.add_argument('--continuation')
@@ -371,18 +405,25 @@ def main():
     os.umask(0o077)
     args.state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     config = json.loads(args.config.read_text())
-    controller_guard = None
-    if args.wait_controller_idle:
-        controller_guard = (args.config.parent / 'controller-handoff.lock').open('a')
-        fcntl.flock(controller_guard, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    with (args.state_dir / 'reload.lock').open('a') as lock:
+    controller_guard = ((args.config.parent / 'controller-handoff.lock').open('a')
+                        if args.wait_controller_idle else nullcontext())
+    with controller_guard as guard, (args.state_dir / 'reload.lock').open('a') as lock:
+        if guard is not None:
+            fcntl.flock(guard, fcntl.LOCK_EX | fcntl.LOCK_NB)
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if args.wait_controller_idle:
+            if not args.controller_thread or not args.only or not re.fullmatch(r'\d+\.\S+', args.only):
+                raise RuntimeError('Controller handoff requires an exact Screen and thread.')
+            wait_for_idle_screen({'screen': args.only, 'window': args.controller_window}, args.state_dir)
         targets = inventory(args.controller_thread, status_directory=args.state_dir if args.probe_status else None,
                             only=args.only)
         if args.only:
             targets = [t for t in targets if t['screen'] == args.only or t['screen'].split('.', 1)[1] == args.only]
             if len(targets) != 1:
                 raise RuntimeError('Requested Screen is missing or ambiguous.')
+        if args.wait_controller_idle and (targets[0]['thread']['id'] != args.controller_thread
+                                         or str(targets[0]['window']) != args.controller_window):
+            raise RuntimeError('Controller thread or window changed; no restart was attempted.')
         save(args.state_dir / 'inventory.json', targets)
         if not args.apply:
             print(json.dumps(targets))
@@ -391,18 +432,9 @@ def main():
         for target in sorted(targets, key=lambda t: (t['controller'], t['screen'])):
             if target['controller']:
                 if not args.wait_controller_idle:
-                    results.append({'screen': target['screen'], 'status': 'controller-deferred', 'thread_id': target['thread']['id']})
+                    results.append({'screen': target['screen'], 'window': target['window'],
+                                    'status': 'controller-deferred', 'thread_id': target['thread']['id']})
                     continue
-                # Two idle captures after the controlling turn completes keep
-                # tool output durable before the updater reloads its own TUI.
-                deadline = time.monotonic() + 7200
-                stable = 0
-                while time.monotonic() < deadline and stable < 2:
-                    text = capture(target, args.state_dir)
-                    stable = stable + 1 if empty_composer(text) and not busy(text) else 0
-                    time.sleep(2)
-                if stable < 2:
-                    raise RuntimeError('Controller never became idle; no restart was attempted.')
             try:
                 config = json.loads(args.config.read_text())
                 result = reload_target(target, config, args.state_dir, continuation=args.continuation if target['controller'] else None)
