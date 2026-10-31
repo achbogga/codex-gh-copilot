@@ -253,7 +253,7 @@ mod extension_interruption;
 pub(crate) mod extension_metrics;
 mod guardian_checkpoint;
 mod handlers;
-mod inject;
+pub(crate) mod inject;
 mod reasoning_effort;
 mod submission;
 pub(crate) use reasoning_effort::RequestEffortUsage;
@@ -418,7 +418,11 @@ use codex_utils_stream_parser::ProposedPlanSegment;
 /// Whether reported usage updates the installed context baseline or only spending.
 #[derive(Clone, Copy)]
 pub(crate) enum TokenUsageContext {
-    Sampling { includes_reasoning: bool },
+    Sampling {
+        includes_reasoning: bool,
+        /// Input history length before the response, including requests with no output items.
+        input_item_count: usize,
+    },
     SpendingOnly,
 }
 
@@ -707,15 +711,22 @@ impl Session {
             instructions
         };
         let exec_policy = if isolation == codex_extension_api::SessionIsolation::Isolated {
-            let managed_policy = config
+            let source_requirements = config
                 .config_layer_stack
                 .requirements()
                 .exec_policy
                 .as_deref()
+                .cloned()
+                .map(Arc::new);
+            let managed_policy = source_requirements
+                .as_deref()
                 .map_or_else(codex_execpolicy::Policy::empty, |policy| {
                     policy.as_ref().clone()
                 });
-            Arc::new(ExecPolicyManager::new(Arc::new(managed_policy)))
+            Arc::new(ExecPolicyManager::from_snapshot(
+                Arc::new(managed_policy),
+                source_requirements,
+            ))
         } else if let Some(exec_policy) = &inherited_exec_policy {
             Arc::clone(exec_policy)
         } else {
@@ -1585,11 +1596,9 @@ impl Session {
         state.auto_compact_window_snapshot()
     }
 
-    pub(crate) async fn estimated_tokens_after_last_model_generated_item(&self) -> i64 {
+    pub(crate) async fn estimated_tokens_since_last_usage(&self) -> i64 {
         let state = self.state.lock().await;
-        state
-            .history
-            .estimated_tokens_after_last_model_generated_item()
+        state.history.estimated_tokens_since_last_usage()
     }
 
     pub(crate) async fn total_token_usage(&self) -> Option<TokenUsage> {
@@ -5319,7 +5328,10 @@ impl Session {
                 turn_context,
                 &turn_context.initial_settings,
                 token_usage,
-                TokenUsageContext::Sampling { includes_reasoning },
+                TokenUsageContext::Sampling {
+                    includes_reasoning,
+                    input_item_count: 0,
+                },
             )
             .await;
         self.send_token_count_event(turn_context).await;
@@ -5381,11 +5393,15 @@ impl Session {
             let token_info = {
                 let mut state = self.state.lock().await;
                 match context {
-                    TokenUsageContext::Sampling { includes_reasoning } => {
+                    TokenUsageContext::Sampling {
+                        includes_reasoning,
+                        input_item_count,
+                    } => {
                         state.update_token_info_from_usage(
                             token_usage,
                             turn_context.model_context_window(),
                             includes_reasoning,
+                            input_item_count,
                         );
                         if matches!(
                             turn_context.config.model_auto_compact_token_limit_scope,
@@ -5477,7 +5493,9 @@ impl Session {
 
             // The local estimate already includes every retained reasoning item.
             info.last_usage_includes_reasoning = Some(true);
-            state.set_token_info(Some(info));
+            state
+                .history
+                .set_token_info_with_boundary(Some(info), history.raw_items().len());
         }
         self.set_auto_compact_window_estimated_prefill_for_scope(
             turn_context,
