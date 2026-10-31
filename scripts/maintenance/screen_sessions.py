@@ -164,7 +164,12 @@ def capture(target, state):
 
 
 def stuff(target, text):
-    command(['screen', '-S', target['screen'], '-p', str(target['window']), '-X', 'stuff', text])
+    # Screen can silently drop an oversized `stuff` argument while returning
+    # success. Keep each write below its limit, including four-byte UTF-8.
+    # Enter is sent separately only after the complete command is delivered.
+    for offset in range(0, len(text), 128):
+        command(['screen', '-S', target['screen'], '-p', str(target['window']),
+                 '-X', 'stuff', text[offset:offset + 128]])
 
 
 def enter_command(target, text):

@@ -1,6 +1,6 @@
 {
   "validated_at": "2026-10-30T17:13:03.217557+00:00",
-  "status": "controller-handoff-pending",
+  "status": "partial-controller-handoff-failed",
   "upstream": {
     "repository": "https://github.com/openai/codex",
     "commit": "a727f1f11ae06dcb196cd028a31900dbfd2f68ed",
@@ -42,7 +42,7 @@
   },
   "sessions": {
     "verified_reloads": 9,
-    "controller_pending": 1,
+    "controller_pending": 0,
     "exact_current_threads_preserved": true,
     "models_and_reasoning_preserved": true,
     "paused_and_complete_goals_preserved": true,
@@ -54,7 +54,8 @@
       "auto_labels_removal": 13
     },
     "auto_labels_latest_turn_completed": true,
-    "native_cdx_verified_after_ownership_retry": true
+    "native_cdx_verified_after_ownership_retry": true,
+    "controller_failed": 1
   },
   "fixes": [
     "Include verified editor-origin root threads in Screen inventory while excluding subagents.",
@@ -65,7 +66,7 @@
     "Patch the SDK Zod dependency without downgrading the SDK."
   ],
   "limits": [
-    "The controller is intentionally pending until this turn finishes; the resumed controller must record its final verification.",
+    "The controller handoff failed after quitting the old frontend. An October 31 isolated GNU Screen reproduction confirmed that the oversized resume command was silently dropped; nine other session reloads remain verified.",
     "Synthetic stream checks used five-second streams, not the opt-in eleven-minute duration.",
     "Fresh real tool results establish successful continuation at the recorded check time; remote service availability cannot be guaranteed."
   ],

@@ -264,6 +264,8 @@ Release reminders appear when launching `codex-copilot`, `cx`, or `cxf` in a ter
 
 Threads originally created in the editor are eligible for reload. Ambiguous histories require the live TUI's exact `/status` identity; subagents are excluded. Pending drafts and running compaction defer a reload, with failures retained in the aggregate report and a nonzero exit status. An ownership notice uses bounded native retry without bypassing the other writer's lock. The controlling session reloads last: a detached supervisor waits passively for its turn to finish, verifies the same thread and window, then resumes verification. A changed thread or window cancels that handoff. Private reports are saved under the configured runtime directory's sibling `updates/`; `latest-report.txt` points to the latest aggregate report.
 
+Screen input is sent in bounded UTF-8 chunks before Enter. GNU Screen can return success while silently dropping an oversized `stuff` argument; that caused the October 30 controller handoff to quit without launching its replacement. The native Screen regression checks full delivery of long resume commands and Unicode text without contacting a model.
+
 Stop scheduled checks with `systemctl --user disable --now codex-copilot-updates.timer`. To adopt upstream source, first review `git log HEAD..upstream/main`; fetching alone does not update the installed Codex binary.
 
 ## Validation
