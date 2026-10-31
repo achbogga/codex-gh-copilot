@@ -42,6 +42,7 @@ for (const mode of [
   "before-tool",
   "after-tool",
   "socket-after-tool",
+  "socket-second-retry",
   "socket-after-compaction",
   "socket-exhausted",
   "interrupted",
@@ -59,7 +60,7 @@ for (const mode of [
 ])
   test(
     `native Codex stream recovery: ${mode}`,
-    { skip: !process.env.COPILOT_PILOT_CODEX_BIN, timeout: 40000 },
+    { skip: !process.env.COPILOT_PILOT_CODEX_BIN, timeout: 120000 },
     async (t) => {
       const root = await mkdtemp(join(homedir(), ".copilot-recovery-test-"));
       let bridge;
@@ -142,6 +143,7 @@ for (const mode of [
               done,
             ]);
           else if ((compactFirst && requests.length === 3) ||
+                   (mode === "socket-second-retry" && requests.length === 2) ||
                    (socketFailure && exhausted && requests.length > 1))
             body = new ReadableStream({
               start(controller) {
@@ -255,7 +257,7 @@ for (const mode of [
           {
             cwd: root,
             env: invocation.env,
-            timeout: 30000,
+            timeout: 110000,
             maxBuffer: 1024 * 1024,
           },
         );
@@ -273,7 +275,11 @@ for (const mode of [
       );
       assert.equal(
         requests.length,
-        compactFirst ? 4 : mode === "external-watch" || mode.endsWith("denied") ? 1 : 2,
+        compactFirst ? 4
+          : mode === "external-watch" || mode.endsWith("denied") ? 1
+          : mode === "http-cancelled-exhausted" ? 30
+          : exhausted ? 6
+          : mode === "socket-second-retry" ? 3 : 2,
         text,
       );
       assert.doesNotMatch(text, /private upstream denial|PRIVATE_/);

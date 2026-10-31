@@ -21,6 +21,140 @@ const models = (
 ).split(",");
 const encode = (event) => Buffer.from(`data: ${JSON.stringify(event)}\n\n`);
 
+for (const phase of ["admission", "stream"])
+  test(
+    `official runtime crash during ${phase} settles and the next request reconnects`,
+    { skip: !cliPath, timeout: 30000 },
+    async (t) => {
+      const root = await mkdtemp(join(homedir(), ".copilot-sdk-crash-"));
+      let sdk,
+        client,
+        attempt = 0,
+        killed = false,
+        posts = 0;
+      const sessionIds = [];
+      t.after(async () => {
+        await sdk?.close();
+        await rm(root, {
+          recursive: true,
+          force: true,
+          maxRetries: 5,
+          retryDelay: 100,
+        });
+      });
+      class Client extends CopilotClient {
+        constructor(options) {
+          super(options);
+          client = this;
+        }
+        async createSession(options) {
+          const session = await super.createSession(options);
+          sessionIds.push(session.sessionId);
+          if (attempt === 1 && phase === "admission")
+            session.on((event) => {
+              if (event.type === "user.message") killOwnedRuntime();
+            });
+          return session;
+        }
+      }
+      function killOwnedRuntime() {
+        if (killed) return;
+        killed = true;
+        // Test-only fault injection into this SDK instance's isolated child.
+        assert.ok(client.cliProcess.kill("SIGKILL"));
+      }
+      sdk = await createSdkTransport({
+        Client,
+        cliPath,
+        directory: root,
+        forward: async (request) => {
+          if (request.method === "GET") return fetch(request);
+          posts++;
+          return new Response(
+            new ReadableStream({
+              start(controller) {
+                controller.enqueue(
+                  encode({
+                    type: "response.created",
+                    response: { id: "crash-canary" },
+                  }),
+                );
+                if (attempt === 1) {
+                  const abort = () => controller.error(request.signal.reason);
+                  request.signal.addEventListener("abort", abort, {
+                    once: true,
+                  });
+                  if (request.signal.aborted) abort();
+                  if (phase === "stream") killOwnedRuntime();
+                } else {
+                  controller.enqueue(
+                    encode({
+                      type: "response.completed",
+                      response: {
+                        id: "crash-canary",
+                        status: "completed",
+                        output: [],
+                        usage: {
+                          input_tokens: 1,
+                          output_tokens: 1,
+                          total_tokens: 2,
+                        },
+                      },
+                    }),
+                  );
+                  controller.close();
+                }
+              },
+            }),
+            { headers: { "content-type": "text/event-stream" } },
+          );
+        },
+      });
+      const infer = async () => {
+        attempt++;
+        const response = await sdk.transport(
+          "https://api.githubcopilot.com/responses",
+          {
+            body: JSON.stringify({
+              model: "gpt-6.1-sol",
+              stream: true,
+              input: "Synthetic runtime crash check.",
+              reasoning: { effort: "max" },
+            }),
+            headers: { "X-Initiator": "user" },
+            signal: AbortSignal.timeout(15000),
+          },
+        );
+        return response.text();
+      };
+      const started = Date.now();
+      await assert.rejects(infer(), (error) => {
+        assert.ok(
+          [
+            "COPILOT_SDK_CONNECTION",
+            "COPILOT_FORWARD_FAILED",
+            "ABORT_ERR",
+            "EPIPE",
+          ].includes(error.code),
+          error.code,
+        );
+        return true;
+      });
+      assert.ok(
+        Date.now() - started < 5000,
+        "Detect runtime death without the provider inactivity timer.",
+      );
+      assert.equal(killed, true);
+      assert.match(await infer(), /response.completed/);
+      assert.equal(
+        sessionIds.length,
+        2,
+        "The bridge must not replay inference on its own.",
+      );
+      assert.ok(posts <= 2);
+    },
+  );
+
 test(
   "official runtime preserves the first connection error and removes its failed transport session",
   {

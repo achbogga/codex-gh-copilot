@@ -2,15 +2,14 @@
 """Bounded, opt-in Screen recovery for native transport and context failures.
 
 Healthy checks make no model calls. Native state is read-only; recovery uses the
-existing, verified, detached Screen window. Large failed histories may opt into
-native /compact before /goal resume, without lowering the model context limit.
+existing, verified, detached Screen window. Only a native context-limit error
+selects /compact; a transport failure does not imply the history is too large.
 """
 
 import argparse
 import datetime
 import fcntl
 import json
-import math
 import os
 from pathlib import Path
 import re
@@ -69,14 +68,32 @@ def read_native(config):
 
 
 def rollout_evidence(path):
-    """Read a bounded suffix; absent/truncated evidence can never authorize input."""
+    """Read the suffix's complete JSONL records, including a large first record.
+
+    Native compaction records can exceed the suffix window. Start at the
+    preceding newline so successful compaction cannot disappear merely because
+    its checkpoint is large. Incomplete final records remain unusable evidence.
+    """
     result = {'completion': None, 'started_at': 0, 'tool_result_at': 0,
               'user_message_at': 0, 'compacted_at': 0,
-              'input_tokens': None, 'context_window': None}
+              'incomplete_tail': False}
     with path.open('rb') as source:
-        source.seek(max(0, path.stat().st_size - TAIL_BYTES))
-        lines = source.read(TAIL_BYTES).splitlines()
-        for line in lines:
+        end = os.fstat(source.fileno()).st_size
+        start = max(0, end - TAIL_BYTES)
+        while start:
+            previous = max(0, start - 65536)
+            source.seek(previous)
+            newline = source.read(start - previous).rfind(b'\n')
+            if newline >= 0:
+                start = previous + newline + 1
+                break
+            start = previous
+        source.seek(start)
+        while source.tell() < end:
+            line = source.readline(end - source.tell())
+            if not line.endswith(b'\n'):
+                result['incomplete_tail'] = True
+                break
             try:
                 event = json.loads(line)
                 if not isinstance(event, dict) or not isinstance(event.get('timestamp'), str):
@@ -104,17 +121,6 @@ def rollout_evidence(path):
                     result['started_at'] = timestamp
                 elif kind in ('user_message', 'turn_aborted'):
                     result['user_message_at'] = timestamp
-                elif kind == 'token_count':
-                    info = payload.get('info') or {}
-                    if not isinstance(info, dict):
-                        continue
-                    usage = info.get('last_token_usage') or {}
-                    if not isinstance(usage, dict):
-                        continue
-                    for key, value in [('input_tokens', usage.get('input_tokens')),
-                                       ('context_window', info.get('model_context_window'))]:
-                        if type(value) in (int, float) and math.isfinite(value) and value >= 0:
-                            result[key] = value
             elif event.get('type') == 'compacted':
                 result['compacted_at'] = timestamp
             elif event.get('type') == 'response_item' and payload.get('type') in (
@@ -305,26 +311,21 @@ def save_json(path, value):
     temporary.replace(path)
 
 
-def needs_compaction(config, evidence):
-    if (evidence.get('completion') or {}).get('failure_code') == 'CONTEXT_WINDOW_EXCEEDED':
-        return True
-    fraction = config.get('compact_failure_context_fraction', .65)
-    tokens, window = evidence.get('input_tokens'), evidence.get('context_window')
-    return bool(config.get('compact_after_transport_failure')
-                and isinstance(fraction, (int, float)) and .5 <= fraction <= 1
-                and isinstance(tokens, (int, float)) and isinstance(window, (int, float))
-                and window > 0 and tokens >= fraction * window)
+def needs_compaction(evidence):
+    return (evidence.get('completion') or {}).get('failure_code') == 'CONTEXT_WINDOW_EXCEEDED'
 
 
 def submit_command(config, state, goal, rollout, session, identity, text):
     assert text in ('/goal resume', '/compact')
     observed = rollout_evidence(rollout)
+    if observed.get('incomplete_tail'):
+        return 'rollout-write-in-progress'
     command = ['screen', '-S', session, '-p', str(config.get('window', 0)), '-X', 'stuff']
     subprocess.run([*command, text], check=True, timeout=10)
     time.sleep(.4)  # Codex paste detection requires a separate Enter.
     current, _ = read_native(config)
     latest = rollout_evidence(rollout)
-    if (current != goal or detached_screen(config['screen_name']) != session
+    if (latest.get('incomplete_tail') or current != goal or detached_screen(config['screen_name']) != session
             or native_identity(config, session, rollout) != identity
             or latest['started_at'] != observed['started_at']
             or latest['user_message_at'] != observed['user_message_at']):
@@ -493,6 +494,8 @@ def check(config, state, apply=False):
     guard = goal_guard(config, goal)
     if guard:
         return {**result, 'status': guard}
+    if evidence.get('incomplete_tail'):
+        return {**result, 'status': 'rollout-write-in-progress'}
     if ledger.get('pending_compaction'):
         return {**result, **continue_compaction(config, state, goal, rollout, evidence, ledger, now, apply)}
     if ledger.get('pending_resume'):
@@ -532,7 +535,7 @@ def check(config, state, apply=False):
         return {**result, 'status': 'failure-precedes-current-native-process'}
     if not idle_stalled_prompt(capture_screen(session, config.get('window', 0), state)):
         return {**result, 'status': 'screen-busy-or-composer-not-empty'}
-    compact = needs_compaction(config, evidence)
+    compact = needs_compaction(evidence)
     if not apply:
         return {**result, 'status': 'would-compact' if compact else 'would-resume', 'native_pid': identity[0]}
     # Recheck identity and persisted state immediately before any terminal input.

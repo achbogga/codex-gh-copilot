@@ -1,10 +1,6 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { usesMessages } from "./anthropic-request.mjs";
 
-// Native retries retain partial output. Keep this bound and the compaction
-// reserve together so a reconnect cannot silently consume all summary space.
-export const STREAM_MAX_RETRIES = 1;
-
 export function modelInputLimit(model) {
   const limits = model.capabilities?.limits ?? {};
   return Math.min(
@@ -17,12 +13,10 @@ export function modelInputLimit(model) {
 export function modelCompactLimit(model) {
   const input = modelInputLimit(model);
   const output = model.capabilities?.limits?.max_output_tokens ?? 0;
-  // Reserve the failed attempt and its retry before another native turn can
-  // compact. Small-window models retain at least half their input budget; this
-  // is headroom, not a guarantee that arbitrary tool output will fit.
-  return Math.floor(
-    Math.max(input * 0.5, input * 0.95 - output * (STREAM_MAX_RETRIES + 1)),
-  );
+  // Leave room for a generation and a subsequent compaction response. This is
+  // provider-derived headroom, not a retry policy or a bound on arbitrary tool
+  // output. Codex owns retries and context-limit recovery.
+  return Math.floor(Math.max(input * 0.5, input * 0.95 - output * 2));
 }
 
 export function reasoningForModel(model, requested = "max") {

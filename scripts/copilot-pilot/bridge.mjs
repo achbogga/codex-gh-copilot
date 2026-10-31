@@ -1,4 +1,4 @@
-import { timingSafeEqual } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer } from "node:http";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
@@ -114,7 +114,7 @@ export async function startBridge({
     models.map((entry) => (typeof entry === "string" ? entry : entry.id)),
   );
   const active = new Set();
-  const diagnose = (details) => {
+  const record = (details) => {
     try {
       onDiagnostic({
         bridge_port: socketPath ? 8787 : server.address()?.port,
@@ -123,6 +123,8 @@ export async function startBridge({
     } catch {} // Diagnostic I/O must not change the response.
   };
   const server = createServer(async (request, response) => {
+    const requestId = randomUUID();
+    const diagnose = (details) => record({ request_id: requestId, ...details });
     const startedAt = Date.now();
     let requestBytes = 0,
       requestModel;
@@ -192,6 +194,7 @@ export async function startBridge({
             item.content.some((part) => part.type === "input_image"),
         );
       const result = await transport(`${upstream}/responses`, {
+        requestId,
         method: "POST",
         headers: {
           ...headers(await getToken()),
@@ -313,7 +316,13 @@ export async function startBridge({
       }
       await pipeline(Readable.from(stream()), response);
     } catch (error) {
-      const failure = requestFailure(error);
+      const failure = requestFailure(
+        response.destroyed &&
+          controller.signal.aborted &&
+          ["ERR_STREAM_PREMATURE_CLOSE", "ABORT_ERR"].includes(error.code)
+          ? requestError("COPILOT_REQUEST_CANCELLED")
+          : error,
+      );
       diagnose({
         code: failure.code,
         stage: "bridge",
@@ -369,7 +378,7 @@ export async function startBridge({
     if (socketPath) server.listen(socketPath, resolve);
     else server.listen(0, "127.0.0.1", resolve);
   });
-  diagnose({ code: "BRIDGE_STARTED" });
+  record({ code: "BRIDGE_STARTED" });
   return {
     url: `http://127.0.0.1:${socketPath ? 8787 : server.address().port}/v1`,
     close: async () => {

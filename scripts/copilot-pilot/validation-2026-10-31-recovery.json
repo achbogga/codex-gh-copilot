@@ -1,0 +1,115 @@
+{
+  "validated_at": "2026-10-31T23:47:21.459816+00:00",
+  "status": "validated-awaiting-fastpath-reload",
+  "runtime": {
+    "codex": "0.166.0",
+    "copilot_cli": "1.0.105",
+    "copilot_sdk": "1.0.28",
+    "node": "22.23.4"
+  },
+  "observed_incident": {
+    "error": "UND_ERR_SOCKET",
+    "last_failed_durations_ms": [
+      631633,
+      631167
+    ],
+    "last_failed_request_bytes": [
+      17741921,
+      18540468
+    ],
+    "sdk_caller_and_session_cancelled": false,
+    "upstream_component_responsible": "not established",
+    "native_stream_retries_before": 1,
+    "watcher_daily_recoveries_exhausted": 6
+  },
+  "design": {
+    "task_history_tools_and_retries_owner": "native Codex",
+    "retry_policy": "inherit installed native defaults; no launcher request/stream overrides or disabled native connection reconnection",
+    "sdk_runtime_reconnection_owner": "official SDK",
+    "inference_replays_by_adapter": false,
+    "completion_wait": "native request-correlated RPC without a total-duration timer; pinned SDK boundary covered by runtime tests",
+    "admission_and_health_checks_cancellable": true,
+    "session_specific_retry_or_compaction_overrides_removed": 3,
+    "watcher_compaction_trigger": "typed native context-limit failure only",
+    "large_compaction_record_handling": "complete JSONL records; unfinished trailing writes defer recovery",
+    "caller_cancellation_classification": "cancellation, not bridge failure",
+    "diagnostics": "request correlation, time to headers and time since last upstream activity; no model content",
+    "goal_changes_during_reload_drain": "defer before interrupting or quitting; preserve user pauses"
+  },
+  "verification": {
+    "bridge_native_and_sdk_checks": {
+      "passed": 158,
+      "failed": 0,
+      "skipped": 0,
+      "stream_test_duration_ms": 2000
+    },
+    "maintenance_including_native_screen": {
+      "passed": 134,
+      "failed": 0,
+      "skipped": 0,
+      "full_suite_passed": 133,
+      "additional_pause_during_drain_regression_passed": 1
+    },
+    "native_consecutive_disconnects": {
+      "failures_after_tool": 2,
+      "completed_tool_executions": 1,
+      "recovered": true
+    },
+    "runtime_killed_during": [
+      "admission",
+      "stream"
+    ],
+    "following_request_reconnected_without_frontend_restart": true,
+    "real_model_canary": {
+      "model": "gpt-6.1-sol",
+      "reasoning": "max",
+      "completed": true,
+      "marker_written_and_read": true,
+      "completed_item_types": [
+        "agent_message",
+        "command_execution",
+        "command_execution",
+        "agent_message"
+      ]
+    },
+    "long_active_streams": {
+      "duration_ms": 660000,
+      "models": [
+        "gpt-6.1-sol",
+        "claude-opus-5.5"
+      ],
+      "status": "passed",
+      "inference": "synthetic; no remote model stream",
+      "passed_streams": 2,
+      "suite_checks_passed": 3,
+      "failed": 0,
+      "skipped": 0
+    },
+    "updater": {
+      "passed": 16,
+      "failed": 0,
+      "skipped": 0
+    }
+  },
+  "native_transport_control": {
+    "account_model_advertised_websockets": true,
+    "official_sdk_default_observed": "HTTP",
+    "official_sdk_explicit_websocket_option_observed": "HTTP",
+    "websocket_setting_is_proven_cause": false
+  },
+  "session_verification": {
+    "original_threads_on_updated_codex": 10,
+    "controller_handoff": "verified on original thread after user submitted preserved draft; supervisor failure report retained",
+    "controller_restarted_again": false,
+    "auto_labels_goal_status": "complete",
+    "fastpath_manual_compaction_and_resume": "same process, thread and goal; fresh real tools observed",
+    "fastpath_new_design_loaded": false
+  },
+  "limits": [
+    "The upstream component closing the approximately 631-second streams has not been identified.",
+    "Synthetic long streams verify local lifetime behavior, not remote service durability.",
+    "The underlying SDK completion RPC is a pinned, version-sensitive integration boundary.",
+    "An external side effect followed by a process crash before its result is saved still requires authoritative-state inspection."
+  ],
+  "private_data_included": false
+}

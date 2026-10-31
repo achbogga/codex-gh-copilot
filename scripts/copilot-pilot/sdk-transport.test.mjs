@@ -51,6 +51,11 @@ async function fixture(
       this.handler = options.requestHandler;
     }
     async start() {}
+    async ping() {
+      failure.pingStarted?.();
+      if (failure.pinging) await failure.pinging;
+      if (failure.disconnected) throw new Error("PRIVATE_IPC_FAILURE");
+    }
     async listModels() {
       return this.handler.sendRequest(
         new Request("https://api.enterprise.githubcopilot.com/models"),
@@ -58,6 +63,7 @@ async function fixture(
       );
     }
     async createSession(options) {
+      if (failure.creating) await failure.creating;
       if (failure.create) throw failure.create;
       assert.deepEqual(options.availableTools, []);
       assert.equal(options.streaming, true);
@@ -83,82 +89,88 @@ async function fixture(
         sessionId: "test-session",
         abort: async () => controller.abort(),
         disconnect: async () => {},
-        send: async () => {
-          if (failure.send) throw failure.send;
-          if (failure.event) {
-            listener?.({ type: "session.error", data: failure.event });
-            return;
-          }
-          const send = () =>
-            this.handler.sendRequest(
-              new Request(
-                `https://api.enterprise.githubcopilot.com${failure.path ?? (messages ? "/v1/messages" : "/responses")}`,
-                {
-                  method: "POST",
-                  body: "original SDK payload",
-                  headers: {
-                    "authorization": "Bearer runtime-owned-token",
-                    "copilot-harness-id": "copilot-sdk",
-                  },
-                },
-              ),
-              { sessionId: "test-session", signal: controller.signal },
-            );
-          let timer;
-          try {
-            const response = headerTimeoutMs
-              ? await Promise.race([
-                  send(),
-                  new Promise((_, reject) => {
-                    timer = setTimeout(() => {
-                      controller.abort();
-                      reject(
-                        new Error("Synthetic SDK response-header timeout."),
-                      );
-                    }, headerTimeoutMs);
-                  }),
-                ])
-              : await send();
-            clearTimeout(timer);
-            responseStarts.push({ status: response.status });
-            assert.match(
-              response.headers.get("content-type"),
-              /^text\/event-stream/,
-            );
-            let buffer = "",
-              message,
-              text = "",
-              completed;
-            for await (const chunk of response.body) {
-              buffer += Buffer.from(chunk).toString();
-              let end;
-              while ((end = buffer.indexOf("\n")) >= 0) {
-                const line = buffer.slice(0, end);
-                buffer = buffer.slice(end + 1);
-                if (!line.startsWith("data: ")) continue;
-                const event = JSON.parse(line.slice(6));
-                runtimeEvents.push(event);
-                if (event.type === "response.completed")
-                  completed = event.response;
-                if (event.type === "message_start") message = event.message;
-                if (event.type === "content_block_delta")
-                  text += event.delta.text;
-                if (event.type === "message_delta") {
-                  Object.assign(message, event.delta);
-                  Object.assign(message.usage, event.usage);
-                  if (event.copilot_usage)
-                    message.copilot_usage = event.copilot_usage;
-                }
-                if (event.type === "message_stop")
-                  completed = { ...message, content: [{ type: "text", text }] };
-              }
+        internalRpc: {
+          sendAndWait: async () => {
+            if (failure.send) throw failure.send;
+            if (failure.event) {
+              listener?.({ type: "session.error", data: failure.event });
+              return;
             }
-            if (completed) acknowledgements.push(completed);
-          } finally {
-            clearTimeout(timer);
-          }
-          if (replay) await send();
-          listener?.({ type: "session.idle", data: {} });
+            const send = () =>
+              this.handler.sendRequest(
+                new Request(
+                  `https://api.enterprise.githubcopilot.com${failure.path ?? (messages ? "/v1/messages" : "/responses")}`,
+                  {
+                    method: "POST",
+                    body: "original SDK payload",
+                    headers: {
+                      "authorization": "Bearer runtime-owned-token",
+                      "copilot-harness-id": "copilot-sdk",
+                    },
+                  },
+                ),
+                { sessionId: "test-session", signal: controller.signal },
+              );
+            let timer;
+            try {
+              const response = headerTimeoutMs
+                ? await Promise.race([
+                    send(),
+                    new Promise((_, reject) => {
+                      timer = setTimeout(() => {
+                        controller.abort();
+                        reject(
+                          new Error("Synthetic SDK response-header timeout."),
+                        );
+                      }, headerTimeoutMs);
+                    }),
+                  ])
+                : await send();
+              clearTimeout(timer);
+              responseStarts.push({ status: response.status });
+              assert.match(
+                response.headers.get("content-type"),
+                /^text\/event-stream/,
+              );
+              let buffer = "",
+                message,
+                text = "",
+                completed;
+              for await (const chunk of response.body) {
+                buffer += Buffer.from(chunk).toString();
+                let end;
+                while ((end = buffer.indexOf("\n")) >= 0) {
+                  const line = buffer.slice(0, end);
+                  buffer = buffer.slice(end + 1);
+                  if (!line.startsWith("data: ")) continue;
+                  const event = JSON.parse(line.slice(6));
+                  runtimeEvents.push(event);
+                  if (event.type === "response.completed")
+                    completed = event.response;
+                  if (event.type === "message_start") message = event.message;
+                  if (event.type === "content_block_delta")
+                    text += event.delta.text;
+                  if (event.type === "message_delta") {
+                    Object.assign(message, event.delta);
+                    Object.assign(message.usage, event.usage);
+                    if (event.copilot_usage)
+                      message.copilot_usage = event.copilot_usage;
+                  }
+                  if (event.type === "message_stop")
+                    completed = {
+                      ...message,
+                      content: [{ type: "text", text }],
+                    };
+                }
+              }
+              if (completed) acknowledgements.push(completed);
+            } finally {
+              clearTimeout(timer);
+            }
+            if (replay) await send();
+            listener?.({ type: "session.idle", data: {} });
+            return { aborted: false };
+          },
         },
       };
     }
@@ -210,6 +222,75 @@ const init = (signal) => ({
   },
   signal,
 });
+
+test(
+  "cancelling admission settles immediately and deletes only its late transport session",
+  { timeout: 3000 },
+  async (t) => {
+    const creating = Promise.withResolvers();
+    const sdk = await fixture(
+      t,
+      () => {
+        throw new Error("Must not infer.");
+      },
+      false,
+      false,
+      undefined,
+      "test-model",
+      undefined,
+      undefined,
+      { creating: creating.promise },
+    );
+    const controller = new AbortController();
+    const response = sdk.transport(
+      "https://api.githubcopilot.com/responses",
+      init(controller.signal),
+    );
+    controller.abort();
+    await assert.rejects(response, { code: "COPILOT_REQUEST_CANCELLED" });
+    assert.deepEqual(sdk.requests, []);
+    creating.resolve();
+    await new Promise(setImmediate);
+    assert.deepEqual(sdk.deletedSessions, ["test-session"]);
+    assert.deepEqual(sdk.requests, []);
+  },
+);
+
+test(
+  "caller cancellation also ends a stalled SDK health check",
+  { timeout: 3000 },
+  async (t) => {
+    const pinging = Promise.withResolvers(),
+      started = Promise.withResolvers();
+    const sdk = await fixture(
+      t,
+      () => {
+        throw new Error("Must not infer.");
+      },
+      false,
+      false,
+      undefined,
+      "test-model",
+      undefined,
+      undefined,
+      {
+        create: new Error("PRIVATE_RUNTIME_ERROR"),
+        pinging: pinging.promise,
+        pingStarted: started.resolve,
+      },
+    );
+    const controller = new AbortController();
+    const response = sdk.transport(
+      "https://api.githubcopilot.com/responses",
+      init(controller.signal),
+    );
+    await started.promise;
+    controller.abort();
+    await assert.rejects(response, { code: "COPILOT_REQUEST_CANCELLED" });
+    pinging.resolve();
+    assert.deepEqual(sdk.requests, []);
+  },
+);
 
 test("SDK classifies context-overflow denials before teardown consumes the error response", async (t) => {
   const sdk = await fixture(t, () =>
@@ -291,7 +372,22 @@ for (const [failure, expected, stage] of [
   [
     { send: Object.assign(new Error("PRIVATE_DATA"), { code: "EPIPE" }) },
     "EPIPE",
-    "session_send",
+    "session_completion",
+  ],
+  [
+    { create: new Error("PRIVATE_RUNTIME_FAILURE"), disconnected: true },
+    "COPILOT_SDK_CONNECTION",
+    "session_create",
+  ],
+  [
+    { send: new Error("PRIVATE_RUNTIME_FAILURE"), disconnected: true },
+    "COPILOT_SDK_CONNECTION",
+    "session_completion",
+  ],
+  [
+    { create: new Error("PRIVATE_STORAGE_FAILURE") },
+    "COPILOT_SDK_CREATE_FAILED",
+    "session_create",
   ],
   [
     { event: { errorType: "authentication", message: "PRIVATE_TOKEN" } },
@@ -581,8 +677,10 @@ test("native compaction retains visible evidence and uses the authorized source 
   const sdk = await fixture(
     t,
     async (request) => {
-      assert.ok((await request.text()).length < 16384,
-        "Opaque reasoning must not exhaust the summary request before visible history can be summarized.");
+      assert.ok(
+        (await request.text()).length < 16384,
+        "Opaque reasoning must not exhaust the summary request before visible history can be summarized.",
+      );
       return new Response(`data: ${JSON.stringify(done)}\n\n`, {
         headers: { "content-type": "text/event-stream" },
       });
@@ -602,11 +700,23 @@ test("native compaction retains visible evidence and uses the authorized source 
     reasoning: { effort: "max" },
     input: [
       sealModelState(
-        { type: "reasoning", encrypted_content: "exact-source-bytes".repeat(500000) },
+        {
+          type: "reasoning",
+          encrypted_content: "exact-source-bytes".repeat(500000),
+        },
         models[1].id,
       ),
-      { type: "custom_tool_call", call_id: "write-once", name: "exec", input: "Already executed." },
-      { type: "custom_tool_call_output", call_id: "write-once", output: "The publication succeeded." },
+      {
+        type: "custom_tool_call",
+        call_id: "write-once",
+        name: "exec",
+        input: "Already executed.",
+      },
+      {
+        type: "custom_tool_call_output",
+        call_id: "write-once",
+        output: "The publication succeeded.",
+      },
       { role: "user", content: "Native compact prompt" },
     ],
   };
@@ -627,9 +737,15 @@ test("native compaction retains visible evidence and uses the authorized source 
   assert.equal(sdk.requests.length, 1);
   const actual = JSON.parse(sdk.requests[0].body);
   assert.equal(actual.model, models[1].id);
-  assert.match(actual.input[0].content[0].text, /omitted 1 opaque assistant reasoning/);
+  assert.match(
+    actual.input[0].content[0].text,
+    /omitted 1 opaque assistant reasoning/,
+  );
   assert.deepEqual(actual.input.slice(1), original.input.slice(1));
-  assert.equal(original.input[0].encrypted_content.endsWith("exact-source-bytes"), true);
+  assert.equal(
+    original.input[0].encrypted_content.endsWith("exact-source-bytes"),
+    true,
+  );
   assert.equal(original.model, models[0].id);
   assert.deepEqual(sdk.acknowledgements[0].usage, done.response.usage);
 });

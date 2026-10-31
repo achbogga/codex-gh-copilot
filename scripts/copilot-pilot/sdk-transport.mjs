@@ -3,6 +3,7 @@ import {
   CopilotRequestHandler,
   RuntimeConnection,
 } from "@github/copilot-sdk";
+import { randomUUID } from "node:crypto";
 import {
   messagesRequest,
   usesMessages,
@@ -33,6 +34,17 @@ import {
 import { httpFailure, requestError, runtimeError } from "./request-errors.mjs";
 import { loadAgentRecovery, recoverAgentProgress } from "./agent-recovery.mjs";
 
+function cancellable(work, signal) {
+  const cancelled = Promise.withResolvers();
+  const abort = () =>
+    cancelled.reject(requestError("COPILOT_REQUEST_CANCELLED"));
+  signal.addEventListener("abort", abort, { once: true });
+  if (signal.aborted) abort();
+  return Promise.race([work, cancelled.promise]).finally(() =>
+    signal.removeEventListener("abort", abort),
+  );
+}
+
 // The official runtime supplies authentication, account routing and model policy.
 // Its request handler carries native Responses or translated Messages payloads
 // without starting a second tool loop. Only Codex receives the real model output.
@@ -62,6 +74,7 @@ export async function createSdkTransport({
     );
   const pending = new Map();
   const tasks = new Set();
+  const lifetime = new AbortController();
   let catalog;
   let runtimeModels = [];
   const agentRecovery = loadAgentRecovery(agentRecoveryFile);
@@ -106,7 +119,7 @@ export async function createSdkTransport({
         diagnose({
           code: guard,
           stage: "runtime_request",
-          ...(job ? { model: job.model } : {}),
+          ...(job ? { model: job.model, request_id: job.requestId } : {}),
           runtime_path: [
             "/responses",
             "/v1/messages",
@@ -150,6 +163,7 @@ export async function createSdkTransport({
         throw runtimeError(error, "COPILOT_FORWARD_FAILED");
       }
       job.init.onActivity?.();
+      job.responseStartedAt = job.lastActivityAt = Date.now();
       // The runtime can cancel a denied response as soon as we return it.
       // Classify it first so a real context overflow survives SDK cleanup.
       if (!response.ok) await httpFailure(response);
@@ -165,6 +179,7 @@ export async function createSdkTransport({
           response.body.pipeThrough(
             new TransformStream({
               transform(chunk, controller) {
+                job.lastActivityAt = Date.now();
                 job.init.onActivity?.();
                 job.runtimeActivity?.();
                 controller.enqueue(chunk);
@@ -183,6 +198,7 @@ export async function createSdkTransport({
           onDiagnostic: (details) =>
             diagnose({
               ...details,
+              request_id: job.requestId,
               model: job.model,
               request_bytes: Buffer.byteLength(job.init.body),
               elapsed_ms: Date.now() - job.startedAt,
@@ -217,11 +233,14 @@ export async function createSdkTransport({
         onDiagnostic: (details) =>
           diagnose({
             ...details,
+            request_id: job.requestId,
             model: job.model,
             context_tier: job.contextTier ?? "default",
             reasoning_effort: job.reasoningEffort ?? "default",
             request_bytes: Buffer.byteLength(job.init.body),
             elapsed_ms: Date.now() - job.startedAt,
+            header_elapsed_ms: job.responseStartedAt - job.startedAt,
+            idle_ms: Date.now() - job.lastActivityAt,
             sdk_cancelled: context.signal.aborted,
             caller_cancelled: job.init.signal.aborted,
             session_cancelled: job.controller.signal.aborted,
@@ -273,6 +292,21 @@ export async function createSdkTransport({
     logLevel: "none",
     workingDirectory: directory,
   });
+  const sessionFailure = async (error, fallback, signal) => {
+    if (signal.aborted) return requestError("COPILOT_REQUEST_CANCELLED");
+    const failure = runtimeError(error, fallback);
+    if (failure.code !== fallback) return failure;
+    // SDK session errors do not consistently carry a connection error code.
+    // Verify IPC failure through its public health RPC; do not guess from
+    // exception text or treat a healthy runtime's auth/storage error as retryable.
+    try {
+      await cancellable(client.ping(), signal);
+    } catch {
+      if (signal.aborted) return requestError("COPILOT_REQUEST_CANCELLED");
+      return requestError("COPILOT_SDK_CONNECTION", error);
+    }
+    return failure;
+  };
   try {
     await client.start();
     const listed = await client.listModels();
@@ -292,6 +326,14 @@ export async function createSdkTransport({
     diagnose,
     transport: async (url, init) => {
       if (new URL(url).pathname === "/models") return Response.json(catalog);
+      const signal = AbortSignal.any([init.signal, lifetime.signal]);
+      if (signal.aborted) throw requestError("COPILOT_REQUEST_CANCELLED");
+      const requestId = init.requestId ?? randomUUID();
+      const diagnose = (details) =>
+        appendDiagnostic(diagnosticFile, {
+          request_id: requestId,
+          ...details,
+        });
       const original = JSON.parse(init.body);
       let payload;
       try {
@@ -424,9 +466,9 @@ export async function createSdkTransport({
         model?.capabilities?.limits?.max_context_window_tokens >= 1000000
           ? "long_context"
           : undefined;
-      let session;
+      let session, creating;
       try {
-        session = await client.createSession({
+        creating = client.createSession({
           model: payload.model,
           contextTier,
           reasoningEffort,
@@ -443,8 +485,32 @@ export async function createSdkTransport({
             content: "The request handler forwards inference to Codex.",
           },
         });
+        session = await cancellable(creating, signal);
       } catch (error) {
-        const failure = runtimeError(error, "COPILOT_SDK_CREATE_FAILED");
+        // Admission has no SDK cancellation parameter. Stop waiting promptly;
+        // dispose only this newly created session if it arrives after cancel.
+        // During shutdown, disconnect must not restart the stopped runtime.
+        if (signal.aborted && creating)
+          void creating.then(
+            async (late) => {
+              try {
+                if (lifetime.signal.aborted) await late.disconnect();
+                else await client.deleteSession(late.sessionId);
+              } catch {
+                diagnose({
+                  code: "SDK_SESSION_CLEANUP_FAILED",
+                  stage: "late_admission",
+                  model: payload.model,
+                });
+              }
+            },
+            () => {},
+          );
+        const failure = await sessionFailure(
+          error,
+          "COPILOT_SDK_CREATE_FAILED",
+          signal,
+        );
         diagnose({
           code: failure.code,
           stage: "session_create",
@@ -456,6 +522,7 @@ export async function createSdkTransport({
       const job = {
         ...Promise.withResolvers(),
         init,
+        requestId,
         model: payload.model,
         contextTier,
         reasoningEffort,
@@ -467,8 +534,8 @@ export async function createSdkTransport({
         controller: new AbortController(),
       };
       pending.set(session.sessionId, job);
-      // sendAndWait has a total-duration deadline. Let the bridge's inactivity
-      // watchdog and explicit cancellation govern long, active requests instead.
+      // Keep a request-owned completion wait. An idle-event subscription alone
+      // disappears on SDK disconnect and can leave this job hanging forever.
       const outcome = Promise.withResolvers();
       job.respond = (response) => {
         job.responseReturned = true;
@@ -521,8 +588,6 @@ export async function createSdkTransport({
           });
           job.fail(runtimeError(event.data), "runtime_event");
         }
-        if (event.type === "session.idle" && event.data?.mode !== "autopilot")
-          outcome.resolve(true);
       });
       const abortJob = (force = false) => {
         // A caller can close immediately after the terminal SSE frame. Allow
@@ -564,19 +629,35 @@ export async function createSdkTransport({
         });
       tasks.add(task);
       if (!init.signal.aborted)
-        void session
-          .send({ prompt: "Forward the pending Codex request." })
-          .catch((error) => {
-            if (!job.responseReturned)
-              job.fail(
-                runtimeError(error, "COPILOT_SDK_SEND_FAILED"),
-                "session_send",
-              );
-            else outcome.resolve(false);
+        void Promise.resolve()
+          // The pinned SDK's native completion RPC has no total-duration timer.
+          // Its public sendAndWait wrapper always adds one. Keep this one
+          // version-sensitive boundary covered by the installed-runtime tests;
+          // unsupported runtimes reject before admitting the message.
+          .then(() =>
+            session.internalRpc.sendAndWait({
+              prompt: "Forward the pending Codex request.",
+            }),
+          )
+          .then((completion) =>
+            outcome.resolve(!completion?.aborted && job.completed),
+          )
+          .catch(async (error) => {
+            job.fail(
+              init.signal.aborted
+                ? requestError("COPILOT_REQUEST_CANCELLED")
+                : await sessionFailure(
+                    error,
+                    "COPILOT_SDK_SEND_FAILED",
+                    signal,
+                  ),
+              "session_completion",
+            );
           });
       return job.promise;
     },
     close: async () => {
+      lifetime.abort();
       for (const job of pending.values()) job.abort();
       const settled = Promise.allSettled([...tasks]);
       let timer;

@@ -18,6 +18,30 @@ PENDING_SCREEN = EMPTY_SCREEN.replace('Ask Codex to do anything', '/goal resume'
 
 
 class RecoveryTests(unittest.TestCase):
+    def test_compaction_larger_than_tail_window_is_still_confirmed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'rollout.jsonl'
+            records = [
+                {'timestamp': '2026-10-31T23:14:03Z', 'type': 'event_msg',
+                 'payload': {'type': 'task_started'}},
+                {'timestamp': '2026-10-31T23:15:23Z', 'type': 'compacted',
+                 'payload': {'message': 'x' * (watch.TAIL_BYTES + 100000)}},
+                {'timestamp': '2026-10-31T23:15:24Z', 'type': 'event_msg',
+                 'payload': {'type': 'task_complete'}},
+            ]
+            path.write_text(''.join(json.dumps(record) + '\n' for record in records))
+            evidence = watch.rollout_evidence(path)
+            self.assertGreater(evidence['compacted_at'], 0)
+            self.assertGreater(evidence['completion']['at'], evidence['compacted_at'])
+            self.assertFalse(evidence['completion']['failed'])
+            # An uncommitted trailing record must not authorize recovery, even
+            # if its JSON happens to parse before the writer appends a newline.
+            with path.open('a') as stream:
+                stream.write(json.dumps({**records[1], 'timestamp': '2026-10-31T23:16:00Z'}))
+            evidence = watch.rollout_evidence(path)
+            self.assertEqual(evidence['compacted_at'], 0)
+            self.assertTrue(evidence['incomplete_tail'])
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -107,7 +131,7 @@ class RecoveryTests(unittest.TestCase):
                   ('event_msg', {'type': 'user_message', 'message': 'pause'})]
         path.write_text('x' * (watch.TAIL_BYTES + 10) + '\n' + '\n'.join(
             json.dumps({'timestamp': f'2026-10-22T18:49:0{i}Z', 'type': kind, 'payload': payload})
-            for i, (kind, payload) in enumerate(events)))
+            for i, (kind, payload) in enumerate(events)) + '\n')
         evidence = watch.rollout_evidence(path)
         self.assertGreater(evidence['started_at'], evidence['tool_result_at'])
         self.assertGreater(evidence['user_message_at'], evidence['started_at'])
@@ -150,7 +174,7 @@ class RecoveryTests(unittest.TestCase):
                 evidence = watch.rollout_evidence(path)
                 self.assertEqual(evidence['completion']['failure_code'], expected)
                 evidence.update({'input_tokens': 0, 'context_window': 997500})
-                self.assertEqual(watch.needs_compaction(self.config, evidence), expected is not None)
+                self.assertEqual(watch.needs_compaction(evidence), expected is not None)
 
     def test_read_only_native_queries_do_not_modify_state(self):
         goal_db = self.root / 'goals_1.sqlite'
@@ -292,6 +316,13 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(calls, [])
         self.assertFalse((self.root / 'recovery.json').exists())
 
+    def test_unfinished_rollout_write_prevents_new_and_pending_recovery(self):
+        self.evidence['incomplete_tail'] = True
+        for ledger in ({}, self.pending_ledger()):
+            result, calls = self.exercise_check(apply=True, ledger=ledger)
+            self.assertEqual(result['status'], 'rollout-write-in-progress')
+            self.assertEqual(calls, [])
+
     def test_following_replaced_goal_is_explicit_and_preserves_pauses_and_budgets(self):
         replacement = {**self.goal, 'goal_id': 'replacement'}
         result, calls = self.exercise_check(apply=True, native=[(replacement, self.root)])
@@ -427,20 +458,13 @@ class RecoveryTests(unittest.TestCase):
         return {**self.evidence, 'started_at': 1060, 'user_message_at': 800, 'compacted_at': 1079,
                 'completion': {'at': 1080, 'failed': False, 'failure_code': None}}
 
-    def test_compaction_requires_opt_in_and_a_large_confirmed_failed_context(self):
-        evidence = {'input_tokens': 711255, 'context_window': 997500}
-        self.assertFalse(watch.needs_compaction(self.config, evidence))
-        self.config['compact_after_transport_failure'] = True
-        self.assertTrue(watch.needs_compaction(self.config, evidence))
-        self.assertFalse(watch.needs_compaction(self.config, {**evidence, 'input_tokens': 1000}))
-        self.assertFalse(watch.needs_compaction(self.config, {}))
-        self.assertFalse(watch.needs_compaction(self.config, {**evidence, 'context_window': 0}))
-        self.config['compact_failure_context_fraction'] = .1
-        self.assertFalse(watch.needs_compaction(self.config, evidence))
+    def test_transport_failure_does_not_imply_context_overflow(self):
+        for tokens in (0, 711255, 1000000):
+            self.assertFalse(watch.needs_compaction({**self.evidence,
+                'input_tokens': tokens, 'context_window': 997500}))
 
-    def test_large_transport_failure_requests_native_compaction_once_before_resume(self):
-        self.config['compact_after_transport_failure'] = True
-        self.evidence.update({'input_tokens': 711255, 'context_window': 997500})
+    def test_context_failure_requests_native_compaction_once_before_resume(self):
+        self.evidence['completion']['failure_code'] = 'CONTEXT_WINDOW_EXCEEDED'
         result, calls = self.exercise_check(apply=False)
         self.assertEqual(result['status'], 'would-compact')
         self.assertEqual(calls, [])
@@ -613,7 +637,6 @@ class RecoveryTests(unittest.TestCase):
         path.write_text('\n'.join(map(json.dumps, malformed))+'\n')
         evidence = watch.rollout_evidence(path)
         self.assertIsNone(evidence['completion'])
-        self.assertIsNone(evidence['input_tokens'])
         self.assertIsNone(watch.failure_code({'message': 'quota exhausted', 'codex_error_info': 'invalid_prompt'}))
         self.assertEqual(watch.failure_code({'codex_error_info': 'server_overloaded'}), 'UPSTREAM_SERVER_ERROR')
 

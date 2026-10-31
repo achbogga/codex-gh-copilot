@@ -299,37 +299,41 @@ test("upstream HTTP 499 enters native recovery without a bridge retry or leaked 
   assert.equal(diagnostics.at(-1).context_exceeded, false);
 });
 
-test("HTTP 499 after caller cancellation leaves the caller cancelled", { timeout: 5000 }, async (t) => {
-  const entered = Promise.withResolvers();
-  const diagnosed = Promise.withResolvers();
-  let count = 0;
-  const bridge = await fixture(t, () => {}, {
-    transport: async (_url, init) => {
-      count++;
-      const aborted = new Promise((resolve) =>
-        init.signal.addEventListener("abort", resolve, { once: true }),
-      );
-      entered.resolve();
-      await aborted;
-      return new Response("PRIVATE_CANCELLATION", { status: 499 });
-    },
-    onDiagnostic: (entry) => {
-      if (entry.code === "COPILOT_HTTP_ERROR") diagnosed.resolve(entry);
-    },
-  });
-  const controller = new AbortController();
-  const rejected = assert.rejects(
-    send(bridge.url, payload, { signal: controller.signal }),
-    { name: "AbortError" },
-  );
-  await entered.promise;
-  controller.abort();
-  await rejected;
-  const diagnostic = await diagnosed.promise;
-  assert.equal(diagnostic.upstream_status, 499);
-  assert.equal(diagnostic.caller_closed, true);
-  assert.equal(count, 1);
-});
+test(
+  "HTTP 499 after caller cancellation leaves the caller cancelled",
+  { timeout: 5000 },
+  async (t) => {
+    const entered = Promise.withResolvers();
+    const diagnosed = Promise.withResolvers();
+    let count = 0;
+    const bridge = await fixture(t, () => {}, {
+      transport: async (_url, init) => {
+        count++;
+        const aborted = new Promise((resolve) =>
+          init.signal.addEventListener("abort", resolve, { once: true }),
+        );
+        entered.resolve();
+        await aborted;
+        return new Response("PRIVATE_CANCELLATION", { status: 499 });
+      },
+      onDiagnostic: (entry) => {
+        if (entry.code === "COPILOT_HTTP_ERROR") diagnosed.resolve(entry);
+      },
+    });
+    const controller = new AbortController();
+    const rejected = assert.rejects(
+      send(bridge.url, payload, { signal: controller.signal }),
+      { name: "AbortError" },
+    );
+    await entered.promise;
+    controller.abort();
+    await rejected;
+    const diagnostic = await diagnosed.promise;
+    assert.equal(diagnostic.upstream_status, 499);
+    assert.equal(diagnostic.caller_closed, true);
+    assert.equal(count, 1);
+  },
+);
 
 test("does not follow upstream redirects", async (t) => {
   let count = 0;
@@ -423,14 +427,23 @@ test(
   { timeout: 5000 },
   async (t) => {
     let closed;
+    const diagnosed = Promise.withResolvers();
     const disconnected = new Promise((resolve) => {
       closed = resolve;
     });
-    const bridge = await fixture(t, (_req, res) => {
-      res.on("close", closed);
-      res.writeHead(200, { "content-type": "text/event-stream" });
-      res.write(": heartbeat\n\n");
-    });
+    const bridge = await fixture(
+      t,
+      (_req, res) => {
+        res.on("close", closed);
+        res.writeHead(200, { "content-type": "text/event-stream" });
+        res.write(": heartbeat\n\n");
+      },
+      {
+        onDiagnostic: (entry) => {
+          if (entry.stage === "bridge") diagnosed.resolve(entry);
+        },
+      },
+    );
     const controller = new AbortController();
     const result = await send(bridge.url, payload, {
       signal: controller.signal,
@@ -438,6 +451,7 @@ test(
     await result.body.getReader().read();
     controller.abort();
     await disconnected;
+    assert.equal((await diagnosed.promise).code, "COPILOT_REQUEST_CANCELLED");
   },
 );
 

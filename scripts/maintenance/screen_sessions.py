@@ -239,19 +239,6 @@ def launch_arguments(target, config, continuation=None):
     else:
         result = [config['codex_bin'], '-C', thread['cwd'], '--model', thread['model'],
                   '-c', 'model_reasoning_effort=' + json.dumps(thread['reasoning_effort'] or 'max'), '--yolo']
-    # Recovery settings belong to the exact root thread and must survive the
-    # next cxf update. Only these two bounded native settings are supported;
-    # provider routing, credentials and arbitrary config never come from here.
-    overrides = config.get('thread_recovery_overrides', {}).get(thread['id'], {})
-    allowed = {'model_auto_compact_token_limit': (1, 10_000_000),
-               'model_providers.copilot-pilot.stream_max_retries': (0, 3)}
-    for key, value in overrides.items():
-        if (key not in allowed or type(value) is not int
-                or not allowed[key][0] <= value <= allowed[key][1]):
-            raise RuntimeError('Invalid native thread recovery override.')
-        if key.startswith('model_providers.') and target['backend'] != 'copilot':
-            raise RuntimeError('Copilot retry override cannot apply to a native provider.')
-        result += ['-c', key + '=' + json.dumps(value)]
     result += ['resume', thread['id']]
     if continuation:
         result.append(continuation)
@@ -277,8 +264,6 @@ def reload_target(target, config, state, drain_seconds=45, continuation=None):
     if not current or current['id'] != target['thread']['id']:
         raise RuntimeError('The live thread changed; refusing to restart a different session.')
     target['thread'] = current
-    # Reject invalid recovery config while the old writer is still untouched.
-    launch_arguments(target, config)
     before = goal(home, current['id'])
     text = capture(target, state)
     interrupted_for_update = False
@@ -290,6 +275,10 @@ def reload_target(target, config, state, drain_seconds=45, continuation=None):
         text = capture(target, state)
     if 'Compacting context' in '\n'.join(text.splitlines()[-12:]):
         raise RuntimeError('Compaction is still running; reload deferred without interruption.')
+    latest_goal = goal(home, current['id'])
+    if any((before or {}).get(key) != (latest_goal or {}).get(key)
+           for key in ('goal_id', 'status')):
+        raise RuntimeError('Native goal changed while waiting; reload deferred without interruption.')
     if busy(text):
         # An explicit update/reload request authorizes a native turn interrupt.
         # Wait for Codex to save the interruption before quitting its process.

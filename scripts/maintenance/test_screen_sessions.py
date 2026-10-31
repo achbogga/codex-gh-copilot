@@ -227,34 +227,33 @@ class ScreenSessionTests(unittest.TestCase):
             self.assertEqual(sessions.inventory('controller-thread', status_directory=Path('/private')), [])
             root.assert_called_once_with(Path.home() / '.codex', 123)
 
-    def test_thread_recovery_overrides_survive_reload_without_affecting_other_sessions(self):
+    def test_retired_thread_overrides_cannot_replace_shared_native_policy(self):
         target = self.target()
         overrides = {'model_auto_compact_token_limit': 600000,
                      'model_providers.copilot-pilot.stream_max_retries': 1}
         config = {'codex_bin': '/new/codex', 'thread_recovery_overrides': {'exact-thread': overrides}}
         args = sessions.launch_arguments(target, config)
-        self.assertIn('model_auto_compact_token_limit=600000', args)
-        self.assertIn('model_providers.copilot-pilot.stream_max_retries=1', args)
+        self.assertNotIn('model_auto_compact_token_limit=600000', args)
+        self.assertNotIn('model_providers.copilot-pilot.stream_max_retries=1', args)
         self.assertEqual(args[-2:], ['resume', 'exact-thread'])
         target['thread']['id'] = 'unrelated-thread'
         self.assertNotIn('model_auto_compact_token_limit=600000', sessions.launch_arguments(target, config))
 
-    def test_recovery_overrides_reject_unsafe_or_malformed_settings(self):
-        for overrides in ({'model_providers.copilot-pilot.base_url': 'http://unapproved'},
-                          {'model_auto_compact_token_limit': 0},
-                          {'model_auto_compact_token_limit': True},
-                          {'model_providers.copilot-pilot.stream_max_retries': 99}):
-            with self.subTest(overrides=overrides), self.assertRaises(RuntimeError):
-                sessions.launch_arguments(self.target(), {'thread_recovery_overrides': {'exact-thread': overrides}})
-
-    def test_invalid_recovery_config_never_quits_the_old_writer(self):
+    def test_goal_pause_during_drain_prevents_reload_and_resume(self):
         target = self.target()
-        config = {'thread_recovery_overrides': {'exact-thread': {'model_auto_compact_token_limit': 0}}}
+        goal = {'goal_id': 'same-goal', 'status': 'active'}
         with (patch.object(sessions, 'alive', return_value=True),
-              patch.object(sessions, 'root_thread', return_value=target['thread']),
+              patch.object(sessions, 'verified_thread', return_value=target['thread']),
+              patch.object(sessions, 'goal', side_effect=[goal, {**goal, 'status': 'paused'}]),
+              patch.object(sessions, 'capture', side_effect=['busy', 'idle']),
+              patch.object(sessions, 'busy', side_effect=lambda text: text == 'busy'),
+              patch.object(sessions, 'empty_composer', return_value=True),
+              patch.object(sessions.time, 'sleep'),
+              patch.object(sessions, 'stuff') as stuff,
               patch.object(sessions, 'enter_command') as enter):
-            with self.assertRaises(RuntimeError):
-                sessions.reload_target(target, config, Path('/unused'), drain_seconds=0)
+            with self.assertRaisesRegex(RuntimeError, 'goal changed while waiting'):
+                sessions.reload_target(target, {}, Path('/unused'))
+            stuff.assert_not_called()
             enter.assert_not_called()
 
     def test_active_goals_restore_before_any_prompt_can_suppress_the_resume_dialog(self):
