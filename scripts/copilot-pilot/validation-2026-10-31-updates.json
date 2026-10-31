@@ -1,5 +1,5 @@
 {
-  "validated_at": "2026-10-31T17:21:57.875969+00:00",
+  "validated_at": "2026-10-31T17:31:54.935705+00:00",
   "status": "controller-handoff-pending",
   "upstream": {
     "repository": "https://github.com/openai/codex",
@@ -29,9 +29,11 @@
       "skipped": 0
     },
     "maintenance_including_real_screen": {
-      "passed": 130,
+      "passed": 133,
       "failed": 0,
-      "skipped": 0
+      "skipped": 0,
+      "full_suite_passed": 132,
+      "additional_controller_abort_regression_passed": 1
     },
     "updater": {
       "passed": 16,
@@ -107,7 +109,13 @@
     },
     "fix": "Send at most 128 Unicode code points per write, then Enter after the complete command.",
     "real_screen_ascii_and_unicode_regression": "passed",
-    "aggregate_reports_pending_controller_explicitly": true
+    "aggregate_reports_pending_controller_explicitly": true,
+    "second_observed_issue": "The terminal appeared idle before the managed controller turn finished; the new frontend stopped at the native ownership notice.",
+    "durable_turn_guard": "Wait for the exact recorded turn completion and any newer turn before terminal control. Cancel on interruption.",
+    "partial_lifecycle_record_regression": "passed",
+    "idle_footer_with_unfinished_turn_regression": "passed",
+    "newer_turn_and_user_interruption_regressions": "passed",
+    "ownership_recovery_status": "Queued only after the current native turn completes; no lock bypass or replacement writer."
   },
   "limits": [
     "The controller handoff is pending until this turn finishes. The resumed controller must record final verification.",

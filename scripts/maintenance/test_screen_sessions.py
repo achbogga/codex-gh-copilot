@@ -76,6 +76,55 @@ class ScreenSessionTests(unittest.TestCase):
         self.assertEqual(capture.call_count, 5)
         stuff.assert_not_called()
 
+    def test_idle_footer_cannot_end_an_unfinished_native_controller_turn(self):
+        def event(kind, identifier):
+            return json.dumps({'type': 'event_msg', 'payload': {'type': kind, 'turn_id': identifier}}) + '\n'
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'rollout.jsonl'
+            for newer in (False, True):
+                path.write_text(event('task_started', 'expected') + (event('task_complete', 'expected') + event('task_started', 'newer') if newer else event('task_complete', 'unrelated')))
+                sleeps = 0
+                def sleep(_seconds):
+                    nonlocal sleeps
+                    sleeps += 1
+                    if sleeps == 2:
+                        with path.open('a') as output:
+                            output.write(event('task_complete', 'newer' if newer else 'expected'))
+                with (patch.object(sessions, 'capture', return_value=': Ask Codex to do anything\n') as capture,
+                      patch.object(sessions.time, 'sleep', side_effect=sleep),
+                      patch.object(sessions, 'stuff') as stuff):
+                    sessions.wait_for_idle_screen(self.target(), Path(directory), path, 'expected')
+                self.assertEqual(capture.call_count, 4)
+                stuff.assert_not_called()
+
+    def test_controller_lifecycle_reader_retains_partial_records(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'rollout.jsonl'
+            started = json.dumps({'type': 'event_msg', 'payload': {'type': 'task_started', 'turn_id': 'turn'}})
+            completed = json.dumps({'type': 'event_msg', 'payload': {'type': 'task_complete', 'turn_id': 'turn'}})
+            path.write_text(started + '\n' + completed)
+            with path.open('rb') as source:
+                self.assertEqual(list(sessions.turn_events(source)), [('task_started', 'turn')])
+                self.assertEqual(list(sessions.turn_events(source)), [])
+                with path.open('a') as output:
+                    output.write('\n')
+                self.assertEqual(list(sessions.turn_events(source)), [('task_complete', 'turn')])
+            self.assertEqual(sessions.latest_turn(path), 'turn')
+            path.write_text('')
+            with self.assertRaisesRegex(RuntimeError, 'no recorded native turn'):
+                sessions.latest_turn(path)
+
+    def test_interrupted_controller_turn_cancels_automatic_handoff(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'rollout.jsonl'
+            path.write_text(''.join(json.dumps({'type': 'event_msg', 'payload': {
+                'type': kind, 'turn_id': 'expected'}}) + '\n' for kind in ('task_started', 'turn_aborted')))
+            with patch.object(sessions, 'stuff') as stuff, patch.object(sessions, 'capture') as capture:
+                with self.assertRaisesRegex(RuntimeError, 'automatic handoff cancelled'):
+                    sessions.wait_for_idle_screen(self.target(), Path(directory), path, 'expected')
+                stuff.assert_not_called()
+                capture.assert_not_called()
+
     def test_status_probe_reads_the_existing_clients_exact_thread_without_a_model_prompt(self):
         identifier = '11111111-2222-3333-4444-555555555555'
         idle = ': Ask Codex to do anything\n'
@@ -253,6 +302,7 @@ class ScreenSessionTests(unittest.TestCase):
                 with (patch.object(sessions.os, 'umask'),
                       patch('sys.argv', ['screen_sessions', '--config', str(config), '--state-dir', str(state),
                                         '--only', target['screen'], '--controller-thread', target['thread']['id'],
+                                        '--controller-rollout', '/private/rollout.jsonl', '--controller-turn', 'current-turn',
                                         '--wait-controller-idle', '--apply']),
                       patch.object(sessions, 'wait_for_idle_screen'),
                       patch.object(sessions, 'inventory', return_value=[changed]),

@@ -381,15 +381,62 @@ def save(path, value):
     temporary.replace(path)
 
 
-def wait_for_idle_screen(target, state):
+def turn_events(source):
+    """Read complete native lifecycle records, retaining partial appended lines."""
+    while True:
+        offset = source.tell()
+        line = source.readline()
+        if not line or not line.endswith(b'\n'):
+            source.seek(offset)
+            return
+        if not any(kind in line for kind in (b'"task_started"', b'"task_complete"', b'"turn_aborted"')):
+            continue
+        try:
+            event = json.loads(line)
+            payload = event['payload']
+            kind, identifier = payload['type'], payload['turn_id']
+        except (ValueError, KeyError, TypeError):
+            continue
+        if event.get('type') == 'event_msg' and kind in ('task_started', 'task_complete', 'turn_aborted') and isinstance(identifier, str):
+            yield kind, identifier
+
+
+def latest_turn(path):
+    latest = None
+    with path.open('rb') as source:
+        for kind, identifier in turn_events(source):
+            if kind == 'task_started':
+                latest = identifier
+    if not latest:
+        raise RuntimeError('Controller has no recorded native turn; handoff deferred.')
+    return latest
+
+
+def wait_for_idle_screen(target, state, rollout=None, expected_turn=None, allow_ownership_notice=False):
     # Observe the controller without sending /status while its current turn is
     # still using tools. Identify the live thread only after the turn finishes.
     deadline = time.monotonic() + 7200
     stable = 0
-    while time.monotonic() < deadline and stable < 2:
-        text = capture(target, state)
-        stable = stable + 1 if empty_composer(text) and not busy(text) else 0
-        time.sleep(2)
+    latest, finished, expected_finished = None, False, False
+    with rollout.open('rb') if rollout else nullcontext(None) as source:
+        while time.monotonic() < deadline and stable < 2:
+            if source:
+                if rollout.stat().st_size < source.tell():
+                    raise RuntimeError('Controller history was truncated; no restart was attempted.')
+                for kind, identifier in turn_events(source):
+                    if kind == 'turn_aborted' and (identifier == expected_turn or (expected_finished and identifier == latest)):
+                        raise RuntimeError('Controller turn was interrupted; automatic handoff cancelled.')
+                    if kind == 'task_started':
+                        latest, finished = identifier, False
+                    elif identifier == latest:
+                        finished = True
+                    if identifier == expected_turn and kind == 'task_complete':
+                        expected_finished = True
+            text = capture(target, state)
+            idle = (empty_composer(text) and not busy(text)) or (allow_ownership_notice and 'This conversation is open in another app' in text)
+            ready = idle and (source is None or (expected_finished and finished))
+            stable = stable + 1 if ready else 0
+            time.sleep(2)
     if stable < 2:
         raise RuntimeError('Controller never became idle; no restart was attempted.')
 
@@ -403,6 +450,8 @@ def main():
     parser.add_argument('--controller-thread', default=os.environ.get('CODEX_THREAD_ID'))
     parser.add_argument('--wait-controller-idle', action='store_true')
     parser.add_argument('--controller-window', default='0')
+    parser.add_argument('--controller-rollout', type=Path)
+    parser.add_argument('--controller-turn')
     parser.add_argument('--probe-status', '--probe-native', dest='probe_status', action='store_true',
                         help='Use guarded /status to identify native or Copilot TUI threads during an update.')
     parser.add_argument('--continuation')
@@ -417,9 +466,11 @@ def main():
             fcntl.flock(guard, fcntl.LOCK_EX | fcntl.LOCK_NB)
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         if args.wait_controller_idle:
-            if not args.controller_thread or not args.only or not re.fullmatch(r'\d+\.\S+', args.only):
-                raise RuntimeError('Controller handoff requires an exact Screen and thread.')
-            wait_for_idle_screen({'screen': args.only, 'window': args.controller_window}, args.state_dir)
+            if (not args.controller_thread or not args.only or not re.fullmatch(r'\d+\.\S+', args.only)
+                    or not args.controller_rollout or not args.controller_turn):
+                raise RuntimeError('Controller handoff requires an exact Screen, thread and recorded turn.')
+            wait_for_idle_screen({'screen': args.only, 'window': args.controller_window}, args.state_dir,
+                                 args.controller_rollout, args.controller_turn)
         targets = inventory(args.controller_thread, status_directory=args.state_dir if args.probe_status else None,
                             only=args.only)
         if args.only:
@@ -438,7 +489,9 @@ def main():
             if target['controller']:
                 if not args.wait_controller_idle:
                     results.append({'screen': target['screen'], 'window': target['window'],
-                                    'status': 'controller-deferred', 'thread_id': target['thread']['id']})
+                                    'status': 'controller-deferred', 'thread_id': target['thread']['id'],
+                                    'rollout_path': target['thread']['rollout_path'],
+                                    'turn_id': latest_turn(Path(target['thread']['rollout_path']))})
                     continue
             try:
                 config = json.loads(args.config.read_text())

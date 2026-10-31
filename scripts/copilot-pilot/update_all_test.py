@@ -48,7 +48,8 @@ class ControllerHandoffTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             state = Path(directory)
             report = {'results': [{'status': 'controller-deferred', 'screen': '45.controller',
-                                   'thread_id': 'exact-thread', 'window': '2'}]}
+                                   'thread_id': 'exact-thread', 'window': '2',
+                                   'rollout_path': '/private/rollout.jsonl', 'turn_id': 'current-turn'}]}
             with patch.object(update_all.subprocess, 'Popen', return_value=Mock(pid=321)) as start:
                 update_all.queue_controller(state / 'config.json', state / 'screen_sessions.py', state, report)
             args = start.call_args.args[0]
@@ -57,6 +58,8 @@ class ControllerHandoffTests(unittest.TestCase):
             self.assertEqual(args[args.index('--only') + 1], '45.controller')
             self.assertEqual(args[args.index('--controller-thread') + 1], 'exact-thread')
             self.assertEqual(args[args.index('--controller-window') + 1], '2')
+            self.assertEqual(args[args.index('--controller-rollout') + 1], '/private/rollout.jsonl')
+            self.assertEqual(args[args.index('--controller-turn') + 1], 'current-turn')
             self.assertNotIn('--last', args)
             self.assertTrue(start.call_args.kwargs['start_new_session'])
             self.assertEqual(report['controller_handoff_pid'], 321)
@@ -67,6 +70,9 @@ class ControllerHandoffTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'ambiguous'):
                 update_all.queue_controller(Path('/config'), Path('/script'), Path('/private'),
                     {'results': [{'status': 'controller-deferred'}, {'status': 'controller-deferred'}]})
+            with self.assertRaisesRegex(RuntimeError, 'recorded native turn'):
+                update_all.queue_controller(Path('/config'), Path('/script'), Path('/private'),
+                    {'results': [{'status': 'controller-deferred'}]})
             start.assert_not_called()
 
 
