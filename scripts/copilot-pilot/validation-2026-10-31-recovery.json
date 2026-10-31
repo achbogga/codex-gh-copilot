@@ -1,6 +1,6 @@
 {
-  "validated_at": "2026-10-31T23:47:21.459816+00:00",
-  "status": "validated-awaiting-fastpath-reload",
+  "validated_at": "2026-10-31T23:54:24.364178+00:00",
+  "status": "validated-fastpath-restored-on-revised-bridge",
   "runtime": {
     "codex": "0.166.0",
     "copilot_cli": "1.0.105",
@@ -103,7 +103,14 @@
     "controller_restarted_again": false,
     "auto_labels_goal_status": "complete",
     "fastpath_manual_compaction_and_resume": "same process, thread and goal; fresh real tools observed",
-    "fastpath_new_design_loaded": false
+    "fastpath_new_design_loaded": true,
+    "fastpath_same_thread_and_goal": true,
+    "fastpath_model": "gpt-6.1-sol",
+    "fastpath_reasoning": "max",
+    "fastpath_goal_status": "active",
+    "fastpath_fresh_tool_results": 2,
+    "fastpath_old_retry_overrides_absent": true,
+    "other_original_screen_processes_preserved": true
   },
   "limits": [
     "The upstream component closing the approximately 631-second streams has not been identified.",
@@ -111,5 +118,6 @@
     "The underlying SDK completion RPC is a pinned, version-sensitive integration boundary.",
     "An external side effect followed by a process crash before its result is saved still requires authoritative-state inspection."
   ],
-  "private_data_included": false
+  "private_data_included": false,
+  "code_commit": "c171ef86f801b33cae8a38f1169015a7c72c701b"
 }
