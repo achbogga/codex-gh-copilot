@@ -1,0 +1,124 @@
+{
+  "validated_at": "2026-10-31T17:21:57.875969+00:00",
+  "status": "controller-handoff-pending",
+  "upstream": {
+    "repository": "https://github.com/openai/codex",
+    "commit": "67f0994b532b8740f14b5b738af7b7b2a915b1d6",
+    "merge_commit": "52735a8ae",
+    "installed_rust_binary_rebuilt": false
+  },
+  "installed": {
+    "codex": "0.166.0",
+    "copilot_cli": "1.0.105",
+    "copilot_sdk": "1.0.28",
+    "node": "22.23.4"
+  },
+  "release_check": {
+    "stable_versions_already_current": true,
+    "prereleases_used": false
+  },
+  "artifacts": {
+    "codex_sha512_verified": true,
+    "copilot_sha256_verified": true,
+    "old_running_executables_overwritten": false
+  },
+  "validation": {
+    "bridge_native_official_runtime": {
+      "passed": 150,
+      "failed": 0,
+      "skipped": 0
+    },
+    "maintenance_including_real_screen": {
+      "passed": 130,
+      "failed": 0,
+      "skipped": 0
+    },
+    "updater": {
+      "passed": 16,
+      "failed": 0,
+      "skipped": 0
+    },
+    "official_runtime_long_streams": {
+      "status": "passed",
+      "duration_ms": 660000,
+      "models": [
+        "gpt-6.1-sol",
+        "claude-opus-5.5"
+      ],
+      "inference": "synthetic; no model backend called",
+      "passed_streams": 2,
+      "failed": 0,
+      "skipped": 0,
+      "suite_checks_passed": 4
+    },
+    "npm_audit": {
+      "known_vulnerabilities": 0
+    }
+  },
+  "sessions": {
+    "verified_reloads": 9,
+    "controller_pending": 1,
+    "exact_threads_preserved": true,
+    "models_and_reasoning_preserved": true,
+    "goals_preserved": true,
+    "completed_goals_left_complete": true,
+    "fresh_tool_results": {
+      "lance_migration": 3,
+      "fastpath": 12,
+      "auto_labels_removal": 24,
+      "task_pools": 6
+    },
+    "copilot_runtime_executables_verified": 8
+  },
+  "auto_labels": {
+    "failure_code": "UND_ERR_SOCKET",
+    "final_failed_attempt_durations_ms": [
+      630934,
+      631023
+    ],
+    "final_failed_request_bytes": [
+      12423190,
+      13219324
+    ],
+    "sdk_caller_and_session_cancelled": false,
+    "native_retry_limit_before_and_after": 1,
+    "recovery_watcher_previously_installed": false,
+    "recovery_watcher_now_installed": true,
+    "cron_frequency": "every minute",
+    "native_compaction_tokens": 500000,
+    "failure_compaction_context_fraction": 0.5,
+    "recovery_cooldown_seconds": 900,
+    "max_consecutive_recovery_attempts": 2,
+    "max_daily_recovery_attempts": 6,
+    "compaction_completed": true,
+    "input_tokens_before": 580011,
+    "input_tokens_after_observed": 70486,
+    "fresh_real_tool_results_verified": true,
+    "same_thread_and_goal": true,
+    "model": "gpt-6.1-sol",
+    "reasoning": "max"
+  },
+  "controller_handoff_fix": {
+    "observed_issue": "GNU Screen returned success while silently dropping an oversized stuff argument. The old frontend exited but the replacement command never reached the shell.",
+    "isolated_pre_fix_probe": {
+      "64_bytes_delivered": true,
+      "768_bytes_delivered": false,
+      "1600_bytes_delivered": false
+    },
+    "fix": "Send at most 128 Unicode code points per write, then Enter after the complete command.",
+    "real_screen_ascii_and_unicode_regression": "passed",
+    "aggregate_reports_pending_controller_explicitly": true
+  },
+  "limits": [
+    "The controller handoff is pending until this turn finishes. The resumed controller must record final verification.",
+    "Socket diagnostics do not establish which upstream component closed the connection. Recovery does not guarantee remote service availability.",
+    "Long-stream checks use synthetic inference to validate the local bridge/runtime duration; they do not exercise the remote model stream."
+  ],
+  "private_data_included": false,
+  "launchers": {
+    "registered_codex_entrypoints": 3,
+    "all_report_version": "0.166.0",
+    "original_executables_retained": true,
+    "additional_paths_saved_for_future_updates": true
+  }
+}

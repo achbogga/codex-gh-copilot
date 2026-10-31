@@ -1,6 +1,7 @@
 import hashlib
 import importlib.util
 import io
+import json
 from pathlib import Path
 import tarfile
 import tempfile
@@ -13,6 +14,33 @@ spec.loader.exec_module(runtime)
 
 
 class RuntimeUpdateTests(unittest.TestCase):
+    def test_managed_launchers_are_deduplicated_and_cannot_escape_home(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / 'home'
+            home.mkdir()
+            entry = home / 'bin/codex'
+            config = {'codex_entry': str(entry), 'codex_entries': [str(entry)]}
+            self.assertEqual(runtime.codex_entries(config, home), [entry])
+            (home / 'escape').symlink_to(Path(directory), target_is_directory=True)
+            for extra in ('not-a-list', [str(home / 'escape/codex')], ['/usr/bin/codex'], ['relative/codex']):
+                with self.subTest(extra=extra), self.assertRaises(ValueError):
+                    runtime.codex_entries({**config, 'codex_entries': extra}, home)
+
+    def test_each_registered_launcher_updates_without_changing_the_old_executable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            old, new = root / 'old-runtime', root / 'new-runtime'
+            old.write_text('old executable')
+            new.write_text('new executable')
+            entries = [root / 'node20-codex', root / 'node24-codex']
+            for entry in entries:
+                entry.symlink_to(old)
+            runtime.point_codex_entries(entries, new, root)
+            self.assertTrue(all(entry.resolve() == new for entry in entries))
+            self.assertEqual(old.read_text(), 'old executable')
+            backup = json.loads((root / 'codex-entries-before.json').read_text())
+            self.assertEqual(backup, [{'path': str(entry), 'link': str(old)} for entry in entries])
+
     def test_cached_download_is_verified_and_bad_bytes_cannot_install(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'runtime.tgz'

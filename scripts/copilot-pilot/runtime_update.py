@@ -95,10 +95,33 @@ def installed_version(binary):
     return subprocess.check_output([str(binary), '--version'], text=True, timeout=20).strip()
 
 
+def codex_entries(config, home):
+    """Validate all explicitly managed launcher paths before changing any of them."""
+    extra = config.get('codex_entries', [])
+    if not isinstance(extra, list) or not all(isinstance(path, str) for path in extra):
+        raise ValueError('codex_entries must be a list of launcher paths.')
+    primary = config.get('codex_entry', shutil.which('codex') or home / '.local/bin/codex')
+    entries = list(dict.fromkeys(Path(path) for path in [primary, *extra]))
+    for entry in entries:
+        parent = entry.parent.resolve()
+        if not entry.is_absolute() or (parent != home.resolve() and home.resolve() not in parent.parents):
+            raise ValueError('Refusing a Codex entrypoint outside the user home.')
+    return entries
+
+
+def point_codex_entries(entries, codex, cache):
+    atomic_text(cache / 'codex-entries-before.json', json.dumps([
+        {'path': str(entry), 'link': os.readlink(entry) if entry.is_symlink() else None}
+        for entry in entries], indent=2))
+    for entry in entries:
+        atomic_link(entry, codex)
+
+
 def install(config, cache):
     if platform.system() != 'Linux' or platform.machine() != 'x86_64':
         raise ValueError('This installer currently supports Linux x86_64 only.')
     task_home = Path.home()
+    entries = codex_entries(config, task_home)
     repo = Path(config['repo'])
     runtime_root = Path(config.get('runtime_root', task_home / '.local/share/codex-copilot/runtimes'))
     runtime_root.mkdir(parents=True, exist_ok=True)
@@ -179,19 +202,15 @@ def install(config, cache):
         if not backup.exists():
             os.link(copilot_entry, backup) if copilot_entry.stat().st_dev == cache.stat().st_dev else shutil.copy2(copilot_entry, backup)
     atomic_link(copilot_entry, copilot)
-    codex_entry = Path(config.get('codex_entry', shutil.which('codex') or task_home / '.local/bin/codex'))
-    if not str(codex_entry).startswith(str(task_home) + '/'):
-        raise ValueError('Refusing to replace a system-owned Codex entrypoint.')
-    atomic_text(cache / 'codex-entry-before.json', json.dumps({
-        'path': str(codex_entry), 'link': os.readlink(codex_entry) if codex_entry.is_symlink() else None}, indent=2))
-    atomic_link(codex_entry, codex)
+    point_codex_entries(entries, codex, cache)
     for path, _, text in wrappers:
         atomic_text(path, text, 0o700)
     config.update({'codex_bin': str(codex), 'node_bin': str(node), 'runtime_root': str(runtime_root),
-                   'codex_entry': str(codex_entry)})
+                   'codex_entry': str(entries[0])})
     report = {'codex': codex_version, 'copilot_cli': copilot_version, 'copilot_sdk': sdk_version,
               'node': node_version, 'codex_bin': str(codex), 'copilot_bin': str(copilot),
               'node_bin': str(node), 'immutable_runtime_root': str(runtime_root),
+              'codex_entries_updated': len(entries),
               'codex_sha512_verified': True, 'copilot_sha256_verified': True,
               'old_running_executables_overwritten': False}
     atomic_text(cache / 'runtime-install.json', json.dumps(report, indent=2) + '\n')

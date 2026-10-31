@@ -106,6 +106,8 @@ def main():
         report = json.loads(report_file.read_text())
         report['runtime'] = runtime
         report['status'] = 'updated-with-session-failures' if reload_result.returncode else 'updated'
+        if not reload_result.returncode and any(item['status'] == 'controller-deferred' for item in report['results']):
+            report['status'] = 'updated-controller-pending'
         report['session_reload_exit_code'] = reload_result.returncode
         report['validation'] = 'Bridge/native/official-runtime short streams and maintenance tests passed.'
         report['finished_at'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
