@@ -71,3 +71,31 @@ versions), recent metadata changes, locks, concurrent edits and preservation
 failures. The installed worker, notification helper, documentation and units match
 the source files. Private audit details and recovery receipts remain under
 `/mnt/av-data/cache/preserved-session-artifacts/`.
+
+## Storage-efficient creation
+
+An isolated Git experiment at one Lance producer commit measured 2,412.79 MiB
+for a full checkout, 15.11 MiB for focused Lance review directories, and
+387.51 MiB for broader ML source inspection. These are checkout-only savings of
+99.37% and 83.94%; neither sparse profile has been qualified for Bazel builds.
+All probe checkouts were removed after clean-state and sibling-isolation checks.
+The two ext4 filesystems rejected copy-on-write reflink probes.
+
+`dev-worktree` is installed. Its configured creation root is
+`/mnt/av-data/cache/av-worktrees`, with a 200 GiB free-space reserve. Review
+creation requires explicit directories and includes `.github` instructions;
+full checkouts require `--full`. Existing worktree paths remain registered.
+Retirement covers both the old home root and the new data root. It accepts
+intentionally absent sparse entries while retaining existing hidden files.
+
+The installed helper created a clean 4.56 MiB documentation-review checkout on
+the data disk, verified that existing full checkouts stayed full, and removed
+its disposable checkout through native Git. Git sparse configuration uses native
+per-worktree settings. The maintenance suite now runs 165 tests: 159 pass and
+six existing opt-in tests are skipped. Tests cover creation scope, path escape,
+branch isolation, duplicate destinations, both cleanup roots and hidden sparse edits.
+
+Existing shared Bazel disk/repository caches remain on the data disk. Workspace
+output bases remain isolated. The repository wrapper's fetched-content-cache
+and remote-output compatibility guards are preserved. No active worktree was
+moved or converted to a sparse build profile.
