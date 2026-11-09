@@ -43,9 +43,66 @@ async fn backend_sessions_parked_request_does_not_hide_disconnect() -> Result<()
         )
     });
     let background_id = background.backend_id();
-    let mut backends = BackendSessions::from_initial(displayed, vec![background]);
+    let displayed_id = displayed.backend_id();
+    let mut backends = BackendSessions::new(displayed);
+    assert_eq!(backends.next_listening_backend(displayed_id), None);
+    backends.insert(background);
+    backends.set_preference_key(background_id, "remote.work");
     let initial = backends.displayed;
     let thread_id = ThreadId::new();
+
+    // A startup failure that arrives before a fork is registered stays on its owning backend.
+    let mut app = make_test_app().await;
+    app.sidebar_mut().creation = Some(sidebar::SideCreation {
+        owner: background_id,
+        state: sidebar::CreationState::Waiting {
+            request: uuid::Uuid::new_v4(),
+            started: Instant::now(),
+        },
+        message: None,
+    });
+    let failure = ServerNotification::McpServerStatusUpdated(
+        codex_app_server_protocol::McpServerStatusUpdatedNotification {
+            thread_id: Some(thread_id.to_string()),
+            name: "tools".into(),
+            status: McpServerStartupState::Failed,
+            error: Some("startup failed".into()),
+            failure_reason: None,
+        },
+    );
+    let event = crate::app_server_session::AppServerSessionEvent {
+        backend_id: background_id,
+        event: AppServerEvent::ServerNotification(Box::new(failure.clone())),
+    };
+    assert!(app.defer_side_startup_notification(&event, displayed_id));
+    backends.defer_side_startup(event);
+    backends.replay_ready_side_startup(&app);
+    assert!(
+        backends
+            .next_event(/*paused_backend*/ None)
+            .now_or_never()
+            .is_none()
+    );
+    backends.displayed = backends.slot(background_id).unwrap();
+    backends.replay_ready_side_startup(&app);
+    assert!(
+        backends
+            .next_event(/*paused_backend*/ None)
+            .now_or_never()
+            .is_none()
+    );
+    app.ensure_thread_channel(thread_id);
+    backends.replay_ready_side_startup(&app);
+    let (owner, event) = backends.next_event(/*paused_backend*/ None).await;
+    assert_eq!(owner, background_id);
+    let AppServerEvent::ServerNotification(notification) = event.unwrap().event else {
+        panic!("expected the parked MCP startup failure");
+    };
+    assert_eq!(
+        serde_json::to_value(notification)?,
+        serde_json::to_value(failure)?
+    );
+    backends.displayed = initial;
 
     background_events
         .send(AppServerEvent::ServerRequest(Box::new(approval_request(
@@ -154,6 +211,10 @@ async fn backend_sessions_parked_request_does_not_hide_disconnect() -> Result<()
     assert_eq!(owner, background_id);
     assert!(closed.is_none());
     assert!(!backends.is_listening(background_id));
+    assert_eq!(
+        backends.preferred_listening_backend(Some("remote.work")),
+        Some(displayed_id)
+    );
     Ok(())
 }
 
@@ -185,6 +246,29 @@ async fn backend_sessions_poll_three_sources_and_isolate_closed_or_paused_stream
     }
     let mut sessions = sessions.into_iter();
     let mut backends = BackendSessions::from_initial(sessions.next().unwrap(), sessions.collect());
+    backends.set_preference_key(owners[2], "remote.work");
+    backends.set_preference_key(owners[0], "local");
+    backends.set_preference_key(owners[1], "cloud");
+    assert_eq!(
+        backends.preferred_listening_backend(Some("remote.work")),
+        Some(owners[2])
+    );
+    assert_eq!(
+        backends.preferred_listening_backend(Some("cloud")),
+        Some(owners[1])
+    );
+    assert_eq!(
+        backends.preferred_listening_backend(Some("missing")),
+        Some(owners[0])
+    );
+
+    assert_eq!(
+        owners
+            .iter()
+            .map(|owner| backends.next_listening_backend(*owner))
+            .collect::<Vec<_>>(),
+        [Some(owners[1]), Some(owners[2]), Some(owners[0])]
+    );
     let mut unpaused = HashSet::new();
     for _ in 0..2 {
         let (owner, event) =
@@ -221,6 +305,8 @@ async fn backend_sessions_poll_three_sources_and_isolate_closed_or_paused_stream
         }
     }
     assert!(!backends.is_listening(owners[0]));
+    assert_eq!(backends.next_listening_backend(owners[2]), Some(owners[1]));
+    assert_eq!(backends.next_listening_backend(owners[0]), Some(owners[1]));
     for index in 1..3 {
         assert!(backends.is_listening(owners[index]));
         let _: ThreadSettingsUpdateResponse = backends
