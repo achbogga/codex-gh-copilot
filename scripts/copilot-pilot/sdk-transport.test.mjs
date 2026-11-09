@@ -8,6 +8,70 @@ import { responsesThinkingPrefix } from "./responses-tools.mjs";
 import { sealModelState } from "./model-state.mjs";
 import { httpFailure } from "./request-errors.mjs";
 
+test("runtime metadata discovery preserves authentication, model catalog, and inference guards", async (t) => {
+  let handler;
+  const requests = [];
+  const catalog = { data: [{ id: "test-model" }] };
+  class Client {
+    constructor(options) { handler = options.requestHandler; }
+    async start() {}
+    async stop() {}
+    async createSession() { assert.fail("Discovery must not create inference sessions"); }
+    async listModels() {
+      for (const path of ["/meta", "/models", "/meta"]) {
+        await handler.sendRequest(new Request("https://api.enterprise.githubcopilot.com" + path, {
+          headers: { authorization: "Bearer runtime-owned-token" },
+        }), { signal: new AbortController().signal });
+      }
+      return catalog.data;
+    }
+  }
+  const sdk = await createSdkTransport({ Client, forward: async (request) => {
+    requests.push({ path: new URL(request.url).pathname, redirect: request.redirect,
+                    authorization: request.headers.get("authorization") });
+    return Response.json(new URL(request.url).pathname === "/meta" ? { routing: "metadata" } : catalog);
+  } });
+  t.after(() => sdk.close());
+  assert.deepEqual(requests.map(r => r.path), ["/meta", "/models", "/meta"]);
+  assert.ok(requests.every(r => r.redirect === "error" && r.authorization === "Bearer runtime-owned-token"));
+  assert.deepEqual(await (await sdk.transport("https://api.githubcopilot.com/models", {})).json(), catalog);
+  for (const [url, method, code] of [
+    ["https://api.enterprise.githubcopilot.com/meta", "POST", "COPILOT_RUNTIME_SESSION"],
+    ["https://api.enterprise.githubcopilot.com/meta/other", "GET", "COPILOT_RUNTIME_SESSION"],
+    ["https://unapproved.example/meta", "GET", "COPILOT_RUNTIME_ORIGIN"],
+    ["http://api.enterprise.githubcopilot.com/meta", "GET", "COPILOT_RUNTIME_ORIGIN"],
+  ]) {
+    await assert.rejects(handler.sendRequest(new Request(url, { method }),
+      { signal: new AbortController().signal }), { code });
+  }
+  assert.equal(requests.length, 3);
+});
+
+test("metadata-only discovery uses the embedded models catalog without synthesizing limits or policy", async (t) => {
+  const model = { id: "test-model", policy: { state: "disabled" }, supported_endpoints: ["/responses"],
+    capabilities: { limits: { max_context_window_tokens: 12345 } } };
+  const catalog = { data: [model] };
+  class Client {
+    constructor(options) { this.handler = options.requestHandler; }
+    async start() {}
+    async stop() {}
+    async listModels() {
+      await this.handler.sendRequest(new Request("https://api.enterprise.githubcopilot.com/meta"),
+        { signal: new AbortController().signal });
+      return [model];
+    }
+  }
+  const paths = [];
+  const sdk = await createSdkTransport({ Client, forward: async (request) => {
+    paths.push(new URL(request.url).pathname);
+    return Response.json({ models: catalog, service_messages: [], object: "meta" });
+  } });
+  t.after(() => sdk.close());
+  assert.deepEqual(paths, ["/meta"]);
+  assert.deepEqual(await (await sdk.transport("https://api.githubcopilot.com/models", {})).json(), catalog);
+  assert.deepEqual(sdk.models, [model]);
+});
+
 async function fixture(
   t,
   upstream,

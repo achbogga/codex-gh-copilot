@@ -100,11 +100,18 @@ export async function createSdkTransport({
         )
       )
         throw requestError("COPILOT_RUNTIME_ORIGIN");
-      if (request.method === "GET" && url.pathname === "/models") {
+      // New official runtimes fetch routing/policy metadata before listing
+      // models. Both are read-only, runtime-authenticated discovery endpoints;
+      // inference still requires an assigned session and its one-POST guard.
+      if (request.method === "GET" && ["/models", "/meta"].includes(url.pathname)) {
         const response = await forward(
           new Request(request, { redirect: "error", signal: context.signal }),
         );
-        if (response.ok) catalog = await response.clone().json();
+        if (response.ok) {
+          const body = await response.clone().json();
+          const discovered = url.pathname === "/meta" ? body?.models : body;
+          if (Array.isArray(discovered?.data)) catalog = discovered;
+        }
         return response;
       }
       const job = pending.get(context.sessionId);
