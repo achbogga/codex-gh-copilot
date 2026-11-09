@@ -52,19 +52,24 @@ def main():
     # Install new imports before the entry point so a concurrent invocation can
     # never see a cleanup.py whose required modules are not installed yet.
     files = {'preserve_oci.py': 'preserve_oci.py', 'docker_image_retention.py': 'docker_image_retention.py',
+             'worktree_cleanup.py': 'worktree_cleanup.py',
              'notify_cleanup_failure.py': 'notify_cleanup_failure.py',
              'dev_cache_cleanup.py': 'cleanup.py', 'cache-cleanup.md': 'README.md'}
     for source, target in files.items():
         install(root / source, library / target, backup)
     install(root / 'dev-cache-cleanup.sh', home / '.local/bin/dev-cache-cleanup', backup, 0o755)
     units = home / '.config/systemd/user'
-    unit_sources = sorted(root.glob('dev-cache-cleanup-*.service')) + sorted(root.glob('dev-cache-cleanup-*.timer'))
+    unit_sources = (sorted(root.glob('dev-cache-cleanup-*.service'))
+                    + sorted(root.glob('dev-cache-cleanup-*.timer'))
+                    + sorted(root.glob('dev-worktree-cleanup.*')))
     for source in unit_sources:
         install(source, units / source.name, backup)
     subprocess.run(['systemd-analyze', '--user', 'verify',
                     *[str(units / source.name) for source in unit_sources]], check=True)
     subprocess.run(['systemctl', '--user', 'daemon-reload'], check=True)
     timers = ['dev-cache-cleanup-pressure.timer', 'dev-cache-cleanup-daily.timer']
+    if (home / '.config/dev-cache-cleanup/worktrees.json').is_file():
+        timers.append('dev-worktree-cleanup.timer')
     subprocess.run(['systemctl', '--user', 'enable', '--now', *timers], check=True)
     for timer in timers:
         subprocess.run(['systemctl', '--user', 'is-active', '--quiet', timer], check=True)

@@ -20,8 +20,8 @@ def main():
     free = shutil.disk_usage('/').free / 1024**3
     # Keep a durable record even without an attached graphical desktop.
     preserve_oci.save(receipt, {'attempted_at': now, 'root_free_gib': free})
-    message = (f'Root disk has {free:.1f} GiB free. Inspect systemctl --user status '
-               'dev-cache-cleanup-pressure.service and ~/.local/state/dev-cache-cleanup/daily.log.')
+    message = (f'Root disk has {free:.1f} GiB free. Inspect systemctl --user --failed, '
+               'the failed cleanup service journal, and ~/.local/state/dev-cache-cleanup/.')
     print(message)
     result = subprocess.run(['/usr/bin/notify-send', '--urgency=critical',
                              'Developer disk cleanup needs attention', message],

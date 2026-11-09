@@ -1,0 +1,10 @@
+[Unit]
+Description=Check inactive Git worktrees daily at 04:17 UTC
+
+[Timer]
+OnCalendar=*-*-* 04:17:00 UTC
+Persistent=true
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

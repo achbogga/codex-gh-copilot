@@ -1,0 +1,12 @@
+[Unit]
+Description=Retire inactive Git worktrees with verified recovery records
+ConditionPathExists=%h/.config/dev-cache-cleanup/worktrees.json
+OnFailure=dev-cache-cleanup-notify.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 %h/.local/lib/dev-cache-cleanup/worktree_cleanup.py --config %h/.config/dev-cache-cleanup/worktrees.json --apply
+TimeoutStartSec=1h
+Nice=15
+IOSchedulingClass=idle
+UMask=0077

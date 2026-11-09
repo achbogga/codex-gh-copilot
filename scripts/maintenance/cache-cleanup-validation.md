@@ -25,18 +25,49 @@ it was not rerun as part of this root-disk recovery.
 
 Validation:
 
-- Maintenance suite: 151 tests, 145 passed and six existing opt-in tests skipped.
+- Maintenance suite after worktree automation: 162 tests, 156 passed and six
+  existing opt-in tests skipped.
 - The final image-retention changes passed their 11 focused tests.
 - Tests cover archive corruption, wrong image identity, container/tag races,
   registry failures, multi-architecture references, observation age, export
   headroom, filesystem isolation, dry runs, open temporary files, schedule
   preservation and notification throttling.
-- All five systemd unit files passed `systemd-analyze --user verify`.
+- All seven systemd unit files passed `systemd-analyze --user verify`.
 - Installed implementation and documentation match the repository files.
 - Restore receipts and full machine measurements are retained privately under
   `/mnt/av-data/cache/preserved-session-artifacts/`, outside this repository.
 
-About 372 GiB of AV worktrees remains on the root disk. Source checkouts and
-experiment evidence are outside automatic cache expiration. Prefer the data
-disk for future worktrees; any retirement of existing checkouts needs an
-individual check for active work and uncommitted content.
+## Worktree retirement follow-up
+
+There was no scheduled PR-aware worktree retirement. The empty `av.worktrees`
+directory was removed, along with one empty abandoned directory inside the actual
+`av-worktrees` root. The actual checkouts occupied approximately 372 GiB before
+this follow-up; they are separate Git working copies, not build caches.
+
+The new `dev-worktree-cleanup.timer` is enabled with a persistent daily schedule
+at 04:17 UTC. Its first service run completed successfully at 17:31 UTC:
+six checkouts removed, 131 retained, no errors. One removed checkout belonged
+to a merged PR; five were inactive detached review/test copies. Their allocated
+size was 14.30 GiB, and root free space increased by 14.34 GiB during the run.
+The final root measurement was 175.2 GiB free; other development jobs remain active.
+
+All six recovery refs resolve to the original HEADs. Their ignored files and
+per-worktree Git metadata occupy 77.85 MiB in verified archives on the data disk.
+Archive checksums, absent retired paths and retained refs were checked again after
+removal. All nine original Screens and all 17 originally running containers were
+still present, and the unrelated recovery crontab entries were unchanged.
+
+Retained checkouts include local changes, commits absent from saved remote refs,
+open/recent PRs, recent use, the maintained wiki, and branches without confirmed
+closed PRs. Four additional old directories point to missing Git metadata under
+an already deleted temporary repository; they were preserved because their
+contents cannot be proved disposable. A separate clone and experiment evidence
+outside the registered set were also retained.
+
+Eleven worktree-specific tests use disposable Git repositories and cover recovery,
+ignored-file archives, symlink isolation, local-only commits, GitHub errors and
+truncation, hidden index changes, live files, threads (including new database
+versions), recent metadata changes, locks, concurrent edits and preservation
+failures. The installed worker, notification helper, documentation and units match
+the source files. Private audit details and recovery receipts remain under
+`/mnt/av-data/cache/preserved-session-artifacts/`.

@@ -5,6 +5,8 @@ and a root-pressure check every five minutes. Both invoke
 `~/.local/bin/dev-cache-cleanup`, installed from `dev-cache-cleanup.sh`.
 Timers persist across reboots; user lingering keeps them working after logout.
 The Python modules are installed together under `~/.local/lib/dev-cache-cleanup/`.
+An independently scheduled worktree sweep runs daily at 04:17 UTC when its
+explicit host configuration is installed.
 
 Run `python3 scripts/maintenance/install_cache_cleanup.py` from the harness repo
 to install or update them. The installer backs up existing files and the crontab,
@@ -106,6 +108,61 @@ the daily sweep retains its six-hour limit and idle I/O priority. Failed exits,
 including timeouts, fail the systemd service and appear in its journal. `OnFailure`
 sends a local desktop notification at most once per hour. Notification attempts
 remain recorded even when no graphical desktop is available.
+
+## Git worktrees
+
+`dev-worktree-cleanup.timer` runs at **04:17 UTC**. It removes actual checkout
+directories, whereas `git worktree prune` only removes stale registration metadata.
+It is separate from cache pressure cleanup: source retirement never accelerates
+because the disk is full. The main checkout and directories outside the configured
+worktree root are excluded.
+
+The job keeps open PRs, unknown branches, local-only commits, dirty/untracked files,
+unarchived thread working directories, Git locks/operations, `.keep-worktree`
+markers, explicitly protected paths, live process references and container mounts.
+It also keeps checkouts with changes in the last fourteen days. Branch checkouts
+require a confirmed closed/merged PR older than seven days; detached checkouts
+require the same fourteen-day inactivity window. Every eligible HEAD must remain
+reachable from a saved remote-tracking ref. GitHub errors or truncated results
+prevent the affected removal; all authors' open PR heads are checked, including
+when a local branch has a different name.
+
+Before removing a checkout, the job creates a permanent Git recovery ref and
+archives **all ignored files** plus per-worktree Git metadata. It verifies file
+contents, preserves symlinks without following them, and rechecks registration,
+activity and cleanliness. Deletion uses `git worktree remove` without force;
+branches are retained. Archives larger than two GiB, unsafe filesystem entries,
+submodules and special index flags require manual inspection. The archive disk
+must retain 200 GiB free. Neither recovery refs nor archives expire automatically.
+Interrupted preservation leaves the original checkout and a receipt. A removal
+interrupted after verification remains recoverable through that receipt and ref.
+
+The explicit JSON configuration at `~/.config/dev-cache-cleanup/worktrees.json`
+contains absolute paths for `repository`, `worktree_root`, `archive_root`,
+`state_dir`, `protected_paths` and `thread_databases`, plus the GitHub
+`owner/repository` in `github_repository`. Keep durable infrastructure worktrees
+(such as the maintained wiki) in `protected_paths`. The installer only enables
+the timer when this configuration exists. It never sources checkout environment
+scripts, which can launch builds as a side effect of a status check.
+Thread database paths may use `state_*.sqlite` patterns so new runtime schema
+versions are included. A missing or unreadable configured database prevents removal.
+
+Inspect eligibility or the latest completed run:
+
+```sh
+python3 ~/.local/lib/dev-cache-cleanup/worktree_cleanup.py --config ~/.config/dev-cache-cleanup/worktrees.json
+systemctl --user list-timers dev-worktree-cleanup.timer
+journalctl --user -u dev-worktree-cleanup.service
+cat ~/.local/state/dev-cache-cleanup/last-worktree-run.json
+```
+
+Each removal records its original path, branch, HEAD, recovery ref and archive
+checksum in `archive_root/<checkout>-<id>/receipt.json`. To restore, use
+`git worktree add --detach <new-path> <recovery-ref>` from the original repository,
+then extract only the archive's `ignored/` subtree into that checkout with
+`tar -xf <archive>/local-files.tar --strip-components=1 -C <new-path> ignored`.
+Use a fresh destination and inspect the receipt first. `git-metadata/` preserves
+the old index and reflog for inspection; do not overwrite the new `.git` setup.
 
 ## Inspection
 
