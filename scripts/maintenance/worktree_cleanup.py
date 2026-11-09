@@ -173,16 +173,21 @@ def checkout_state(repo, record, config, container_mounts, now):
             raise Keep('index flags or hidden files need manual inspection')
     if b'160000 ' in git(path, 'ls-files', '--stage', '-z'):
         raise Keep('submodules need manual inspection')
-    if not git(repo, 'for-each-ref', '--contains=' + record['HEAD'],
-               '--format=%(refname)', 'refs/remotes').strip():
+    local_commit = not git(repo, 'for-each-ref', '--contains=' + record['HEAD'],
+                           '--format=%(refname)', 'refs/remotes').strip()
+    if local_commit and not config.get('archive_local_commits', False):
         raise Keep('commits not reachable from a saved remote reference')
     tree, size = inventory(path)
     metadata, _ = inventory(gitdir)
-    if any(now - max(item[4:]) / 1e9 < 14 * DAY for item in tree.values()):
-        raise Keep('recent file changes')
     ignored = [os.fsdecode(p) for p in git(path, 'ls-files', '--others', '--ignored',
                                          '--exclude-standard', '-z').split(b'\0') if p]
-    return {'tree': tree, 'metadata': metadata, 'size': size, 'gitdir': gitdir, 'ignored': ignored}
+    generated = set(config.get('activity_ignored_files', [])) & set(ignored)
+    generated = {name for name in generated if name in tree and stat.S_ISREG(tree[name][2])}
+    if any(now - max(item[4:]) / 1e9 < 14 * DAY
+           for name, item in tree.items() if name not in generated):
+        raise Keep('recent file changes')
+    return {'tree': tree, 'metadata': metadata, 'size': size, 'gitdir': gitdir,
+            'ignored': ignored, 'local_commit': local_commit}
 
 
 def digest(stream):
@@ -226,6 +231,35 @@ def archive_local(path, state, destination):
         return digest(stream)
 
 
+def archive_commit(repo, reference, head, root):
+    """Copy local history to one independent Git store shared by all retirements."""
+    destination = root / 'commits.git'
+    if shutil.disk_usage(root).free < 200 * 1024**3:
+        raise Keep('archive volume needs its 200 GiB reserve')
+    if destination.is_symlink():
+        raise Keep('commit archive must not be a symlink')
+    if not destination.exists():
+        git(root, 'init', '--bare', str(destination))
+    if git(destination, 'rev-parse', '--is-bare-repository').strip() != b'true':
+        raise Keep('commit archive must be a bare repository')
+    if ((destination / 'objects/info/alternates').exists()
+            or (destination / 'shallow').exists()
+            or any((destination / 'objects/pack').glob('*.promisor'))):
+        raise Keep('commit archive must contain independent complete history')
+    # Fetch copies objects (unlike a local clone with hardlinks/alternates),
+    # checks connectivity, and verifies received pack contents before updating refs.
+    command(['/usr/bin/git', '-C', str(destination), '-c', 'fetch.fsckObjects=true',
+             '-c', 'core.fsync=committed', '-c', 'gc.auto=0',
+             'fetch', '--quiet', '--no-tags', '--no-write-fetch-head',
+             '--no-recurse-submodules', '--', str(repo), reference + ':' + reference],
+            timeout=1800)
+    if git(destination, 'rev-parse', '--verify', reference).decode().strip() != head:
+        raise RuntimeError('Archived commit differs; original retained')
+    if shutil.disk_usage(root).free < 200 * 1024**3:
+        raise Keep('archive volume needs its 200 GiB reserve')
+    return str(destination)
+
+
 def retire(repo, record, state, config, open_prs, branch_prs, now):
     path = Path(record['worktree'])
     root = Path(config['archive_root'])
@@ -241,6 +275,9 @@ def retire(repo, record, state, config, open_prs, branch_prs, now):
     preserve_oci.save(receipt, report)
     # Zero old OID requires a new ref. Git GC then cannot drop detached commits.
     git(repo, 'update-ref', reference, record['HEAD'], '0' * len(record['HEAD']))
+    if state['local_commit']:
+        report['commit_archive'] = archive_commit(repo, reference, record['HEAD'], root)
+        preserve_oci.save(receipt, report)
     report['archive_sha256'] = archive_local(path, state, destination / 'local-files.tar')
     latest = next((r for r in worktrees(repo) if r['worktree'] == str(path)), None)
     if latest != record:

@@ -117,13 +117,13 @@ It is separate from cache pressure cleanup: source retirement never accelerates
 because the disk is full. The main checkout and directories outside the configured
 worktree root are excluded.
 
-The job keeps open PRs, unknown branches, local-only commits, dirty/untracked files,
+The job keeps open PRs, unknown branches, dirty/untracked files,
 unarchived thread working directories, Git locks/operations, `.keep-worktree`
 markers, explicitly protected paths, live process references and container mounts.
 It also keeps checkouts with changes in the last fourteen days. Branch checkouts
 require a confirmed closed/merged PR older than seven days; detached checkouts
-require the same fourteen-day inactivity window. Every eligible HEAD must remain
-reachable from a saved remote-tracking ref. GitHub errors or truncated results
+require the same fourteen-day inactivity window. By default, local-only commits
+are retained unless reachable from a saved remote-tracking ref. GitHub errors or truncated results
 prevent the affected removal; all authors' open PR heads are checked, including
 when a local branch has a different name.
 
@@ -150,6 +150,20 @@ versions are included. A missing or unreadable configured database prevents remo
 `worktree_root` remains supported. Sparse worktrees are eligible only when every
 skip-worktree entry is intentionally absent. Existing hidden files and
 assume-unchanged entries remain protected.
+
+Optional `archive_local_commits: true` lets otherwise eligible checkouts retire
+after copying their complete commit history into `archive_root/commits.git`.
+This independent bare Git repository shares objects across retirement archives;
+it has no dependency on the source repository's object files. Native fetch
+checks incoming objects and connectivity and flushes committed Git state before
+the receipt records the exact archived recovery ref. Fetch or verification
+failure keeps the checkout. This does not bypass PR, ownership, edit or age checks.
+
+`activity_ignored_files` can list exact generated filenames whose regeneration
+does not represent task activity. The host lists only `.autogen.bazelrc`, which
+the AV Bazel wrapper generates. An exclusion applies only to an ignored regular
+file, never a tracked file or recursively to a directory. The file is still
+archived and included in concurrent-change checks before removal.
 
 ### Creating smaller worktrees
 
@@ -193,6 +207,11 @@ then extract only the archive's `ignored/` subtree into that checkout with
 `tar -xf <archive>/local-files.tar --strip-components=1 -C <new-path> ignored`.
 Use a fresh destination and inspect the receipt first. `git-metadata/` preserves
 the old index and reflog for inspection; do not overwrite the new `.git` setup.
+For a receipt with `commit_archive`, the independent archive can also restore
+source after loss of the original repository:
+`git --git-dir=<commit_archive> worktree add --detach <new-path> <recovery-ref>`.
+Then restore ignored files as above. Commit archives and recovery refs do not
+expire automatically.
 
 ## Inspection
 

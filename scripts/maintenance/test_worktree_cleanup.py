@@ -127,6 +127,59 @@ class WorktreeTests(unittest.TestCase):
         self.assertEqual(report['entries'][0]['status'], 'retained')
         self.assertTrue(self.path.exists())
 
+    def test_local_commit_archive_restores_without_original_repository(self):
+        (self.path / 'file').write_text('unique commit\n')
+        cleanup.git(self.path, 'commit', '-am', 'local-only')
+        head = cleanup.git(self.path, 'rev-parse', 'HEAD').decode().strip()
+        (self.path / 'local-notes').write_text('unique ignored notes\n')
+        self.config['archive_local_commits'] = True
+        report = cleanup.sweep(self.config, apply=True)
+        entry = report['entries'][0]
+        self.assertEqual(entry['status'], 'removed', entry)
+        receipt = json.loads(Path(entry['receipt']).read_text())
+        archive = Path(receipt['commit_archive'])
+        self.assertFalse((archive / 'objects/info/alternates').exists())
+        self.repo.rename(self.root / 'original-unavailable')
+        restored = self.root / 'restored'
+        cleanup.git(archive, 'worktree', 'add', '--detach', str(restored), receipt['recovery_ref'])
+        self.assertEqual(cleanup.git(restored, 'rev-parse', 'HEAD').decode().strip(), head)
+        self.assertEqual((restored / 'file').read_text(), 'unique commit\n')
+        with tarfile.open(Path(entry['receipt']).parent / 'local-files.tar') as saved:
+            self.assertEqual(saved.extractfile('ignored/local-notes').read(), b'unique ignored notes\n')
+
+    def test_failed_commit_archive_preserves_local_checkout(self):
+        (self.path / 'file').write_text('unique commit\n')
+        cleanup.git(self.path, 'commit', '-am', 'local-only')
+        self.config['archive_local_commits'] = True
+        actual = cleanup.command
+        def fail_fetch(args, **kwargs):
+            if 'fetch' in args:
+                raise OSError('archive write failed')
+            return actual(args, **kwargs)
+        with patch.object(cleanup, 'command', side_effect=fail_fetch):
+            report = cleanup.sweep(self.config, apply=True)
+        self.assertEqual(report['entries'][0]['status'], 'error')
+        self.assertEqual((self.path / 'file').read_text(), 'unique commit\n')
+
+    def test_generated_activity_exclusion_requires_an_exact_ignored_regular_file(self):
+        self.config['activity_ignored_files'] = ['local-notes', 'file', 'generated-directory']
+        (self.path / 'local-notes').write_text('regenerated\n')
+        os.utime(self.path / 'local-notes', (self.now, self.now))
+        self.state()
+        # A tracked file cannot be excluded, even if listed in configuration.
+        os.utime(self.path / 'file', (self.now, self.now))
+        with self.assertRaisesRegex(cleanup.Keep, 'recent file'):
+            self.state()
+        os.utime(self.path / 'file', (self.now - 30 * cleanup.DAY,) * 2)
+        # An exclusion is a filename, not a recursive directory exemption.
+        gitdir = Path(cleanup.git(self.repo, 'rev-parse', '--absolute-git-dir').decode().strip())
+        (gitdir / 'info/exclude').write_text('generated-directory/\n')
+        (self.path / 'generated-directory').mkdir()
+        (self.path / 'generated-directory/evidence').write_text('keep this\n')
+        os.utime(self.path / 'generated-directory/evidence', (self.now, self.now))
+        with self.assertRaisesRegex(cleanup.Keep, 'recent file'):
+            self.state()
+
     def test_closed_pr_is_required_and_open_head_with_different_branch_is_protected(self):
         branch = dict(self.record, branch='refs/heads/feature')
         pr = {'number': 1, 'headRefName': 'feature', 'headRefOid': self.head, 'state': 'CLOSED',

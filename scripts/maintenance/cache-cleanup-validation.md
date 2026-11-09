@@ -99,3 +99,21 @@ Existing shared Bazel disk/repository caches remain on the data disk. Workspace
 output bases remain isolated. The repository wrapper's fetched-content-cache
 and remote-output compatibility guards are preserved. No active worktree was
 moved or converted to a sparse build profile.
+
+## Reclaiming existing checkouts
+
+The follow-up audit measured 357.98 GiB under the home worktree root. Existing
+shared Bazel caches do not deduplicate these source files. Twenty-two retained
+checkouts occupied 52.89 GiB and had commits absent from saved remote refs.
+Five of those also had fresh generated `.autogen.bazelrc` files, which were the
+only recent filesystem changes in the first inspected checkout.
+
+The installed worker now supports a shared, independent bare Git archive for
+local-only history. The host enables this option and excludes exactly the ignored
+`.autogen.bazelrc` file from activity dating. Other age, ownership, PR, edit and
+concurrency checks still apply. Archives and recovery refs do not expire.
+
+The maintenance suite runs 168 tests: 162 pass and six existing opt-in tests are
+skipped. New coverage restores a unique commit from the archive after the original
+repository becomes unavailable, preserves a checkout when archival fails, and
+rejects activity exemptions for tracked files or directory contents.
