@@ -1,0 +1,8 @@
+[Unit]
+Description=Recover developer disk space under pressure
+OnFailure=dev-cache-cleanup-notify.service
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/dev-cache-cleanup --pressure
+TimeoutStartSec=31min

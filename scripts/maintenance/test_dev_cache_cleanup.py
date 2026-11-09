@@ -74,6 +74,8 @@ class PressureTests(unittest.TestCase):
                        patch.object(cleanup, 'docker_cleanup'),
                        patch.object(cleanup, 'preserve_snapshots'),
                        patch.object(cleanup.preserve_oci, 'pending', return_value=[]),
+                       patch.object(cleanup, 'clean_pip_temporary'),
+                       patch.object(cleanup.docker_image_retention, 'sweep'),
                        patch('sys.argv', ['cleanup'] + (['--pressure'] if pressure else []))]
             from contextlib import ExitStack
             with ExitStack() as stack:

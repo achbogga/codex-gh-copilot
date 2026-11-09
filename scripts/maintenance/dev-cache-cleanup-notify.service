@@ -1,0 +1,7 @@
+[Unit]
+Description=Notify the desktop when developer disk cleanup fails
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 %h/.local/lib/dev-cache-cleanup/notify_cleanup_failure.py
+TimeoutStartSec=20s

@@ -1,0 +1,8 @@
+[Unit]
+Description=Expire inactive developer caches daily
+OnFailure=dev-cache-cleanup-notify.service
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/dev-cache-cleanup
+TimeoutStartSec=6h 2min

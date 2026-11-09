@@ -1,0 +1,10 @@
+[Unit]
+Description=Run developer cache cleanup daily at 03:47 UTC
+
+[Timer]
+OnCalendar=*-*-* 03:47:00 UTC
+Persistent=true
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

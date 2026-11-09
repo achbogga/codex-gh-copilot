@@ -17,6 +17,7 @@ import sys
 import time
 
 import preserve_oci
+import docker_image_retention
 
 USER_HOME = Path('/home/aboggaram')
 STATE = USER_HOME / '.local/state/dev-cache-cleanup'
@@ -26,6 +27,32 @@ PACKAGE_AGE_DAYS = 7
 LOG = logging.getLogger('cache-cleanup')
 PRESSURE_FREE_BYTES = 120 * 1024**3
 TARGET_FREE_BYTES = 160 * 1024**3
+PIP_TEMP_NAME = re.compile(r'pip-(?:unpack|build-tracker|ephem-wheel-cache)-[A-Za-z0-9_-]+')
+
+
+def clean_pip_temporary(dry_run, temp_root=Path('/tmp'), now=None):
+    """Expire old pip scratch trees only after ownership and activity checks."""
+    now = time.time() if now is None else now
+    docker = ['/usr/bin/docker', '--host', 'unix:///var/run/docker.sock']
+    containers = docker_read(docker, ['container', 'ls', '--all', '--quiet']).split()
+    inspected = json.loads(docker_read(docker, ['container', 'inspect', *containers])) if containers else []
+    mounts = [Path(mount['Source']) for item in inspected for mount in item.get('Mounts', [])
+              if mount.get('Source')]
+    for path in temp_root.iterdir():
+        if not PIP_TEMP_NAME.fullmatch(path.name) or path.is_symlink() or not path.is_dir():
+            continue
+        try:
+            snapshot = preserve_oci.tree_state(path)
+            if any(max(info[4:]) >= (now - PACKAGE_AGE_DAYS * 86400) * 1e9
+                   for info in snapshot.values()):
+                continue
+            if preserve_oci.referenced(path, mounts) or preserve_oci.tree_state(path) != snapshot:
+                continue
+            LOG.info('%s abandoned pip scratch tree: %s', 'Would remove' if dry_run else 'Removing', path)
+            if not dry_run:
+                shutil.rmtree(path)
+        except (FileNotFoundError, ValueError):
+            continue
 
 
 def unique_dirs(paths, device=None):
@@ -235,13 +262,24 @@ def main():
     parser.add_argument('--dry-run', action='store_true')
     parser.add_argument('--pressure', action='store_true',
                         help='Run below 120 GiB root free space, or finish interrupted snapshot preservation')
+    parser.add_argument('--reclaim-unused-images-now', action='store_true',
+                        help='Bypass the seven-day observation period for this run; verify recovery and container checks still apply')
     args = parser.parse_args()
     if os.getuid() != USER_HOME.stat().st_uid:
         parser.error('Run as aboggaram, not root')
     before = shutil.disk_usage(USER_HOME).free
-    if args.pressure and before >= PRESSURE_FREE_BYTES and not preserve_oci.pending():
+    if (args.pressure and before >= PRESSURE_FREE_BYTES and not preserve_oci.pending()
+            and not args.reclaim_unused_images_now):
         STATE.mkdir(parents=True, exist_ok=True)
         if not args.dry_run:
+            try:
+                # Observe use while space is healthy, so retention is ready
+                # when pressure starts instead of beginning its grace period then.
+                docker_image_retention.sweep(STATE, False, 0)
+            except Exception as error:
+                record_status(True, 'failed', before, ['Docker image observation'])
+                print(f'Docker image observation failed: {error}', file=sys.stderr)
+                return 1
             record_status(True, 'healthy', before)
         else:
             print(f'Root pressure check healthy: {before / 1024**3:.1f} GiB available')
@@ -278,6 +316,9 @@ def main():
 
         # Fast native cache pruning runs before potentially large Bazel trees.
         task('Docker', docker_cleanup, args.dry_run)
+        task('Pip temporary files', clean_pip_temporary, args.dry_run)
+        task('Tagged Docker image retention', docker_image_retention.sweep,
+             STATE, args.dry_run, TARGET_FREE_BYTES, args.reclaim_unused_images_now)
         roots = list(unique_dirs(CACHE_ROOTS))
         # Filter each resolved leaf: a root-resident ~/.cache can contain links
         # to another filesystem. Filtering only its parent did not exclude them.
