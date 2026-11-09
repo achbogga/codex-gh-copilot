@@ -16,7 +16,10 @@ class ControllerHandoffTests(unittest.TestCase):
             config = root / 'config.json'
             config.write_text(json.dumps({'repo': str(root), 'runtime_root': str(root / 'runtimes'),
                                           'codex_bin': '/new/codex', 'copilot_bin': '/new/copilot', 'node_bin': '/new/node'}))
+            notice = Mock(return_value=True)
             def run_logged(command, log, environment=None):
+                if log.name == 'bridge-tests.log':
+                    notice.assert_called_once_with(config.parent / 'update-report.json', {'copilot_sdk': '1.0.28'})
                 if log.name == 'inventory.log':
                     state = log.parent / 'screens'
                     state.mkdir()
@@ -33,6 +36,7 @@ class ControllerHandoffTests(unittest.TestCase):
             with (patch.object(update_all.sys, 'argv', ['update', '--config', str(config)]),
                   patch.object(update_all, 'run_logged', side_effect=run_logged),
                   patch.object(update_all, 'install', return_value={'copilot_sdk': '1.0.28'}),
+                  patch.object(update_all, 'refresh_installed_report', notice),
                   patch.object(update_all.subprocess, 'run', side_effect=run),
                   patch.object(update_all.subprocess, 'check_output', return_value=''),
                   patch.object(update_all, 'queue_controller') as queue,
@@ -42,6 +46,7 @@ class ControllerHandoffTests(unittest.TestCase):
             self.assertEqual(report['status'], 'updated-with-session-failures')
             self.assertEqual(report['session_reload_exit_code'], 1)
             self.assertEqual(report['runtime']['copilot_sdk'], '1.0.28')
+            self.assertTrue(report['release_notice_cache_refreshed'])
             queue.assert_called_once()
 
     def test_managed_controller_handoff_waits_and_targets_exact_screen_and_thread(self):

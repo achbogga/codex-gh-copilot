@@ -1,0 +1,47 @@
+{
+  "validated_at": "2026-11-09T19:29:39.529272+00:00",
+  "upstream": {
+    "commit": "27fcd7cbedd7efd63fd704bd01a0cfe1d7b85a26",
+    "new_commits_merged": 385
+  },
+  "runtime": {
+    "codex": "0.167.0",
+    "copilot_cli": "1.0.108",
+    "copilot_sdk": "1.0.30",
+    "node": "22.23.4"
+  },
+  "integrity": {
+    "codex_sha512_verified": true,
+    "copilot_sha256_verified": true,
+    "full_code_mode_bundle": true
+  },
+  "validation": {
+    "bridge_native_official_runtime_passed": 160,
+    "maintenance_passed": 165,
+    "updater_passed": 18,
+    "failed": 0,
+    "installed_model_discovery": {
+      "enabled_models": 18,
+      "default_sol_and_opus_available": true
+    },
+    "seat_quota_rpc_available": true,
+    "post_install_notice_shows_no_pending_updates": true
+  },
+  "sessions": {
+    "reloaded_and_verified": 9,
+    "same_thread_model_reasoning_and_native_budgets": true,
+    "explicit_pause_preserved": true,
+    "completed_goals_preserved": true,
+    "fresh_tool_results": 4,
+    "fresh_harness_failure_codes": 0,
+    "idle_review_recovered_in_original_shell": true,
+    "controller_handoff": "pending until the current native turn completes",
+    "controller_handoff_verified": false
+  },
+  "repairs": [
+    "Copilot 1.0.108 discovery moved to authenticated GET /meta with embedded models.data; exact approved origins, TLS, session ownership and one-POST inference guard remain enforced.",
+    "SDK upgraded to 1.0.30 with its declared Zod 4.6.7 dependency.",
+    "Verified installation refreshes the cached installed-version banner while retaining release timestamps, errors and any known newer release."
+  ],
+  "scope": "Concurrent cleanup edits in the shared workspace were preserved and excluded from this update commit. Private goals, inventories, Screen captures and recovery reports remain outside the repository."
+}

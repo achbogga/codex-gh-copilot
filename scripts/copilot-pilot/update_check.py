@@ -83,6 +83,31 @@ def save_report(path, report):
     temporary.replace(path)
 
 
+def refresh_installed_report(path, runtime):
+    """Refresh installed versions after verified installation, without a fetch."""
+    names = {"Codex": "codex", "Copilot CLI": "copilot_cli", "Copilot SDK": "copilot_sdk"}
+    with path.with_name('update-check.lock').open('a') as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return False
+        try:
+            report = json.loads(path.read_text())
+            for item in report['releases']:
+                installed = runtime.get(names.get(item['name']))
+                if installed is None:
+                    continue
+                item['installed'] = '.'.join(map(str, version(installed)))
+                item['update_available'] = version(item['latest']) > version(installed)
+            # Keep the original release lookup timestamp and lookup failures;
+            # installing a runtime does not establish new release metadata.
+            report['installed_versions_checked_at'] = datetime.now(timezone.utc).isoformat()
+            save_report(path, report)
+            return True
+        except (OSError, ValueError, KeyError, TypeError):
+            return False
+
+
 def display(report, *, notice):
     if notice:
         updates = [

@@ -12,6 +12,7 @@ import sys
 import tempfile
 
 from runtime_update import atomic_text, install
+from update_check import refresh_installed_report
 
 
 def run_logged(command, log, environment=None):
@@ -80,6 +81,7 @@ def main():
                         '--config', str(args.config), '--sync'], check=True, env=git_environment)
         runtime = install(config, root / 'downloads')
         atomic_text(args.config, json.dumps(config, indent=2) + '\n')
+        notice_refreshed = refresh_installed_report(args.config.parent / 'update-report.json', runtime)
         environment = {**os.environ, 'COPILOT_PILOT_CODEX_BIN': config['codex_bin'],
                        'COPILOT_PILOT_RUNTIME_BIN': config['copilot_bin'],
                        'COPILOT_PILOT_LONG_STREAM_MS': '5000'}
@@ -109,6 +111,7 @@ def main():
         report_file = state / 'screens/reload-report.json'
         report = json.loads(report_file.read_text())
         report['runtime'] = runtime
+        report['release_notice_cache_refreshed'] = notice_refreshed
         report['status'] = 'updated-with-session-failures' if reload_result.returncode else 'updated'
         if not reload_result.returncode and any(item['status'] == 'controller-deferred' for item in report['results']):
             report['status'] = 'updated-controller-pending'
