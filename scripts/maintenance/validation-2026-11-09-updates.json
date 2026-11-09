@@ -28,20 +28,22 @@
     "post_install_notice_shows_no_pending_updates": true
   },
   "sessions": {
-    "reloaded_and_verified": 9,
+    "reloaded_and_verified": 10,
     "same_thread_model_reasoning_and_native_budgets": true,
     "explicit_pause_preserved": true,
     "completed_goals_preserved": true,
     "fresh_tool_results": 4,
     "fresh_harness_failure_codes": 0,
     "idle_review_recovered_in_original_shell": true,
-    "controller_handoff": "pending until the current native turn completes",
-    "controller_handoff_verified": false
+    "controller_handoff": "verified same native thread on Codex 0.167.0",
+    "controller_handoff_verified": true,
+    "controller_backend_followup_verified": true
   },
   "repairs": [
     "Copilot 1.0.108 discovery moved to authenticated GET /meta with embedded models.data; exact approved origins, TLS, session ownership and one-POST inference guard remain enforced.",
     "SDK upgraded to 1.0.30 with its declared Zod 4.6.7 dependency.",
     "Verified installation refreshes the cached installed-version banner while retaining release timestamps, errors and any known newer release."
   ],
-  "scope": "Concurrent cleanup edits in the shared workspace were preserved and excluded from this update commit. Private goals, inventories, Screen captures and recovery reports remain outside the repository."
+  "scope": "Concurrent cleanup edits in the shared workspace were preserved and excluded from this update commit. Private goals, inventories, Screen captures and recovery reports remain outside the repository.",
+  "controller_verified_at": "2026-11-09T20:13:24.854157+00:00"
 }
