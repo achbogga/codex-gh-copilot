@@ -113,7 +113,19 @@ local-only history. The host enables this option and excludes exactly the ignore
 `.autogen.bazelrc` file from activity dating. Other age, ownership, PR, edit and
 concurrency checks still apply. Archives and recovery refs do not expire.
 
-The maintenance suite runs 168 tests: 162 pass and six existing opt-in tests are
-skipped. New coverage restores a unique commit from the archive after the original
-repository becomes unavailable, preserves a checkout when archival fails, and
-rejects activity exemptions for tracked files or directory contents.
+The committed maintenance snapshot runs 169 tests: 163 pass and six existing
+opt-in tests are skipped. Eighteen worktree tests include independent recovery
+of local commits and LFS assets, missing/corrupt LFS media, failed preservation,
+and activity exemptions that must not apply to tracked files or directory contents.
+The full suite was also rerun in an isolated checkout to exclude concurrent
+control-center changes from this verification.
+
+The completed sweep removed 24 checkouts and retained 108, with no errors.
+Removed allocations totaled 57.75 GiB; independent Git/LFS recovery archives,
+ignored files and metadata occupy 3.40 GiB, for a net storage saving of 54.35 GiB.
+All 24 recovery refs and local archive checksums were verified again, all retired
+paths are absent, and the independent commit archive passed a connectivity check.
+The original shared LFS cache remains intact. Root free space measured 229.28 GiB
+after verification, with utilization at 75%; unrelated development jobs remained
+active. All 11 original Screen sessions and all 17 running containers were present.
+The existing daily retirement timer remains active at 04:17 UTC.
