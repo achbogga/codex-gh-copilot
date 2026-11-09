@@ -40,6 +40,11 @@ def git(repo, *args):
     return command(['/usr/bin/git', '--no-optional-locks', '-C', str(repo), *args])
 
 
+def worktree_roots(config):
+    names = config['worktree_roots'] if 'worktree_roots' in config else [config['worktree_root']]
+    return {Path(name).resolve(strict=True) for name in names}
+
+
 def worktrees(repo):
     records = []
     for block in git(repo, 'worktree', 'list', '--porcelain', '-z').split(b'\0\0'):
@@ -159,8 +164,13 @@ def checkout_state(repo, record, config, container_mounts, now):
         raise Keep('uncommitted or untracked files')
     # Status can hide modifications under assume-unchanged/skip-worktree flags.
     flags = git(path, 'ls-files', '-v', '-z').split(b'\0')
-    if any(f and f[:1] != b'H' for f in flags):
-        raise Keep('index flags need manual inspection')
+    special = [f for f in flags if f and f[:1] != b'H']
+    if special:
+        sparse = subprocess.run(['/usr/bin/git', '-C', str(path), 'config', '--bool',
+                                 'core.sparseCheckout'], capture_output=True, check=False)
+        if (sparse.returncode != 0 or sparse.stdout.strip() != b'true'
+                or any(f[:1] != b'S' or os.path.lexists(path / os.fsdecode(f[2:])) for f in special)):
+            raise Keep('index flags or hidden files need manual inspection')
     if b'160000 ' in git(path, 'ls-files', '--stage', '-z'):
         raise Keep('submodules need manual inspection')
     if not git(repo, 'for-each-ref', '--contains=' + record['HEAD'],
@@ -251,9 +261,9 @@ def retire(repo, record, state, config, open_prs, branch_prs, now):
 
 def sweep(config, apply=False):
     repo = Path(config['repository']).resolve(strict=True)
-    root = Path(config['worktree_root']).resolve(strict=True)
+    roots = worktree_roots(config)
     archive = Path(config['archive_root']).resolve()
-    if archive.is_relative_to(root) or repo.is_relative_to(root):
+    if any(archive.is_relative_to(root) or repo.is_relative_to(root) for root in roots):
         raise ValueError('Worktree root must exclude the main repository and archive')
     state_dir = Path(config['state_dir'])
     state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -272,10 +282,10 @@ def sweep(config, apply=False):
             preserve_oci.save(report_path, report)
             raise
         fetched_at = time.time()
-        before = shutil.disk_usage(root).free
+        before = shutil.disk_usage(repo).free
         for record in records:
             path = Path(record['worktree'])
-            if path.parent != root:
+            if path.parent not in roots:
                 continue
             entry = {'worktree': str(path), 'HEAD': record['HEAD']}
             report['entries'].append(entry)
@@ -306,7 +316,7 @@ def sweep(config, apply=False):
             if apply:
                 preserve_oci.save(state_dir / 'last-worktree-run.json', report)
         report['root_free_before_bytes'] = before
-        report['root_free_after_bytes'] = shutil.disk_usage(root).free
+        report['root_free_after_bytes'] = shutil.disk_usage(repo).free
         report['status'] = 'failed' if report['errors'] else 'success'
         preserve_oci.save(report_path, report)
         return report

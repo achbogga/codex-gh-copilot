@@ -12,6 +12,7 @@ import unittest
 from unittest.mock import patch
 
 import worktree_cleanup as cleanup
+import create_worktree
 
 ORIGINAL_PR_QUERY = cleanup.pull_requests
 
@@ -209,6 +210,57 @@ class WorktreeTests(unittest.TestCase):
             return SimpleNamespace(**fields)
         with patch.object(Path, 'lstat', recent_ctime), self.assertRaisesRegex(cleanup.Keep, 'recent file'):
             self.state()
+
+    def prepare_sparse_source(self):
+        for name in ('selected', 'omitted'):
+            (self.repo / name).mkdir()
+            (self.repo / name / 'file').write_text(name)
+        cleanup.git(self.repo, 'add', '.')
+        cleanup.git(self.repo, 'commit', '-m', 'directories for sparse checkout')
+        head = cleanup.git(self.repo, 'rev-parse', 'HEAD').decode().strip()
+        cleanup.git(self.repo, 'update-ref', 'refs/remotes/origin/main', head)
+        data = self.root / 'data-worktrees'
+        data.mkdir()
+        self.config['worktree_roots'] = [str(self.parent), str(data)]
+        self.config.pop('worktree_root')
+        self.config['creation_root'] = str(data)
+        return head
+
+    def test_sparse_creation_is_isolated_and_both_managed_roots_can_retire(self):
+        head = self.prepare_sparse_source()
+        path = create_worktree.create(self.config, 'review', paths=['selected'])
+        self.assertEqual((path / 'selected/file').read_text(), 'selected')
+        self.assertFalse((path / 'omitted').exists())
+        self.assertTrue((self.repo / 'omitted/file').is_file())
+        self.assertEqual(cleanup.git(self.repo, 'status', '--porcelain=v1'), b'')
+        self.assertEqual(cleanup.git(path, 'rev-parse', 'HEAD').decode().strip(), head)
+        report = cleanup.sweep(self.config, apply=True)
+        self.assertEqual([e['status'] for e in report['entries']], ['removed', 'removed'])
+        self.assertTrue((self.repo / 'omitted/file').is_file())
+
+    def test_sparse_hidden_content_is_preserved_even_when_index_says_skip(self):
+        self.prepare_sparse_source()
+        path = create_worktree.create(self.config, 'review', paths=['selected'])
+        (path / 'omitted').mkdir()
+        (path / 'omitted/file').write_text('unique hidden work')
+        cleanup.git(path, 'update-index', '--skip-worktree', 'omitted/file')
+        report = cleanup.sweep(self.config, apply=True)
+        entry = next(e for e in report['entries'] if e['worktree'] == str(path))
+        self.assertEqual(entry['status'], 'retained')
+        self.assertEqual((path / 'omitted/file').read_text(), 'unique hidden work')
+
+    def test_creation_rejects_existing_paths_missing_directories_and_path_escape(self):
+        self.prepare_sparse_source()
+        for name,paths in (('../escape', ['selected']), ('new', ['../escape']),
+                           ('new', ['missing']), ('new', [])):
+            with self.subTest(name=name, paths=paths), self.assertRaises(Exception):
+                create_worktree.create(self.config, name, paths=paths)
+        path = create_worktree.create(self.config, 'full', branch='editing', full=True)
+        self.assertTrue((path / 'omitted/file').exists())
+        self.assertEqual(cleanup.git(path, 'branch', '--show-current').strip(), b'editing')
+        with self.assertRaises(FileExistsError):
+            create_worktree.create(self.config, 'full', full=True)
+        self.assertEqual(cleanup.git(self.repo, 'branch', '--show-current').strip(), b'main')
 
 
 def datetime_now(timestamp):

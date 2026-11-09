@@ -53,11 +53,13 @@ def main():
     # never see a cleanup.py whose required modules are not installed yet.
     files = {'preserve_oci.py': 'preserve_oci.py', 'docker_image_retention.py': 'docker_image_retention.py',
              'worktree_cleanup.py': 'worktree_cleanup.py',
+             'create_worktree.py': 'create_worktree.py',
              'notify_cleanup_failure.py': 'notify_cleanup_failure.py',
              'dev_cache_cleanup.py': 'cleanup.py', 'cache-cleanup.md': 'README.md'}
     for source, target in files.items():
         install(root / source, library / target, backup)
     install(root / 'dev-cache-cleanup.sh', home / '.local/bin/dev-cache-cleanup', backup, 0o755)
+    install(root / 'dev-worktree.sh', home / '.local/bin/dev-worktree', backup, 0o755)
     units = home / '.config/systemd/user'
     unit_sources = (sorted(root.glob('dev-cache-cleanup-*.service'))
                     + sorted(root.glob('dev-cache-cleanup-*.timer'))

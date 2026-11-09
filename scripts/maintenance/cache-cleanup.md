@@ -146,6 +146,36 @@ the timer when this configuration exists. It never sources checkout environment
 scripts, which can launch builds as a side effect of a status check.
 Thread database paths may use `state_*.sqlite` patterns so new runtime schema
 versions are included. A missing or unreadable configured database prevents removal.
+`worktree_roots` accepts multiple managed roots; the previous singular
+`worktree_root` remains supported. Sparse worktrees are eligible only when every
+skip-worktree entry is intentionally absent. Existing hidden files and
+assume-unchanged entries remain protected.
+
+### Creating smaller worktrees
+
+`dev-worktree` uses native Git to create new checkouts under the configured
+`creation_root`, which must be one of `worktree_roots`. The host places new
+checkouts on its development data disk; existing working directories stay registered
+at their current paths. `creation_min_free_bytes` reserves filesystem headroom.
+Optional `review_paths` adds the repository's instruction directories to each
+sparse checkout. No branch names, task names or language packages are hardcoded.
+
+```sh
+dev-worktree review-example --ref origin/example-branch --path path/to/package
+dev-worktree editing-example --ref origin/main --branch new-editing-branch --full
+```
+
+Pass existing repository-relative directories with repeated `--path` arguments.
+Reviews default to detached, cone-mode sparse checkouts with an ordinary index.
+Use `--branch` to create a new branch. Full checkouts require `--full`; sparse
+profiles need target-level qualification before use for builds/tests. Creation
+does not run environment hooks or launch builds. Load the new checkout's own
+environment before running repository tools. Native Git stores sparse settings
+per worktree; a failure preserves the new checkout for inspection.
+
+The creator and retirement sweep share a lock. Receipts under `state_dir` record
+the selected commit, paths and branch. Ordinary Git commands continue to work;
+this helper only supplies safer placement and explicit checkout scope.
 
 Inspect eligibility or the latest completed run:
 
