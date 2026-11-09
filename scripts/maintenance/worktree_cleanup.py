@@ -255,9 +255,54 @@ def archive_commit(repo, reference, head, root):
             timeout=1800)
     if git(destination, 'rev-parse', '--verify', reference).decode().strip() != head:
         raise RuntimeError('Archived commit differs; original retained')
+    archive_lfs(repo, head, destination)
     if shutil.disk_usage(root).free < 200 * 1024**3:
         raise Keep('archive volume needs its 200 GiB reserve')
     return str(destination)
+
+
+def archive_lfs(repo, head, destination):
+    """Preserve and hash-check every LFS object referenced by the retired tree."""
+    objects = {line[:64].decode('ascii')
+               for line in git(repo, 'lfs', 'ls-files', '--long', head).splitlines()}
+    if not objects:
+        return
+    if any(len(oid) != 64 or any(c not in '0123456789abcdef' for c in oid) for oid in objects):
+        raise Keep('unrecognized Git LFS object inventory')
+    media = [os.fsdecode(line.partition(b'=')[2])
+             for line in git(repo, 'lfs', 'env').splitlines() if line.startswith(b'LocalMediaDir=')]
+    if len(media) != 1 or not Path(media[0]).is_absolute():
+        raise Keep('Git LFS media directory is unavailable')
+    # Override any shared/global storage setting with repository-relative storage.
+    git(destination, 'config', 'lfs.storage', 'lfs')
+    for oid in sorted(objects):
+        suffix = Path(oid[:2]) / oid[2:4] / oid
+        source = Path(media[0]) / suffix
+        target = destination / 'lfs/objects' / suffix
+        if target.is_symlink():
+            raise Keep('Git LFS archive object must not be a symlink')
+        if not target.exists():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            temporary = target.with_name(oid + '.tmp-' + uuid.uuid4().hex)
+            try:
+                with source.open('rb') as original, temporary.open('xb') as saved:
+                    shutil.copyfileobj(original, saved, 1024 * 1024)
+                    saved.flush()
+                    os.fsync(saved.fileno())
+                with temporary.open('rb') as saved:
+                    if digest(saved) != oid:
+                        raise Keep('Git LFS source content differs; original retained')
+                temporary.replace(target)
+                directory = os.open(target.parent, os.O_DIRECTORY)
+                try:
+                    os.fsync(directory)
+                finally:
+                    os.close(directory)
+            finally:
+                temporary.unlink(missing_ok=True)
+        with target.open('rb') as saved:
+            if digest(saved) != oid:
+                raise Keep('Git LFS archive content differs; original retained')
 
 
 def retire(repo, record, state, config, open_prs, branch_prs, now):

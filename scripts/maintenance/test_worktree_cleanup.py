@@ -1,5 +1,6 @@
 """Use real disposable Git repositories to exercise deletion and preservation."""
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -160,6 +161,46 @@ class WorktreeTests(unittest.TestCase):
             report = cleanup.sweep(self.config, apply=True)
         self.assertEqual(report['entries'][0]['status'], 'error')
         self.assertEqual((self.path / 'file').read_text(), 'unique commit\n')
+
+    def test_lfs_assets_restore_independently_and_missing_assets_prevent_retirement(self):
+        cleanup.git(self.path, 'lfs', 'install', '--local')
+        media = self.root / 'custom-lfs'
+        cleanup.git(self.repo, 'config', 'lfs.storage', str(media))
+        payload = b'local-only binary asset\0\xff\n'
+        oid = hashlib.sha256(payload).hexdigest()
+        (self.path / '.gitattributes').write_text('asset.bin filter=lfs diff=lfs merge=lfs -text\n')
+        (self.path / 'asset.bin').write_bytes(payload)
+        cleanup.git(self.path, 'add', '.gitattributes', 'asset.bin')
+        cleanup.git(self.path, 'commit', '-m', 'local asset')
+        self.config['archive_local_commits'] = True
+        source = media / 'objects' / oid[:2] / oid[2:4] / oid
+        head = cleanup.git(self.path, 'rev-parse', 'HEAD').decode().strip()
+        archive = Path(self.config['archive_root']) / 'commits.git'
+        cleanup.git(self.repo, 'init', '--bare', str(archive))
+        # Exercise the preservation boundary directly: Git status can otherwise
+        # recreate a missing cached object from the materialized working file.
+        source.unlink()
+        with self.assertRaises(FileNotFoundError):
+            cleanup.archive_lfs(self.repo, head, archive)
+        self.assertTrue(self.path.exists())
+        source.write_bytes(payload)
+        target = archive / 'lfs/objects' / oid[:2] / oid[2:4] / oid
+        target.write_bytes(b'corrupted archive')
+        with self.assertRaisesRegex(cleanup.Keep, 'archive content differs'):
+            cleanup.archive_lfs(self.repo, head, archive)
+        self.assertTrue(self.path.exists())
+        target.unlink()
+        report = cleanup.sweep(self.config, apply=True)
+        entry = report['entries'][0]
+        self.assertEqual(entry['status'], 'removed', entry)
+        receipt = json.loads(Path(entry['receipt']).read_text())
+        archive = Path(receipt['commit_archive'])
+        self.repo.rename(self.root / 'original-unavailable')
+        media.rename(self.root / 'original-lfs-unavailable')
+        cleanup.git(archive, 'lfs', 'install', '--local')
+        restored = self.root / 'restored-lfs'
+        cleanup.git(archive, 'worktree', 'add', '--detach', str(restored), receipt['recovery_ref'])
+        self.assertEqual((restored / 'asset.bin').read_bytes(), payload)
 
     def test_generated_activity_exclusion_requires_an_exact_ignored_regular_file(self):
         self.config['activity_ignored_files'] = ['local-notes', 'file', 'generated-directory']

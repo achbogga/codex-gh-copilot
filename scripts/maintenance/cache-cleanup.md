@@ -158,6 +158,10 @@ it has no dependency on the source repository's object files. Native fetch
 checks incoming objects and connectivity and flushes committed Git state before
 the receipt records the exact archived recovery ref. Fetch or verification
 failure keeps the checkout. This does not bypass PR, ownership, edit or age checks.
+This option requires Git LFS. The archive also copies the retired tree's LFS
+objects from the configured local media store and verifies every SHA-256. Missing
+or corrupt objects prevent removal. Archived LFS storage is repository-relative
+and independent of the original shared cache; no network LFS download is attempted.
 
 `activity_ignored_files` can list exact generated filenames whose regeneration
 does not represent task activity. The host lists only `.autogen.bazelrc`, which
