@@ -1,0 +1,39 @@
+{
+  "validated_at": "2026-11-09T20:13:24.970635+00:00",
+  "feature": "cxf top terminal theme and native context display",
+  "changes": [
+    "Inherit terminal default foreground/background; select rows with bold and >.",
+    "Read per-response native context independently of recovery evidence, including output tokens and the native window.",
+    "Clear old usage after compaction/window changes and show exact counts with sample age."
+  ],
+  "validation": {
+    "dashboard_regressions_passed": 23,
+    "maintenance_passed": 169,
+    "maintenance_optional_skipped": 6,
+    "failed": 0,
+    "live_sessions_with_context": 9,
+    "terminal_checks": [
+      {
+        "term": "xterm-256color",
+        "columns": 80,
+        "rows": 24,
+        "native_context_visible": true,
+        "terminal_default_colors": true,
+        "no_reverse_color_bar": true,
+        "clean_exit": true
+      },
+      {
+        "term": "screen.xterm-256color",
+        "columns": 140,
+        "rows": 40,
+        "native_context_visible": true,
+        "terminal_default_colors": true,
+        "no_reverse_color_bar": true,
+        "clean_exit": true
+      }
+    ]
+  },
+  "recovery_policy_changed": false,
+  "agent_sessions_restarted_for_dashboard_fix": false,
+  "private_artifacts_outside_repository": true
+}

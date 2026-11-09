@@ -72,6 +72,77 @@ def watch_configs():
     return result
 
 
+def context_evidence(path, thread_id=None):
+    """Display-only native context metadata, independent of recovery policy."""
+    result = {'context_tokens': None, 'context_window': None, 'context_at': None,
+              'context_state': 'unavailable'}
+    limit = 8 * 1024**2
+    with path.open('rb') as source:
+        end = os.fstat(source.fileno()).st_size
+        start = max(0, end - limit)
+        source.seek(start)
+        data = source.read(end - start)
+    if start:
+        data = data.partition(b'\n')[2]  # Never parse a partial first record.
+    if not data.endswith(b'\n'):
+        data = data.rpartition(b'\n')[0]  # Ignore an unfinished last record.
+
+    def count(value):
+        return value if type(value) is int and 0 <= value <= 2**63 - 1 else None
+
+    for line in data.splitlines():
+        # Compaction checkpoints can be very large; their envelope alone is
+        # enough to invalidate old usage. Prompts and ciphertext are not read.
+        compacted = re.match(rb'^\{\s*"timestamp":\s*"[^"]+",\s*"type":\s*"compacted"[,}]', line[:256])
+        if compacted:
+            result.update(context_tokens=None, context_at=None, context_state='awaiting-usage')
+            continue
+        if len(line) > 65536 or not any(marker in line for marker in
+                (b'"token_count"', b'"token_usage_record"', b'"task_started"', b'"compacted"')):
+            continue
+        try:
+            event = json.loads(line)
+            payload = event.get('payload')
+            if not isinstance(payload, dict):
+                continue
+            parsed = datetime.datetime.fromisoformat(event['timestamp'].replace('Z', '+00:00'))
+            if parsed.tzinfo is None:
+                continue
+            at = parsed.timestamp()
+            kind = payload.get('type') if event.get('type') == 'event_msg' else event.get('type')
+            if kind == 'compacted':
+                result.update(context_tokens=None, context_at=None, context_state='awaiting-usage')
+                continue
+            if kind == 'task_started':
+                window = count(payload.get('model_context_window'))
+                if window:
+                    if result['context_window'] and result['context_window'] != window:
+                        result.update(context_tokens=None, context_at=None, context_state='awaiting-usage')
+                    result['context_window'] = window
+                continue
+            if kind == 'token_count':
+                info = payload.get('info') or {}
+                usage = info.get('last_token_usage') or {}
+                window = count(info.get('model_context_window'))
+                if window:
+                    result['context_window'] = window
+            elif kind == 'token_usage_record':
+                if thread_id and payload.get('thread_id') != thread_id:
+                    continue
+                usage = payload.get('usage') or {}
+            else:
+                continue
+            total = count(usage.get('total_tokens'))
+            if 'total_tokens' not in usage:
+                inp, out = count(usage.get('input_tokens')), count(usage.get('output_tokens'))
+                total = inp + out if inp is not None and out is not None else None
+            if total is not None and at >= (result['context_at'] or 0):
+                result.update(context_tokens=total, context_at=at, context_state='reported')
+        except (ValueError, TypeError, KeyError, AttributeError, OverflowError):
+            continue
+    return result
+
+
 class Collector:
     def __init__(self, billing=None):
         self.cache = {}
@@ -106,7 +177,9 @@ class Collector:
                 identity = (str(path), stat.st_size, stat.st_mtime_ns)
                 cached = self.cache.get(thread['id'])
                 if not cached or cached[0] != identity:
-                    cached = (identity, recovery.rollout_evidence(path))
+                    evidence = recovery.rollout_evidence(path)
+                    evidence.update(context_evidence(path, thread['id']))
+                    cached = (identity, evidence)
                     self.cache[thread['id']] = cached
                 row['evidence'] = cached[1]
             except (OSError, ValueError, TypeError):
@@ -168,9 +241,14 @@ def context_text(row):
     evidence = row['evidence']
     if row['state'] == 'overflow':
         return 'OVERFLOW'
-    tokens, window = evidence.get('input_tokens'), evidence.get('context_window')
-    if tokens is None or not window:
+    tokens = evidence.get('context_tokens', evidence.get('input_tokens'))
+    window = evidence.get('context_window')
+    if tokens is None and not window:
         return '-'
+    if tokens is None:
+        return f'-/{short_number(window)}'
+    if not window:
+        return f'{short_number(tokens)}/?'
     return f'{short_number(tokens)}/{short_number(window)} {tokens / window:.0%}'
 
 
@@ -178,7 +256,7 @@ def public_rows(rows):
     return [{key: value for key, value in row.items() if key != 'target'} for row in rows]
 
 
-TABLE_HEADER = f'{"SCREEN":21} {"STATE":11} {"AI CREDITS*":13} {"CONTEXT":19} {"MODEL / EFFORT":24} {"LAST TOOL":9} WATCH'
+TABLE_HEADER = f'{"SCREEN":21} {"STATE":11} {"AI CREDITS*":13} {"CONTEXT USED":19} {"MODEL / EFFORT":24} {"LAST TOOL":9} WATCH'
 CREDIT_LEGEND = '* Lifetime matched completed-call credits, including subagents; + incomplete history. Seat budget is for its billing period.'
 
 
@@ -310,14 +388,26 @@ def act(row, action, state_root, update_config):
 
 def draw_line(window, y, text, attribute=0):
     height, width = window.getmaxyx()
-    if y < height:
+    if 0 <= y < height:
         try:
             window.addnstr(y, 0, clean(text), max(0, width - 1), attribute)
         except curses.error:
             pass
 
 
+def terminal_theme(window):
+    # curses defaults to white-on-black. Inherit the SSH terminal's actual
+    # foreground/background on both light and dark themes instead.
+    try:
+        curses.use_default_colors()
+    except curses.error:
+        pass
+    window.bkgd(' ', curses.A_NORMAL)
+    window.attrset(curses.A_NORMAL)
+
+
 def interactive(window, args):
+    terminal_theme(window)
     try:
         curses.curs_set(0)
     except curses.error:
@@ -369,11 +459,12 @@ def interactive(window, args):
                       + ('FROZEN' if frozen else datetime.datetime.now().strftime('%H:%M:%S')), curses.A_BOLD)
             draw_line(window, 1, ' ' + budget_text(args.billing.account() if args.billing else {}), curses.A_BOLD)
             draw_line(window, 2, ' ' + TABLE_HEADER, curses.A_UNDERLINE)
-            table_height = max(1, height - 14)
+            table_height = max(1, height - 15)
             start = max(0, selected - table_height + 1)
             for offset, item in enumerate(visible[start:start + table_height]):
-                draw_line(window, 3 + offset, ' ' + table_row(item), curses.A_REVERSE if start + offset == selected else 0)
-            y = min(height - 11, 4 + min(len(visible), table_height))
+                chosen = start + offset == selected
+                draw_line(window, 3 + offset, ('>' if chosen else ' ') + table_row(item), curses.A_BOLD if chosen else 0)
+            y = min(height - 12, 4 + min(len(visible), table_height))
             if row:
                 goal = row.get('goal') or {}
                 draw_line(window, y, ' Selected: ' + row['screen'] + ' / window ' + str(row['window']) + ' [' + row['attachment'] + ']', curses.A_BOLD)
@@ -388,6 +479,13 @@ def interactive(window, args):
                           + (' | indexing history' if credits.get('indexing') else '')
                           + (' | STALE receipts' if credits.get('stale') else ''))
                 draw_line(window, y + 5, detail)
+                evidence = row['evidence']
+                used, capacity = evidence.get('context_tokens'), evidence.get('context_window')
+                context_detail = (f' Context used: {used:,}' if used is not None else ' Context used: unknown')
+                context_detail += f' / {capacity:,} tokens' if capacity else ' / unknown window'
+                context_detail += (' | native sample ' + age(evidence['context_at'])
+                                   if evidence.get('context_at') else ' | awaiting native usage')
+                draw_line(window, y + 6, context_detail)
                 if preview and row.get('verified'):
                     try:
                         capture_dir = args.state_root / 'preview'

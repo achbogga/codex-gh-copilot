@@ -29,6 +29,86 @@ class ControlCenterTests(unittest.TestCase):
         self.config = {'state_dir': str(self.root / 'recovery'), 'codex_home': str(self.root),
                        'thread_id': 'thread', 'goal_id': 'goal'}
 
+    def context_record(self, payload, kind='event_msg', at='2026-11-09T12:00:00Z'):
+        with self.rollout.open('a') as output:
+            output.write(json.dumps({'timestamp': at, 'type': kind, 'payload': payload}) + '\n')
+
+    def token_count(self, *, total=42000, window=997500):
+        self.context_record({'type': 'token_count', 'info': {
+            'last_token_usage': {'input_tokens': 40000, 'output_tokens': 2000,
+                                 'cached_input_tokens': 39000, 'reasoning_output_tokens': 1500,
+                                 'total_tokens': total},
+            'total_token_usage': {'total_tokens': 900_000_000}, 'model_context_window': window}})
+
+    def test_context_uses_latest_native_context_including_output_not_lifetime_or_cache_totals(self):
+        self.token_count()
+        evidence = center.context_evidence(self.rollout, 'thread')
+        self.assertEqual(evidence['context_tokens'], 42000)
+        self.assertEqual(evidence['context_window'], 997500)
+        self.assertEqual(center.context_text({'state': 'working', 'evidence': evidence}), '42k/998k 4%')
+        self.assertNotIn('900', center.context_text({'state': 'working', 'evidence': evidence}))
+
+    def test_context_window_switch_and_compaction_wait_for_fresh_usage(self):
+        self.token_count()
+        self.context_record({'type': 'task_started', 'model_context_window': 258400})
+        evidence = center.context_evidence(self.rollout, 'thread')
+        self.assertIsNone(evidence['context_tokens'])
+        self.assertEqual(center.context_text({'state': 'working', 'evidence': evidence}), '-/258k')
+        self.context_record({'thread_id': 'thread', 'usage': {'total_tokens': 120000}}, 'token_usage_record')
+        evidence = center.context_evidence(self.rollout, 'thread')
+        self.assertEqual(center.context_text({'state': 'working', 'evidence': evidence}), '120k/258k 46%')
+        self.context_record({'message': 'synthetic summary'}, 'compacted')
+        evidence = center.context_evidence(self.rollout, 'thread')
+        self.assertIsNone(evidence['context_tokens'])
+        self.assertEqual(evidence['context_state'], 'awaiting-usage')
+        self.token_count(total=5000, window=258400)
+        self.assertEqual(center.context_evidence(self.rollout)['context_tokens'], 5000)
+
+    def test_canonical_usage_fallback_ignores_foreign_threads_and_unfinished_records(self):
+        self.context_record({'type': 'task_started', 'model_context_window': 997500})
+        self.context_record({'thread_id': 'thread', 'response_id': 'private-opaque-id',
+                             'usage': {'input_tokens': 100, 'output_tokens': 20}}, 'token_usage_record')
+        self.context_record({'thread_id': 'foreign', 'usage': {'total_tokens': 999999}}, 'token_usage_record')
+        with self.rollout.open('a') as output:
+            output.write(json.dumps({'timestamp': '2026-11-09T12:00:01Z', 'type': 'event_msg',
+                'payload': {'type': 'token_count', 'info': {'last_token_usage': {'total_tokens': 888}}}}))
+        evidence = center.context_evidence(self.rollout, 'thread')
+        self.assertEqual(evidence['context_tokens'], 120)
+        self.assertEqual(evidence['context_window'], 997500)
+        self.assertNotIn('private-opaque-id', json.dumps(evidence))
+
+    def test_context_zero_is_reported_but_missing_and_invalid_counts_are_unknown(self):
+        self.token_count(total=0)
+        self.assertEqual(center.context_evidence(self.rollout)['context_tokens'], 0)
+        for invalid in (None, True, -1, '40000', float('nan')):
+            self.rollout.write_text('');self.token_count(total=invalid, window=0)
+            evidence = center.context_evidence(self.rollout)
+            self.assertIsNone(evidence['context_tokens'])
+            self.assertIsNone(evidence['context_window'])
+            self.assertEqual(center.context_text({'state': 'idle', 'evidence': evidence}), '-')
+
+    def test_large_checkpoint_invalidates_context_without_decoding_its_contents(self):
+        self.token_count()
+        self.context_record({'summary': 'x' * 100000}, 'compacted')
+        evidence = center.context_evidence(self.rollout)
+        self.assertIsNone(evidence['context_tokens'])
+        self.assertEqual(evidence['context_state'], 'awaiting-usage')
+
+    def test_dashboard_context_remains_available_when_recovery_evidence_has_no_usage_fields(self):
+        self.token_count()
+        with (patch.object(center.subprocess, 'run') as run,
+              patch.object(center.screens, 'inventory', return_value=[self.target]),
+              patch.object(center.screens, 'capture', return_value=': Ask Codex to do anything\n'),
+              patch.object(center, 'watch_configs', return_value={}),
+              patch.object(center.recovery, 'rollout_evidence', return_value={}) as recovery):
+            run.return_value.stdout = ' 45.example (Detached)\n'
+            collector = center.Collector();self.addCleanup(collector.captures.cleanup)
+            self.assertEqual(collector.snapshot()[0]['evidence']['context_tokens'], 42000)
+            collector.snapshot();recovery.assert_called_once()
+            self.token_count(total=84000)
+            self.assertEqual(collector.snapshot()[0]['evidence']['context_tokens'], 84000)
+        self.assertEqual(recovery.call_count, 2)
+
     def test_busy_user_turn_is_visible_even_while_native_goal_remains_blocked(self):
         evidence = {'started_at': 11, 'completion': {'at': 10, 'failed': False}}
         self.assertEqual(center.state_for(self.goal, evidence), 'working')
@@ -95,10 +175,11 @@ class ControlCenterTests(unittest.TestCase):
             release.wait(timeout=2)
         billing.refresh.side_effect = refresh
         billing.account.return_value = {'state': 'available', 'unit': 'AI credits', 'used': 12, 'entitlement': 34}
-        row = {**self.row, 'attachment': 'Detached', 'goal': self.goal, 'evidence': {}, 'watch': None,
+        row = {**self.row, 'attachment': 'Detached', 'goal': self.goal,
+               'evidence': {'context_tokens': 42000, 'context_window': 997500}, 'watch': None,
                'model': 'model', 'reasoning': 'max', 'state': 'working', 'copilot_credits': {'text': '1.23+'}}
         collector = Mock();collector.snapshot.return_value = [row]
-        window = Mock();window.getmaxyx.return_value = (30, 120)
+        window = Mock();window.getmaxyx.return_value = (24, 80)
         keys = iter((ord('c'), ord('q')))
         def getch():
             self.assertTrue(started.wait(timeout=1))
@@ -117,6 +198,10 @@ class ControlCenterTests(unittest.TestCase):
         text = '\n'.join(str(call.args[2]) for call in draw.call_args_list)
         self.assertIn('12 / 34', text)
         self.assertIn('1.23+', text)
+        self.assertIn('Context used: 42,000 / 997,500 tokens', text)
+        selected = [call for call in draw.call_args_list if str(call.args[2]).startswith('>')]
+        self.assertEqual(len(selected), 2)
+        self.assertTrue(all(call.args[3] == center.curses.A_BOLD for call in selected))
         self.assertIn('Read-only mode; no native input submitted.', text)
 
     def test_stale_or_corrupt_watch_report_cannot_appear_healthy(self):
