@@ -26,7 +26,9 @@
     "copilot_sha256_verified": true,
     "codex_launcher_paths_updated": 3,
     "old_running_executables_overwritten": false,
-    "release_notice_cache_refreshed": true
+    "release_notice_cache_refreshed": true,
+    "managed_backend_version": "0.169.0",
+    "managed_backend_executables_verified": true
   },
   "session_verification": {
     "non_controller_reloaded_and_process_verified": 11,
