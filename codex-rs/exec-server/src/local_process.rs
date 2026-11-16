@@ -10,6 +10,7 @@ use std::time::Duration;
 use crate::process_telemetry::ProcessTelemetry;
 use crate::process_telemetry::ProcessTelemetryEvent;
 use codex_exec_server_protocol::JSONRPCErrorError;
+use codex_exec_server_protocol::ProcessStartErrorData;
 use codex_network_proxy::NetworkPolicyAuditEvent;
 use codex_network_proxy::NetworkPolicyAuditObserver;
 use codex_network_proxy::NetworkProtocol;
@@ -456,7 +457,17 @@ impl LocalProcess {
                 ) {
                     process_map.remove(&process_id);
                 }
-                return Err(internal_error(err.to_string()));
+                let io_error = err
+                    .chain()
+                    .find_map(|cause| cause.downcast_ref::<std::io::Error>());
+                let kind = match io_error.map(std::io::Error::kind) {
+                    Some(std::io::ErrorKind::NotFound) => ProcessStartErrorData::SpawnNotFound,
+                    Some(std::io::ErrorKind::PermissionDenied) => {
+                        ProcessStartErrorData::SpawnPermissionDenied
+                    }
+                    _ => ProcessStartErrorData::SpawnFailed,
+                };
+                return Err(kind.attach_to(internal_error(err.to_string())));
             }
         };
         let metrics = self.inner.telemetry.process_started(&process_id);
@@ -557,6 +568,18 @@ impl LocalProcess {
         params: ExecParams,
         telemetry: ProcessTelemetry,
     ) -> Result<ExecResponse, JSONRPCErrorError> {
+        // RPC callers must obtain capture from a proxy started by this executor.
+        // In-process launches can reuse the controller's own managed listener.
+        if params.requests_transparent_tcp()
+            && !params
+                .network_proxy
+                .as_ref()
+                .is_some_and(|launch| launch.proxy.transparent_tcp)
+        {
+            return Err(invalid_params(
+                "transparent TCP requires an executor-local managed proxy".into(),
+            ));
+        }
         self.start_process(params, telemetry)
             .await
             .map(|(response, _, _)| response)

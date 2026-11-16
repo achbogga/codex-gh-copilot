@@ -4,6 +4,7 @@
 use super::*;
 use crate::app_server_session::SideChatStorage;
 use crate::footer_hint;
+use crate::sidebar_tab_strip::SidebarTab;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Margin;
 use ratatui::widgets::Widget;
@@ -127,7 +128,9 @@ pub(super) async fn request(
         Action::CloseTab => "Close",
         Action::Archive => "Archive",
     };
-    app.sidebar_mut().close = Some(Confirmation {
+    let pane = app.sidebar_mut();
+    pane.cancel_hidden_document_primary(/*visible*/ false);
+    pane.close = Some(Confirmation {
         target,
         action,
         message: format!(
@@ -220,18 +223,25 @@ async fn execute(
     let Some(side) = app.side_threads.get(&target) else {
         return Ok(());
     };
+    let parent = side.parent_thread_id;
     if app.current_displayed_thread_id() == Some(target) {
         let next = match action {
-            Action::CloseTab => app.sidebar().and_then(|pane| pane.previous_chat(target)),
-            Action::Archive => None,
-        }
-        .unwrap_or(side.parent_thread_id);
-        app.select_agent_thread(tui, server, next).await?;
-        if app.current_displayed_thread_id() != Some(next) {
+            Action::CloseTab => app
+                .sidebar()
+                .and_then(|pane| pane.recent_tab(Some(SidebarTab::Chat(target))))
+                .unwrap_or(SidebarTab::Chat(parent)),
+            Action::Archive => SidebarTab::Chat(parent),
+        };
+        app.activate_sidebar_tab(tui, server, next).await?;
+        let destination_thread = match next {
+            SidebarTab::Chat(id) => id,
+            SidebarTab::Document(_) => parent,
+        };
+        if app.current_displayed_thread_id() != Some(destination_thread) {
             return Ok(());
         }
         if action == Action::Archive {
-            app.focus_returned_parent_composer(next).await?;
+            app.focus_returned_parent_composer(parent).await?;
         }
     }
     let Some(side) = app.side_threads.get_mut(&target) else {

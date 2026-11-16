@@ -33,6 +33,8 @@ use unicode_segmentation::UnicodeSegmentation;
 use url::Url;
 
 use crate::line_truncation::line_width;
+use crate::markdown_render::FileLink;
+use crate::markdown_render::SourceLocation;
 use crate::render::line_utils::line_to_borrowed;
 use crate::render::line_utils::line_to_static;
 use crate::width::display_width;
@@ -41,11 +43,33 @@ use crate::wrapping::RtOptions;
 // Destinations are repeated in every linked buffer cell. Leave oversized URLs as plain text.
 const MAX_HYPERLINK_DESTINATION_BYTES: usize = 8 * 1024;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq)]
 pub(crate) struct TerminalHyperlink {
     pub(crate) columns: Range<usize>,
     pub(crate) destination: String,
     destination_kind: DestinationKind,
+    /// Byte offset of an explicit Markdown link, preserved through wrapping.
+    pub(crate) markdown_source: Option<usize>,
+}
+
+// Rendering equality excludes source provenance, which can differ between streaming and full renders.
+impl PartialEq for TerminalHyperlink {
+    fn eq(&self, other: &Self) -> bool {
+        self.columns == other.columns
+            && self.destination == other.destination
+            && self.destination_kind == other.destination_kind
+    }
+}
+
+// The link offset is layout metadata, like HyperlinkLine source provenance.
+impl std::fmt::Debug for TerminalHyperlink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TerminalHyperlink")
+            .field("columns", &self.columns)
+            .field("destination", &self.destination)
+            .field("destination_kind", &self.destination_kind)
+            .finish()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -53,6 +77,23 @@ enum DestinationKind {
     Web,
     /// A generated visualization, validated workspace artifact, or locally viewed image.
     TrustedFile,
+    /// A local document target used only by an enabled workspace transcript.
+    Document(Option<SourceLocation>),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum ReaderLink {
+    External(String),
+    Document(FileLink),
+}
+
+impl ReaderLink {
+    pub(crate) fn into_destination(self) -> String {
+        match self {
+            Self::External(url) => url,
+            Self::Document(link) => link.path,
+        }
+    }
 }
 
 /// An existing, inert source file proven to remain inside its session workspace.
@@ -103,6 +144,7 @@ impl TerminalHyperlink {
             columns,
             destination,
             destination_kind: DestinationKind::Web,
+            markdown_source: None,
         }
     }
 
@@ -144,6 +186,7 @@ impl TerminalHyperlink {
             columns,
             destination: url.into(),
             destination_kind: DestinationKind::TrustedFile,
+            markdown_source: None,
         })
     }
 
@@ -155,6 +198,31 @@ impl TerminalHyperlink {
             columns,
             destination: file.0.to_string(),
             destination_kind: DestinationKind::TrustedFile,
+            markdown_source: None,
+        }
+    }
+
+    pub(crate) fn document(columns: Range<usize>, link: FileLink) -> Self {
+        Self {
+            columns,
+            destination: link.path,
+            destination_kind: DestinationKind::Document(link.location),
+            markdown_source: None,
+        }
+    }
+
+    pub(crate) fn is_document(&self) -> bool {
+        matches!(self.destination_kind, DestinationKind::Document(_))
+    }
+
+    pub(crate) fn reader_destination(&self, documents: bool) -> Option<ReaderLink> {
+        if documents && let DestinationKind::Document(location) = self.destination_kind {
+            Some(ReaderLink::Document(FileLink {
+                path: self.destination.clone(),
+                location,
+            }))
+        } else {
+            self.terminal_destination().map(ReaderLink::External)
         }
     }
 
@@ -163,11 +231,13 @@ impl TerminalHyperlink {
             columns,
             destination: self.destination.clone(),
             destination_kind: self.destination_kind,
+            markdown_source: self.markdown_source,
         }
     }
 
     pub(crate) fn terminal_destination(&self) -> Option<String> {
         match self.destination_kind {
+            DestinationKind::Document(_) => None,
             DestinationKind::Web => web_destination(&self.destination),
             DestinationKind::TrustedFile => trusted_file_destination(&self.destination),
         }
@@ -204,10 +274,14 @@ impl Eq for HyperlinkLine {}
 /// Cache equality also tracks source whitespace hidden by display wrapping.
 pub(crate) fn lines_with_sources_eq(left: &[HyperlinkLine], right: &[HyperlinkLine]) -> bool {
     left == right
-        && left
-            .iter()
-            .map(|line| &line.source)
-            .eq(right.iter().map(|line| &line.source))
+        && left.iter().zip(right).all(|(left, right)| {
+            left.source == right.source
+                && left
+                    .hyperlinks
+                    .iter()
+                    .zip(&right.hyperlinks)
+                    .all(|(left, right)| left.markdown_source == right.markdown_source)
+        })
 }
 
 pub(crate) fn source_span_width(span: &Span<'_>) -> usize {
@@ -482,24 +556,31 @@ pub(crate) fn remap_source_wrapped_line(
             let end = start + display_width(&text[range.clone()]);
             source_byte = range.end;
             source_column = end;
-            let hyperlinks = source
-                .hyperlinks
-                .iter()
-                .filter_map(|link| {
-                    let first = link.columns.start.max(start);
-                    let last = link.columns.end.min(end);
-                    (first < last).then(|| {
-                        link.with_columns(
-                            prefix_columns + first - start..prefix_columns + last - start,
-                        )
-                    })
-                })
-                .collect();
+            let hyperlinks =
+                project_hyperlink_columns(&source.hyperlinks, start..end, prefix_columns);
             HyperlinkLine {
                 line,
                 hyperlinks,
                 source: Some(logical.wrapped(range, wrapped.prefix_bytes)),
             }
+        })
+        .collect()
+}
+
+/// Translate links intersecting a source fragment into columns on the displayed row.
+pub(crate) fn project_hyperlink_columns(
+    links: &[TerminalHyperlink],
+    source: Range<usize>,
+    prefix: usize,
+) -> Vec<TerminalHyperlink> {
+    links
+        .iter()
+        .filter_map(|link| {
+            let first = link.columns.start.max(source.start);
+            let last = link.columns.end.min(source.end);
+            (first < last).then(|| {
+                link.with_columns(prefix + first - source.start..prefix + last - source.start)
+            })
         })
         .collect()
 }
@@ -594,6 +675,7 @@ fn push_link_range(line: &mut HyperlinkLine, range: Range<usize>, link: &Termina
     if let Some(previous) = line.hyperlinks.last_mut()
         && previous.destination == link.destination
         && previous.destination_kind == link.destination_kind
+        && previous.markdown_source == link.markdown_source
         && previous.columns.end == range.start
     {
         previous.columns.end = range.end;

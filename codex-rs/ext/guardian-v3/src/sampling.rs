@@ -26,30 +26,6 @@ pub struct OperationResult<T> {
     pub disposition: SessionDisposition,
 }
 
-/// Existing housekeeper callers share the same disposition contract.
-pub type HousekeeperResult<T> = OperationResult<T>;
-
-pub(crate) enum GuardianOperation {
-    HousekeeperRouting,
-    ChannelSelection,
-}
-
-impl GuardianOperation {
-    fn input_name(&self) -> &'static str {
-        match self {
-            Self::HousekeeperRouting => "guardian_housekeeper_input",
-            Self::ChannelSelection => "guardian_channel_selection_input",
-        }
-    }
-
-    fn label(&self) -> &'static str {
-        match self {
-            Self::HousekeeperRouting => "Guardian housekeeper routing",
-            Self::ChannelSelection => "Guardian channel selection",
-        }
-    }
-}
-
 pub(crate) fn context_input(
     name: &str,
     input: &impl Serialize,
@@ -70,15 +46,14 @@ pub(crate) fn context_input(
 
 pub(crate) async fn sample<T: DeserializeOwned>(
     runtime: &impl ReviewerRuntime,
-    operation: GuardianOperation,
     input: &impl Serialize,
     policy: TruncationPolicy,
     schema: Value,
     deadline: ReviewDeadline,
     cancellation: &CancellationToken,
 ) -> OperationResult<T> {
-    let label = operation.label();
-    let input = match context_input(operation.input_name(), input, policy) {
+    let label = "Guardian channel selection";
+    let input = match context_input("guardian_channel_selection_input", input, policy) {
         Ok(input) => input,
         Err(error) => {
             return OperationResult {
@@ -112,7 +87,15 @@ pub(crate) async fn sample<T: DeserializeOwned>(
     let mut disposition = turn.disposition;
     let result = match turn.outcome {
         GuardianReviewSessionOutcome::Completed(Ok(Some(response))) => {
-            serde_json::from_str(response.raw()).map_err(anyhow::Error::from)
+            serde_json::from_str(response.raw()).map_err(|error| {
+                // Serde's error text can quote private evidence from the model response.
+                anyhow::anyhow!(
+                    "{label} returned invalid JSON ({:?} at line {} column {})",
+                    error.classify(),
+                    error.line(),
+                    error.column(),
+                )
+            })
         }
         GuardianReviewSessionOutcome::Completed(_) => {
             Err(anyhow::anyhow!("{label} returned an invalid response"))

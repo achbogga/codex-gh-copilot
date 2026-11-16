@@ -95,6 +95,7 @@ pub(super) async fn search_threads(
     let mut page_cursor = cursor;
     let scan_page_size = params.page_size.saturating_mul(8).clamp(256, 2048);
     let scan_params = ListThreadsParams {
+        included_thread_ids: None,
         page_size: scan_page_size,
         cursor: None,
         sort_key: params.sort_key,
@@ -106,7 +107,9 @@ pub(super) async fn search_threads(
         project_id: None,
         archived: params.archived,
         search_term: None,
-        relation_filter: None,
+        relation_filter: params
+            .include_attached_threads
+            .then_some(crate::ThreadRelationFilter::IncludeAttached),
         use_state_db_only: state_db.is_some(),
     };
     let mut remaining_rollouts = matching_rollouts
@@ -125,6 +128,7 @@ pub(super) async fn search_threads(
             sort_direction,
         )
         .await?;
+        let page = codex_rollout::ThreadsPage::from(page);
         let page_thread_ids: Vec<_> = page
             .items
             .iter()
@@ -271,13 +275,7 @@ async fn set_thread_search_result_names(
         .iter()
         .map(|item| (item.thread.thread_id, item.thread.history_mode))
         .collect::<HashMap<_, _>>();
-    let names = resolve_thread_names(
-        store,
-        &thread_history_modes,
-        /*use_state_db_only*/ false,
-    )
-    .await
-    .unwrap_or_default();
+    let names = resolve_thread_names(store, &thread_history_modes).await;
     for item in items {
         if let Some(name) = names.get(&item.thread.thread_id).cloned() {
             set_thread_name(&mut item.thread, name);

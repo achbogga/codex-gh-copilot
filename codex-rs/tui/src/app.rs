@@ -218,6 +218,7 @@ pub(crate) mod app_server_requests;
 mod app_server_thread_ownership;
 mod backend_banner_fallback;
 mod backend_events;
+mod backend_registry;
 pub(crate) mod backend_selection;
 pub(crate) mod backend_sessions;
 mod background_requests;
@@ -248,6 +249,7 @@ mod new_session;
 mod quick_dials;
 mod turn_tips;
 pub(crate) use new_session::has_launch_setting;
+mod archived_thread;
 mod clipboard;
 mod footer_selection;
 mod native_history;
@@ -269,6 +271,7 @@ mod resize_reflow;
 mod resume_config;
 mod resume_preparation;
 mod right_click_paste;
+mod status_line_settings;
 pub(crate) use right_click_paste::PasteEnvironment;
 mod pane_motion;
 mod safety_buffering;
@@ -282,10 +285,13 @@ mod side_focus;
 mod side_pane;
 mod sidebar;
 mod sidebar_close;
+mod sidebar_document;
+pub(crate) mod sidebar_loading;
 mod startup;
 pub(crate) mod startup_bootstrap;
 mod startup_prompts;
 mod startup_warnings;
+pub(crate) mod thread_attachment;
 mod thread_event_buffer;
 mod thread_events;
 mod thread_goal_actions;
@@ -482,6 +488,7 @@ pub struct AppExitInfo {
     pub thread_id: Option<ThreadId>,
     pub resume_hint: Option<ResumableThread>,
     pub disconnect_info: Option<DisconnectInfo>,
+    pub archive_warnings: Vec<String>,
     pub update_action: Option<UpdateAction>,
     pub exit_reason: ExitReason,
 }
@@ -492,6 +499,7 @@ impl AppExitInfo {
             token_usage: TokenUsage::default(),
             thread_id: None,
             resume_hint: None,
+            archive_warnings: Vec::new(),
             disconnect_info: None,
             update_action: None,
             exit_reason: ExitReason::Fatal(message.into()),
@@ -557,6 +565,7 @@ pub(crate) struct App {
     pub(crate) session_telemetry: SessionTelemetry,
     terminal_size_tags: crate::terminal_size_telemetry::LaunchTags,
     pub(crate) app_event_tx: AppEventSender,
+    backend_registry: backend_registry::BackendRegistry,
     pub(crate) chat_widget: ChatWidget,
     workspace_command_runner: Option<WorkspaceCommandRunner>,
     /// Legacy bootstrap and server-setting inputs; local preferences live in `local_settings`.
@@ -626,6 +635,7 @@ pub(crate) struct App {
     feedback_audience: FeedbackAudience,
     environment_manager: Arc<EnvironmentManager>,
     app_server_target: AppServerTarget,
+    app_server_backend_id: Option<crate::backend_id::BackendId>,
     reconnect: reconnect::ReconnectState,
     pending_right_click_paste: Option<right_click_paste::PendingPaste>,
     right_click_paste_environment: right_click_paste::PasteEnvironment,
@@ -654,13 +664,22 @@ pub(crate) struct App {
     realtime_replay_order: VecDeque<ThreadId>,
     background_voice: Option<Box<ChatWidget>>,
     background_voice_error: Option<(ThreadId, String)>,
-    temporary_structured_requests: HashMap<ThreadId, mpsc::UnboundedSender<ServerNotification>>,
+    temporary_structured_requests: HashMap<
+        ThreadId,
+        (
+            crate::temporary_structured_request::TemporaryThreadKind,
+            mpsc::UnboundedSender<ServerNotification>,
+        ),
+    >,
     /// Track title generation across thread switches and deduplicate automatic requests.
+    /// Each pending Cloud title holds a receiver until its name has been saved.
+    cloud_title_shutdown: tokio::sync::watch::Sender<()>,
     pending_thread_titles: HashMap<(ThreadId, ThreadTitleDestination), CancellationToken>,
     thread_event_listener_tasks: HashMap<ThreadId, JoinHandle<()>>,
     agent_navigation: AgentNavigationState,
     agents_overview: agents_overview::AgentsOverviewState,
     side_threads: HashMap<ThreadId, SideThreadState>,
+    saved_openings: sidebar_loading::Openings,
     sidebars: HashMap<Option<ThreadId>, sidebar::SidebarPane>,
     /// A parked parent view survives child cleanup until its own replay finishes.
     side_companions: HashMap<ThreadId, SideCompanion>,
@@ -706,8 +725,8 @@ pub(crate) struct App {
     rate_limit_hard_stop_generation: u64,
     rate_limit_refresh_state: rate_limit_refresh::RateLimitRefreshState,
     pending_mcp_login_start: Option<PendingMcpLoginStart>,
-    // Latest accepted attempt per server; stale retry completions must not update the UI.
-    active_mcp_login_ids: HashMap<String, String>,
+    // Login ID -> requested server and environment. Retrying one target keeps other logins alive.
+    active_mcp_login_ids: HashMap<String, (String, Option<String>)>,
     // Serialize plugin enablement writes per plugin so stale completions cannot
     // overwrite a newer toggle, even if the plugin is toggled from different
     // cwd contexts.
@@ -724,6 +743,7 @@ pub(crate) struct App {
 struct PendingMcpLoginStart {
     request_id: String,
     name: String,
+    environment_id: Option<String>,
     thread_id: ThreadId,
     completions: Vec<codex_app_server_protocol::McpServerOauthLoginCompletedNotification>,
 }
@@ -851,10 +871,14 @@ impl App {
         app_server: &mut AppServerSession,
         event: TuiEvent,
     ) -> Result<AppRunControl> {
+        self.transcript_view.document_links = self.document_preview_available(tui, app_server);
+        crate::markdown_render::preferences::set_document_links(
+            self.transcript_view.document_links,
+        );
         self.transcript_view
             .sync_patch_approval(self.chat_widget.current_patch_approval());
         // A chooser action must never decide a modal that has not been painted yet.
-        if (self.conversation_frame.chooser_area().is_some()
+        if (self.conversation_frame.panel_area().is_some()
             || self.sidebar().is_some_and(|pane| pane.close.is_some()))
             && self.chat_widget.has_active_modal()
             && matches!(
@@ -878,7 +902,9 @@ impl App {
         tui.link_hover.observe(&event);
         let current = tui.link_hover.position();
         if previous != current
-            && self.hovered_sidebar_target(previous) != self.hovered_sidebar_target(current)
+            && (self.hovered_sidebar_target(previous) != self.hovered_sidebar_target(current)
+                || previous.is_some_and(|point| self.transcript_view.has_document_link_at(point))
+                || current.is_some_and(|point| self.transcript_view.has_document_link_at(point)))
         {
             tui.frame_requester().schedule_frame();
         }
@@ -889,13 +915,12 @@ impl App {
             return Ok(AppRunControl::Continue);
         }
         if let TuiEvent::Mouse(mouse) = &event
-            && (self.key_chord_matcher.workspace_leader().is_some()
-                || self.chat_widget.quick_dial_menu_open())
+            && (self.key_chord_matcher.is_pending() || self.chat_widget.quick_dial_menu_open())
             && !matches!(
                 mouse.kind,
                 MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
             )
-            && self.conversation_frame.hud_contains(*mouse)
+            && tui.shortcut_hud_contains(*mouse)
         {
             if matches!(mouse.kind, crossterm::event::MouseEventKind::Down(_)) {
                 self.cancel_pending_key_chord();
@@ -907,7 +932,10 @@ impl App {
         self.refresh_link_hover(tui)?;
         self.invalidate_right_click_paste(&event);
         self.finish_clipboard(tui, &event);
+        // Clipboard reads started by the composer already have a validated target.
+        let composer_paste = matches!(event, TuiEvent::Draw);
         let event = self.finish_right_click_paste(tui, event);
+        let composer_paste = composer_paste && matches!(&event, TuiEvent::Paste(_));
         if self.startup_protected_input_boundary
             && self.startup_pending_protected_request
             && self.chat_widget.has_active_modal()
@@ -962,6 +990,18 @@ impl App {
                 .empty_state_animation
                 .borrow_mut()
                 .pause_clock();
+        }
+        if self.reconnect.offline
+            && self.conversation_focus_available(tui)
+            && let TuiEvent::Key(key) = &event
+            && crate::text_selection::is_copy_key(*key)
+            && self.focused_document().is_some_and(|doc| {
+                doc.backend == app_server.backend_id() && doc.owns_interaction_key(*key)
+            })
+        {
+            self.cancel_pending_key_chord();
+            Box::pin(self.handle_document_input(tui, app_server, &event)).await;
+            return Ok(AppRunControl::Continue);
         }
         let transcript_owns_input = match (&event, &self.overlay) {
             (TuiEvent::Key(key), Some(Overlay::Transcript(overlay))) => {
@@ -1069,7 +1109,7 @@ impl App {
         {
             return Ok(AppRunControl::Continue);
         }
-        if Box::pin(self.handle_sidebar_input(tui, app_server, &event)).await {
+        if !composer_paste && Box::pin(self.handle_sidebar_input(tui, app_server, &event)).await {
             return Ok(AppRunControl::Continue);
         }
         if let TuiEvent::Mouse(press) = &event
@@ -1138,6 +1178,7 @@ impl App {
             if voice_toggle(self, *key)
                 && (!self.transcript_view.owns_interaction_key(*key)
                     || self.transcript_view.is_select_mode()))
+            && !composer_paste
             && self.handle_owned_transcript_event(tui, app_server, &event)?
         {
             return Ok(AppRunControl::Continue);
@@ -1195,7 +1236,7 @@ impl App {
         {
             if self.overlay.is_none()
                 && self.chat_widget.no_modal_or_popup_active()
-                && self.chat_widget.is_external_writer_view()
+                && self.chat_widget.is_read_only_view()
                 && (crate::key_hint::plain(KeyCode::Esc).is_press(*key)
                     || (crate::key_hint::plain(KeyCode::Left).is_press(*key)
                         && self.chat_widget.agents_navigation_key_available()))
@@ -1342,7 +1383,7 @@ impl App {
             let frozen = self.chat_widget.is_external_writer_view();
             let visible = self.current_displayed_thread_id().filter(|&id| {
                 tui.is_terminal_focused()
-                    && !self.conversation_frame.chooser_covers_transcript()
+                    && !self.conversation_frame.panel_covers_transcript()
                     && matches!(self.overlay, None | Some(Overlay::Transcript(_)))
                     && self.chat_widget.no_modal_or_popup_active()
                     && self.initial_history_replay_buffer.is_none()
@@ -1381,6 +1422,7 @@ impl App {
         }
         // Both transcript owners must consume completions before automatic work advances.
         if idle_draw {
+            self.cancel_hidden_sidebar_primary(tui);
             tui.clipboard.advance(tui.frame_requester());
         }
         Ok(AppRunControl::Continue)
@@ -1435,6 +1477,7 @@ impl App {
             self.schedule_immediate_resize_reflow(tui);
             self.maybe_run_resize_reflow(tui, screen_size)?;
         }
+        let hud = self.workspace_hud(tui, screen_size.into());
         self.with_chat_widget_frame(screen_size.width, |desired_height, chat_widget| {
             let desired_height = if dashboard_visible {
                 screen_size.height
@@ -1442,7 +1485,7 @@ impl App {
                 desired_height
             };
             let mut rendered_area = Rect::default();
-            tui.draw_with_resize_reflow(desired_height, screen_size, |frame| {
+            tui.draw_with_resize_reflow(desired_height, screen_size, hud, |frame| {
                 let area = frame.area();
                 rendered_area = area;
                 chat_widget.render(area, frame.buffer);

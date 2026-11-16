@@ -393,7 +393,6 @@ use codex_core_plugins::remote::RemotePluginCatalogError;
 use codex_core_plugins::remote::RemotePluginDetail as RemoteCatalogPluginDetail;
 use codex_core_plugins::remote::RemotePluginServiceConfig;
 use codex_core_plugins::remote::RemotePluginShareContext as RemoteCatalogPluginShareContext;
-use codex_core_plugins::remote::RemotePluginShareSummary as RemoteCatalogPluginShareSummary;
 use codex_core_plugins::remote::RemotePluginSummary as RemoteCatalogPluginSummary;
 use codex_exec_server::EnvironmentManager;
 use codex_exec_server::EnvironmentObservedStatus;
@@ -465,6 +464,7 @@ use codex_protocol::protocol::SessionConfiguredEvent;
 use codex_protocol::protocol::SessionMetaLine;
 use codex_protocol::protocol::TurnEnvironmentRequest;
 use codex_protocol::protocol::W3cTraceContext;
+#[cfg(test)]
 use codex_protocol::protocol::strip_user_message_prefix;
 use codex_protocol::user_input::MAX_USER_INPUT_TEXT_CHARS;
 use codex_protocol::user_input::UserInput as CoreInputItem;

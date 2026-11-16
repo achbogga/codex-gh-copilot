@@ -26,6 +26,12 @@ impl App {
         {
             return None;
         }
+        if let Some(area) = self.conversation_frame.panel_area()
+            && area.contains((mouse.column, mouse.row).into())
+            && let Some(pane) = self.sidebar()
+        {
+            return pane.visible_link_at(mouse.column, mouse.row);
+        }
         let view = if let Some(panes) = self.conversation_frame.side_pane()
             && panes.passive.contains((mouse.column, mouse.row).into())
         {
@@ -130,7 +136,7 @@ impl App {
         let shape = if tui
             .link_hover
             .mouse
-            .is_some_and(|mouse| self.conversation_frame.hud_contains(mouse))
+            .is_some_and(|mouse| tui.shortcut_hud_contains(mouse))
             || !tui.is_owned_screen()
             || self.overlay.is_some()
         {

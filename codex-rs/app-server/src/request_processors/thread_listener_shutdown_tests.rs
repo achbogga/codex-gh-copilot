@@ -1,6 +1,6 @@
 #![cfg(test)]
 
-//! Checks runtime release and notification delivery around listener shutdown.
+//! Checks runtime release and notification delivery across listener shutdown and reconnect.
 
 use super::super::thread_goal_processor::ThreadGoalRequestProcessor;
 use super::super::thread_processor::ThreadRequestProcessor;
@@ -23,37 +23,33 @@ use codex_app_server_protocol::ThreadUnsubscribeParams;
 use codex_app_server_protocol::ThreadUnsubscribeResponse;
 use codex_app_server_protocol::ThreadUnsubscribeStatus;
 use codex_arg0::Arg0DispatchPaths;
+use codex_core::context::ContextualUserFragment;
+use codex_core::context::InternalContextSource;
+use codex_core::context::InternalModelContextFragment;
 use codex_goal_extension::GoalService;
 use codex_login::AuthManager;
+use codex_protocol::user_input::UserInput;
 use codex_thread_store::PersistContext;
+use core_test_support::responses;
+use core_test_support::test_codex::TestCodex;
 use core_test_support::test_codex::test_codex;
+use core_test_support::wait_for_event;
 use pretty_assertions::assert_eq;
 use std::collections::HashSet;
 use test_case::test_case;
 use tokio::sync::Semaphore;
 use tokio::sync::mpsc;
 
-#[test_case(true; "listener attached before shutdown")]
-#[test_case(false; "listener attached after shutdown")]
-#[tokio::test]
-async fn listener_shutdown_releases_runtime_and_preserves_other_subscribers(
-    attach_before_shutdown: bool,
-) -> Result<()> {
-    let server = wiremock::MockServer::start().await;
-    let test = test_codex().build_with_auto_env(&server).await?;
-    let thread_id = test.session_configured.thread_id;
-    test.thread_store
-        .persist_thread(thread_id, PersistContext::Standard)
-        .await?;
-    let thread = test.codex;
-    let runtime = Arc::downgrade(&thread);
+async fn test_processor(
+    test: &TestCodex,
+) -> Result<(ThreadRequestProcessor, mpsc::Receiver<OutgoingEnvelope>)> {
     let config = Arc::new(test.config.clone());
     let auth =
         AuthManager::shared_from_config(config.as_ref(), /*enable_codex_api_key_env*/ false)
             .await?;
     let config_manager =
         ConfigManager::without_managed_config_for_tests(config.codex_home.to_path_buf());
-    let (outgoing_tx, mut outgoing_rx) = mpsc::channel(/*buffer*/ 16);
+    let (outgoing_tx, outgoing_rx) = mpsc::channel(/*buffer*/ 16);
     let outgoing = Arc::new(OutgoingMessageSender::new(
         outgoing_tx,
         AnalyticsEventsClient::disabled(),
@@ -83,17 +79,113 @@ async fn listener_shutdown_releases_runtime_and_preserves_other_subscribers(
         config_manager,
         test.thread_store.clone(),
         Default::default(),
-        thread_state_manager.clone(),
-        thread_watch_manager.clone(),
+        thread_state_manager,
+        thread_watch_manager,
         Arc::new(Semaphore::new(/*permits*/ 1)),
         thread_goal_processor,
         /*state_db*/ None,
         /*log_db*/ None,
-        skills_watcher.clone(),
+        skills_watcher,
         /*turn_cost_worker*/ None,
         Vec::new(),
         Arc::new(SampleResponseRegistry::default()),
     );
+    Ok((processor, outgoing_rx))
+}
+
+#[tokio::test]
+async fn late_command_cancellation_reaches_the_current_subscriber() -> Result<()> {
+    let server = wiremock::MockServer::start().await;
+    let test = test_codex().build_with_auto_env(&server).await?;
+    let thread_id = test.session_configured.thread_id;
+    let (processor, mut messages) = test_processor(&test).await?;
+    let thread_state_manager = &processor.thread_state_manager;
+    let original = ConnectionId(1);
+    let resumed = ConnectionId(2);
+    for client in [original, resumed] {
+        processor
+            .connection_initialized(client, ConnectionCapabilities::default())
+            .await;
+    }
+    processor
+        .try_attach_thread_listener(thread_id, test.codex.clone(), vec![original])
+        .await;
+    let outgoing = ThreadScopedOutgoingMessageSender::new(
+        processor.outgoing.clone(),
+        vec![original],
+        thread_id,
+    );
+    let approval = serde_json::from_value(serde_json::json!({
+        "turn_id": "finished-turn",
+        "call_id": "late-command",
+        "started_at_ms": 42,
+        "command": ["echo", "late"],
+        "parsed_cmd": [],
+        "cwd": test.config.cwd,
+    }))?;
+    apply_bespoke_event_handling(
+        codex_protocol::protocol::Event {
+            id: "finished-turn".into(),
+            msg: EventMsg::ExecApprovalRequest(approval),
+        },
+        thread_id,
+        test.codex.clone(),
+        test.thread_manager.clone(),
+        outgoing.clone(),
+        thread_state_manager.thread_state(thread_id).await,
+        processor.thread_watch_manager.clone(),
+    )
+    .await;
+
+    assert!(
+        thread_state_manager
+            .try_add_connection_to_thread(thread_id, resumed)
+            .await
+    );
+    assert!(
+        thread_state_manager
+            .unsubscribe_connection_from_thread(thread_id, original)
+            .await
+    );
+    outgoing.abort_pending_server_requests().await;
+
+    let recipient = tokio::time::timeout(Duration::from_secs(/*secs*/ 10), async {
+        while let Some(message) = messages.recv().await {
+            if let OutgoingEnvelope::ToConnection {
+                connection_id,
+                message: OutgoingMessage::AppServerNotification(notification),
+                ..
+            } = message
+                && let ServerNotification::ItemCompleted(event) = notification.notification
+                && event.item.id() == "late-command"
+            {
+                return Ok(connection_id);
+            }
+        }
+        anyhow::bail!("missing late command completion")
+    })
+    .await??;
+    assert_eq!(recipient, resumed);
+    Ok(())
+}
+
+#[test_case(true; "listener attached before shutdown")]
+#[test_case(false; "listener attached after shutdown")]
+#[tokio::test]
+async fn listener_shutdown_releases_runtime_and_preserves_other_subscribers(
+    attach_before_shutdown: bool,
+) -> Result<()> {
+    let server = wiremock::MockServer::start().await;
+    let test = test_codex().build_with_auto_env(&server).await?;
+    let thread_id = test.session_configured.thread_id;
+    test.thread_store
+        .persist_thread(thread_id, PersistContext::Standard)
+        .await?;
+    let (processor, mut outgoing_rx) = test_processor(&test).await?;
+    let thread_state_manager = &processor.thread_state_manager;
+    let thread_watch_manager = &processor.thread_watch_manager;
+    let thread = test.codex;
+    let runtime = Arc::downgrade(&thread);
     let connection_id = ConnectionId(1);
     let disconnecting_connection_id = ConnectionId(2);
     let remaining_connection_id = ConnectionId(3);
@@ -252,7 +344,7 @@ async fn listener_shutdown_releases_runtime_and_preserves_other_subscribers(
     })
     .await;
     thread_state_manager.clear_all_listeners().await;
-    skills_watcher.shutdown();
+    processor.skills_watcher.shutdown();
 
     let resume = shutdown_result.context("terminal listener did not release or relay")?;
     assert_eq!(
@@ -261,5 +353,147 @@ async fn listener_shutdown_releases_runtime_and_preserves_other_subscribers(
             "thread {thread_id} is closing; retry thread/resume after the thread is closed"
         )),
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn resume_preserves_recovery_turn_before_status_publication() -> Result<()> {
+    const TIMEOUT: Duration = Duration::from_secs(/*secs*/ 10);
+    let server = wiremock::MockServer::start().await;
+    let original_request = responses::mount_response_once(
+        &server,
+        responses::sse_response(responses::sse_completed("original"))
+            .set_delay(Duration::from_secs(/*secs*/ 60)),
+    )
+    .await;
+    let test = test_codex()
+        .with_history_mode(codex_protocol::protocol::ThreadHistoryMode::Paginated)
+        .build_with_auto_env(&server)
+        .await?;
+    let thread = &test.codex;
+    let thread_id = test.session_configured.thread_id;
+    let TurnInputSubmission::Started {
+        turn_id: original_id,
+        ..
+    } = thread
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "Finish the work".into(),
+            text_elements: Vec::new(),
+        }]))
+        .await?
+    else {
+        anyhow::bail!("original turn did not start");
+    };
+    tokio::time::timeout(TIMEOUT, async {
+        while original_request.last_request().is_none() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    thread.submit(Op::Interrupt).await?;
+    wait_for_event(thread, |event| matches!(event, EventMsg::TurnAborted(_))).await;
+    let (processor, mut outgoing) = test_processor(&test).await?;
+    let connection_id = ConnectionId(1);
+    processor
+        .connection_initialized(connection_id, ConnectionCapabilities::default())
+        .await;
+    processor
+        .thread_watch_manager
+        .upsert_thread(&thread_id.to_string())
+        .await;
+    let recovery_request =
+        responses::mount_sse_once(&server, responses::sse_completed("recovered")).await;
+
+    // TurnStarted is durable before it is published. Hold the paginated history writer
+    // so reconnect observes the registered recovery task while both statuses are idle.
+    let history = codex_state::open_thread_history_db(test.config.sqlite_config()).await?;
+    let writer = history.begin_with("BEGIN IMMEDIATE").await?;
+    let input = ContextualUserFragment::into(InternalModelContextFragment::new(
+        InternalContextSource::from_static("daemon_recovery"),
+        "Continue the interrupted work.",
+    ));
+    let TurnInputSubmission::Started {
+        turn_id: recovery_id,
+        ..
+    } = thread
+        .continue_turn_if_idle(
+            TurnInputRequest::new(TurnInput::ResponseItem(input)).on_start(TurnStartOptions {
+                turn_trigger: Some("daemon_recovery".into()),
+                ..Default::default()
+            }),
+            original_id.clone(),
+        )
+        .await?
+    else {
+        anyhow::bail!("recovery turn did not start");
+    };
+    assert_ne!(recovery_id, original_id);
+    assert!(!matches!(thread.agent_status().await, AgentStatus::Running));
+    assert_eq!(
+        processor
+            .thread_watch_manager
+            .loaded_status_for_thread(&thread_id.to_string())
+            .await,
+        ThreadStatus::Idle
+    );
+    let resume = processor.thread_resume(
+        ThreadResumeTarget::Client(ConnectionRequestId {
+            connection_id,
+            request_id: RequestId::Integer(1),
+        }),
+        ThreadResumeParams {
+            thread_id: thread_id.to_string(),
+            config: Some([("model_reasoning_effort".into(), serde_json::json!("medium"))].into()),
+            exclude_turns: true,
+            ..Default::default()
+        },
+        Some("codex-tui".into()),
+        /*app_server_client_version*/ None,
+        Default::default(),
+    );
+    let (resumed, attached) = tokio::time::timeout(TIMEOUT, async {
+        tokio::join!(resume, async {
+            let attached = tokio::select! {
+                () = processor.thread_state_manager.wait_for_thread_subscriber(thread_id) => true,
+                () = async {
+                    while thread.active_turn_root(&recovery_id).await.is_some() {
+                        tokio::task::yield_now().await;
+                    }
+                } => false,
+            };
+            writer.rollback().await?;
+            Ok::<_, sqlx::Error>(attached)
+        })
+    })
+    .await?;
+    assert!(attached?, "reconnect shut down recovery turn {recovery_id}");
+    resumed.map_err(|err| anyhow::anyhow!(err.message))?;
+    let completed = tokio::time::timeout(TIMEOUT, async {
+        loop {
+            if let OutgoingEnvelope::ToConnection {
+                connection_id: recipient,
+                message: OutgoingMessage::AppServerNotification(notification),
+                ..
+            } = outgoing
+                .recv()
+                .await
+                .expect("reconnecting client channel closed")
+                && recipient == connection_id
+                && let ServerNotification::TurnCompleted(completed) = notification.notification
+            {
+                return completed;
+            }
+        }
+    })
+    .await?;
+    assert_eq!(completed.turn.id, recovery_id);
+    assert_eq!(completed.turn.status, TurnStatus::Completed);
+    assert!(
+        recovery_request
+            .single_request()
+            .has_content_kinds(&["daemon_recovery.internal_context"])
+    );
+    processor.thread_state_manager.clear_all_listeners().await;
+    processor.skills_watcher.shutdown();
     Ok(())
 }
