@@ -1,0 +1,49 @@
+{
+  "validated_at": "2026-11-16T22:10:12.898997+00:00",
+  "status": "updated-controller-pending",
+  "upstream_head": "c0d47262f33fdb866e2012baad52cf6584e37c03",
+  "upstream_commits_merged": 348,
+  "runtime": {
+    "codex": "0.169.0",
+    "copilot_cli": "1.0.112",
+    "copilot_sdk": "1.0.34",
+    "node": "22.23.5"
+  },
+  "validation": {
+    "bridge_checks": 160,
+    "maintenance_including_installed_native": 191,
+    "updater_checks": 18,
+    "failed": 0,
+    "skipped": 0,
+    "native_old_page_copy_paste_and_complete_disk_export_passed": true,
+    "mac_clipboard_protocol_and_pty_tests_passed": true,
+    "mac_system_clipboard_delivery_requires_local_helper": true
+  },
+  "runtime_verification": {
+    "immutable_bundles": true,
+    "complete_codex_code_mode_host_present": true,
+    "codex_sha512_verified": true,
+    "copilot_sha256_verified": true,
+    "codex_launcher_paths_updated": 3,
+    "old_running_executables_overwritten": false,
+    "release_notice_cache_refreshed": true
+  },
+  "session_verification": {
+    "non_controller_reloaded_and_process_verified": 11,
+    "exact_thread_ids_preserved": true,
+    "goal_ids_and_states_preserved": true,
+    "goal_state_counts": {
+      "no-goal": 7,
+      "complete": 3,
+      "blocked": 1
+    },
+    "models_and_reasoning_preserved": true,
+    "restored_copilot_cli_and_node_processes_verified": true,
+    "inline_history_preferences_preserved": true,
+    "scrollback_lines": 100000,
+    "controller_handoff_scheduled": true,
+    "controller_handoff_verified": false
+  },
+  "private_report_and_captures_outside_repository": true,
+  "remaining_work": "The controlling turn must finish before its separate supervisor can replace the final TUI and verify this same native thread. Resume verification from the private handoff report without repeating completed updates or healthy reloads."
+}
