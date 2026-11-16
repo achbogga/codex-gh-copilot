@@ -45,5 +45,8 @@
     "controller_handoff_verified": false
   },
   "private_report_and_captures_outside_repository": true,
-  "remaining_work": "The controlling turn must finish before its separate supervisor can replace the final TUI and verify this same native thread. Resume verification from the private handoff report without repeating completed updates or healthy reloads."
+  "remaining_work": "The controlling turn must finish before its separate supervisor can replace the final TUI and verify this same native thread. Resume verification from the private handoff report without repeating completed updates or healthy reloads.",
+  "upstream_contained_in_fork_head": true,
+  "stable_versions_rechecked_current": true,
+  "source_followup": "One upstream core-source commit arrived during the final check and was synchronized without reinstalling or repeating healthy runtime reloads."
 }
