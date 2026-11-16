@@ -1,0 +1,56 @@
+{
+  "validated_at": "2026-11-16T15:37:31.666766+00:00",
+  "feature": "Scoped GNU Screen mouse-input recovery and exact-thread restart",
+  "observed_cause": "SGR mouse-coordinate report tails entered the native composer while pointer capture was enabled.",
+  "upstream_issue": "https://github.com/openai/codex/issues/60814",
+  "native_version": "0.167.0",
+  "changes": [
+    "Temporary process-identity-bound output-side mouse reset guard; no keystroke filtering or prompt injection.",
+    "Per-home inline TUI preference for the affected Screen.",
+    "Ignore unused terminal rows when detecting inline active work and unsent drafts.",
+    "Retained the affected Screen and installed a persistent shell before replacing its formerly direct launcher."
+  ],
+  "validation": {
+    "focused_screen_checks_with_installed_native": {
+      "ran": 30,
+      "passed": 30,
+      "skipped": 0
+    },
+    "maintenance_suite": {
+      "ran": 181,
+      "passed": 174,
+      "skipped": 7,
+      "failed": 0
+    },
+    "optional_checks": "The installed-native mouse check was also run explicitly and passed; six unrelated native goal tests were not rerun.",
+    "real_screen_reenable_suppression": true,
+    "unicode_input_preserved": true,
+    "guard_exits_when_original_writer_exits": true,
+    "installed_native_fullscreen_capture_enabled": true,
+    "installed_native_inline_capture_disabled": true,
+    "model_prompts_sent_by_tests": 0
+  },
+  "live_verification": {
+    "only_affected_screen_modified": true,
+    "screen_name_and_window_preserved": true,
+    "exact_native_thread_preserved": true,
+    "selected_model": "gpt-6.1-sol",
+    "reasoning_effort": "max",
+    "old_writer_and_launcher_exited_before_replacement": true,
+    "persistent_shell_present": true,
+    "credential_exports_preserved": true,
+    "full_unsent_draft_saved_from_native_input_history": true,
+    "unsent_draft_restored_without_submission": true,
+    "mouse_reporting_disabled": true,
+    "original_process_guard_stopped": true,
+    "replacement_working": true,
+    "fresh_turn_tool_metadata": {
+      "custom_tool_call": 1,
+      "custom_tool_call_output": 1
+    }
+  },
+  "limitations": [
+    "The guard is a polling mitigation with a brief re-enable interval, not a parser patch. It is no longer needed for the restarted inline session."
+  ],
+  "private_artifacts_outside_repository": true
+}

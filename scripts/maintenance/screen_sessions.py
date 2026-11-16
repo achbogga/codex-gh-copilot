@@ -180,12 +180,12 @@ def enter_command(target, text):
 
 def busy(text):
     return bool(re.search(r'Working \(|Waiting for background|Compacting context|esc to interrupt',
-                          '\n'.join(text.splitlines()[-12:]), re.I))
+                          '\n'.join(text.rstrip().splitlines()[-12:]), re.I))
 
 
 def empty_composer(text):
     return any(re.fullmatch(r'[^\w]{1,6}Ask Codex to do anything\s*', line)
-               for line in text.splitlines()[-7:])
+               for line in text.rstrip().splitlines()[-7:])
 
 
 def probe_status_thread(target, state):

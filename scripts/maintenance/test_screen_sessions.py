@@ -67,6 +67,15 @@ class ScreenSessionTests(unittest.TestCase):
         self.assertTrue(sessions.busy('Compacting context (2m, esc to interrupt)\n' + idle))
         self.assertFalse(sessions.empty_composer(idle.replace('Ask Codex to do anything', 'unsent draft')))
 
+    def test_inline_footer_with_unused_rows_preserves_busy_and_draft_detection(self):
+        for suffix in ('\n' * 20, '\n  \n' * 20):
+            with self.subTest(suffix=repr(suffix)):
+                idle = ': Ask Codex to do anything\n\n  GPT-6.1 Sol max' + suffix
+                self.assertTrue(sessions.empty_composer(idle))
+                self.assertFalse(sessions.busy(idle))
+                self.assertTrue(sessions.busy('Working (3m, esc to interrupt)\n' + idle))
+                self.assertFalse(sessions.empty_composer(idle.replace('Ask Codex to do anything', 'unsent draft')))
+
     def test_controller_waits_passively_for_two_idle_captures_before_probing(self):
         idle = ': Ask Codex to do anything\n'
         with (patch.object(sessions, 'capture', side_effect=[
