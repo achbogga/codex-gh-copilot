@@ -12,6 +12,41 @@ spec.loader.exec_module(sessions)
 
 
 class ScreenSessionTests(unittest.TestCase):
+    def setUp(self):
+        # Actual terminal layering is exercised in test_screen_input_native.
+        patcher = patch.object(sessions, 'live_view', side_effect=lambda target, state: sessions.capture(target, state))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_pending_questions_and_queued_inputs_prevent_reload_even_with_empty_composer(self):
+        for pending in ('Queued follow-up inputs', '? 1 question'):
+            text = pending + '\n\n: Ask Codex to do anything\n GPT-6.1 Sol max\n' + '\n' * 20
+            self.assertTrue(sessions.empty_composer(text))
+            self.assertTrue(sessions.pending_input(text))
+        self.assertFalse(sessions.pending_input(': Ask Codex to do anything\n GPT-6.1 Sol max\n'))
+
+    def test_reload_preserves_paused_and_blocked_goals_without_starting_them(self):
+        for status in ('paused', 'blocked'):
+            with self.subTest(status=status):
+                target = self.target()
+                replacement = {**target, 'pid': 456}
+                goal = {'goal_id': 'same-goal', 'status': status}
+                idle = ': Ask Codex to do anything\n'
+                with (patch.object(sessions, 'alive', side_effect=[True, True, False]),
+                      patch.object(sessions, 'verified_thread', return_value=target['thread']),
+                      patch.object(sessions, 'goal', return_value=goal),
+                      patch.object(sessions, 'capture', side_effect=[idle, 'Resume paused goal?', idle, idle]),
+                      patch.object(sessions, 'inventory', return_value=[replacement]),
+                      patch.object(sessions, 'enter_command') as enter,
+                      patch.object(sessions, 'stuff') as stuff,
+                      patch.object(sessions.time, 'sleep'),
+                      patch.object(sessions.time, 'monotonic', side_effect=range(10, 100)),
+                      patch.object(sessions.os, 'readlink', return_value='/new/codex')):
+                    result = sessions.reload_target(target, {'codex_bin': '/new/codex'}, Path('/private'), drain_seconds=0)
+                self.assertEqual(result['goal_after'], goal)
+                self.assertEqual([call.args[1] for call in stuff.call_args_list], ['\x1b[B', '\r'])
+                self.assertEqual(enter.call_count, 2)
+
     def test_verified_native_editor_thread_is_a_root_but_subagents_are_not(self):
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory)

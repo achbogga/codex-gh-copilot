@@ -2,16 +2,20 @@
 """Inventory and reload exact native threads in existing GNU Screen shells."""
 
 import argparse
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 import datetime
 import fcntl
 import json
 import os
 from pathlib import Path
+import pty
 import re
+import select
 import shlex
 import sqlite3
+import struct
 import subprocess
+import termios
 import time
 
 
@@ -163,6 +167,79 @@ def capture(target, state):
     raise RuntimeError('Screen capture unavailable.')
 
 
+@contextmanager
+def screen_attachment(target):
+    """Attach an extra client without detaching the user's existing display."""
+    info = command(['screen', '-S', target['screen'], '-p', str(target['window']), '-Q', 'info'])
+    geometry = re.search(r'/\((\d+),(\d+)\)', info)
+    if not geometry:
+        raise RuntimeError('Screen geometry unavailable; refusing to resize its live window.')
+    columns, rows = map(int, geometry.groups())
+    master, slave = pty.openpty()
+    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', rows, columns, 0, 0))
+    environment = {**os.environ, 'TERM': 'xterm-256color'}
+    for key in ('STY', 'WINDOW'):
+        environment.pop(key, None)
+    def control_terminal():
+        os.setsid()
+        fcntl.ioctl(0, termios.TIOCSCTTY, 0)
+    client = None
+    output = bytearray()
+    def drain(seconds):
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            if select.select([master], [], [], .03)[0]:
+                try:
+                    data = os.read(master, 65536)
+                except OSError:
+                    break
+                if not data:
+                    break
+                output.extend(data)
+        return bytes(output)
+    try:
+        client = subprocess.Popen(['screen', '-x', target['screen'], '-p', str(target['window'])],
+                                  stdin=slave, stdout=slave, stderr=slave, env=environment,
+                                  preexec_fn=control_terminal, close_fds=True)
+        os.close(slave)
+        slave = None
+        drain(.2)
+        if client.poll() is not None:
+            raise RuntimeError('Temporary Screen attachment failed.')
+        yield master, drain
+    finally:
+        if client is not None and client.poll() is None:
+            try:
+                os.write(master, b'\x01d')
+                drain(.1)
+            except OSError:
+                pass
+        os.close(master)
+        if slave is not None:
+            os.close(slave)
+        if client is not None:
+            try:
+                client.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                client.terminate()
+                client.wait(timeout=3)
+
+
+def live_view(target, state):
+    """Leave Screen search/copy overlays before trusting its apparent idle state.
+
+    Each Escape is preceded by Screen's enter-copy shortcut. It is consumed by
+    Screen, never delivered as an interrupt to the agent. A second pass also
+    leaves an existing search nested inside copy mode. Only call for an
+    authorized terminal repair/reload, not a passive inventory or dashboard.
+    """
+    with screen_attachment(target) as (keyboard, drain):
+        for _ in range(2):
+            os.write(keyboard, b'\x01[\x1b')
+            drain(.15)
+    return capture(target, state)
+
+
 def stuff(target, text):
     # Screen can silently drop an oversized `stuff` argument while returning
     # success. Keep each write below its limit, including four-byte UTF-8.
@@ -188,6 +265,12 @@ def empty_composer(text):
                for line in text.rstrip().splitlines()[-7:])
 
 
+def pending_input(text):
+    footer = '\n'.join(text.rstrip().splitlines()[-24:])
+    return (not empty_composer(text) or 'Queued follow-up inputs' in footer
+            or bool(re.search(r'\b\d+ questions?\b', footer)))
+
+
 def probe_status_thread(target, state):
     """Read /status from a live TUI; never overwrite input or interrupt a turn."""
     if not alive(target):
@@ -204,7 +287,7 @@ def probe_status_thread(target, state):
         text = capture(target, state)
         if not alive(target):
             return None
-        if any(re.fullmatch(r'[^\w]{1,6}/status\s*', line) for line in text.splitlines()[-7:]):
+        if any(re.fullmatch(r'[^\w]{1,6}/status\s*', line) for line in text.rstrip().splitlines()[-7:]):
             break
         if not empty_composer(text):
             return None
@@ -264,10 +347,12 @@ def reload_target(target, config, state, drain_seconds=45, continuation=None):
     if not current or current['id'] != target['thread']['id']:
         raise RuntimeError('The live thread changed; refusing to restart a different session.')
     target['thread'] = current
+    # Screen can show an old, apparently idle page while a search/copy layer
+    # intercepts input. Reveal the real terminal before trusting its state.
+    text = live_view(target, state)
     before = goal(home, current['id'])
-    text = capture(target, state)
     interrupted_for_update = False
-    if not empty_composer(text):
+    if pending_input(text):
         raise RuntimeError('Pending input or a dialog must be preserved; reload deferred.')
     deadline = time.monotonic() + drain_seconds
     while busy(text) and time.monotonic() < deadline:
@@ -289,7 +374,7 @@ def reload_target(target, config, state, drain_seconds=45, continuation=None):
             text = capture(target, state)
             if not busy(text):
                 break
-    if busy(text) or not empty_composer(text) or not alive(target):
+    if busy(text) or pending_input(text) or not alive(target):
         raise RuntimeError('Native turn did not reach a safe quit point; reload deferred.')
     enter_command(target, '/quit')
     deadline = time.monotonic() + 60
@@ -319,7 +404,7 @@ def reload_target(target, config, state, drain_seconds=45, continuation=None):
                 ownership_retry_at = time.monotonic()
             continue
         if 'Resume paused goal?' in text and not selected:
-            if not before or before['status'] not in ('active', 'blocked'):
+            if not before or before['status'] != 'active':
                 stuff(target, '\x1b[B')
                 time.sleep(.2)
             stuff(target, '\r')
@@ -336,7 +421,8 @@ def reload_target(target, config, state, drain_seconds=45, continuation=None):
                     break
         current_goal = goal(home, current['id']) if updated else None
         goal_ready = (not before or before['status'] in ('complete', 'usage_limited')
-                      or (current_goal and current_goal['status'] == 'active' and before['status'] in ('active', 'blocked'))
+                      or (current_goal and current_goal['status'] == 'active' and before['status'] == 'active')
+                      or (current_goal and current_goal['status'] == 'blocked' and before['status'] == 'blocked')
                       or (before['status'] == 'paused' and (selected or continuation) and current_goal and current_goal['status'] == 'paused'))
         if (updated and replacement_seen_at is not None and time.monotonic() - replacement_seen_at >= 3
                 and goal_ready and 'Resume paused goal?' not in text
@@ -350,7 +436,7 @@ def reload_target(target, config, state, drain_seconds=45, continuation=None):
     after = goal(home, current['id'])
     if before and (not after or after['goal_id'] != before['goal_id']):
         raise RuntimeError('Goal identity changed during reload.')
-    if before and before['status'] in ('paused', 'complete', 'usage_limited') and after['status'] != before['status']:
+    if before and before['status'] in ('paused', 'blocked', 'complete', 'usage_limited') and after['status'] != before['status']:
         raise RuntimeError('A paused or terminal goal changed status during reload.')
     if deferred_continuation:
         text = capture(updated, state)

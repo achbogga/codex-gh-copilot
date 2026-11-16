@@ -1,0 +1,50 @@
+{
+  "validated_at": "2026-11-16T22:00:00.630992+00:00",
+  "feature": "Light terminal output, deep GNU Screen history, safe reloads, and optional Mac clipboard forwarding",
+  "runtime_at_terminal_validation": "Codex 0.167.0",
+  "configuration": {
+    "theme": "github",
+    "tui_alternate_screen": "never",
+    "screen_history_lines": 100000,
+    "screen_buffer_is_finite": true,
+    "complete_history_access": "Native Ctrl+T and /export to a Markdown file using complete paginated history."
+  },
+  "validation": {
+    "installed_native_screen_checks": {
+      "ran": 34,
+      "passed": 34,
+      "skipped": 0
+    },
+    "mac_clipboard_protocol_and_pty_checks": {
+      "ran": 6,
+      "passed": 6
+    },
+    "maintenance": {
+      "ran": 191,
+      "passed": 183,
+      "skipped": 8,
+      "failed": 0
+    },
+    "native_history_export_and_old_page_copy_paste": true,
+    "export_did_not_make_an_inference_request": true,
+    "paste_did_not_submit": true,
+    "copy_search_recovery_sent_no_escape_to_agent": true,
+    "user_clipboard_never_read": true,
+    "real_mac_pbcopy_delivery_verified": false
+  },
+  "live_terminal_changes": {
+    "screen_windows_configured": 11,
+    "exact_threads_reloaded": 9,
+    "already_inline_healthy_session_preserved": 1,
+    "controller_reloads_last": true,
+    "native_model_and_reasoning_preserved": true,
+    "completed_and_blocked_goal_states_preserved": true,
+    "private_goals_and_prompts_in_public_report": false,
+    "oncall_retained_history_lines": 2174,
+    "lance_retained_history_lines": 2102,
+    "oncall_palette_verified_from_actual_terminal_output": true
+  },
+  "clipboard_followup": "The optional SSH wrapper must run on the Mac. Linux tests cover streaming, Unicode, queries, bounds, PTY traffic, exit codes and terminal restoration; Mac delivery requires local verification.",
+  "runtime_update_followup": "The user requested a full upstream/runtime update after this terminal repair. Its separate report will verify installed runtimes, exact replacement processes, and the final controller handoff.",
+  "private_artifacts_outside_repository": true
+}
