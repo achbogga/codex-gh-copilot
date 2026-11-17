@@ -198,3 +198,80 @@ fn mouse_multiclick_preserves_the_initial_word_or_wrapped_line_when_reversing() 
         assert_eq!(&t.text()[t.mouse_selection_range().unwrap()], backward);
     }
 }
+
+#[test]
+fn shift_home_end_select_and_replace_without_changing_other_lines() {
+    for (key, cursor, selected, expected) in [
+        (KeyCode::Home, 11, 6..11, "first\nX beta\nlast"),
+        (KeyCode::End, 11, 11..16, "first\nalphaX\nlast"),
+    ] {
+        let mut t = TextArea::new();
+        t.insert_str("first\nalpha beta\nlast");
+        t.set_cursor(cursor);
+        t.input(KeyEvent::new(key, KeyModifiers::SHIFT));
+        assert_eq!(t.mouse_selection_range(), Some(selected));
+        t.insert_str("X");
+        assert_eq!(t.text(), expected);
+    }
+}
+
+#[test]
+fn shift_home_end_keep_anchor_and_plain_movement_clears_selection() {
+    let mut t = TextArea::new();
+    t.insert_str("alpha beta");
+    t.set_cursor(5);
+    t.input(KeyEvent::new(KeyCode::Home, KeyModifiers::SHIFT));
+    t.input(KeyEvent::new(KeyCode::Home, KeyModifiers::SHIFT));
+    assert_eq!(t.mouse_selection_range(), Some(0..5));
+    t.input(KeyEvent::new(KeyCode::End, KeyModifiers::SHIFT));
+    assert_eq!(t.mouse_selection_range(), Some(5..10));
+    t.input(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+    assert_eq!(t.mouse_selection_range(), None);
+}
+
+#[test]
+fn shift_home_selection_supports_delete_unicode_and_paste() {
+    for key in [KeyCode::Backspace, KeyCode::Delete] {
+        let mut t = TextArea::new();
+        t.insert_str("héllo 👩‍💻");
+        t.input(KeyEvent::new(KeyCode::Home, KeyModifiers::SHIFT));
+        assert_eq!(t.mouse_selection_range(), Some(0..t.text().len()));
+        t.input(KeyEvent::new(key, KeyModifiers::NONE));
+        assert_eq!(t.text(), "");
+    }
+    let mut t = TextArea::new();
+    t.insert_str("héllo 👩‍💻");
+    t.input(KeyEvent::new(KeyCode::Home, KeyModifiers::SHIFT));
+    t.insert_str("pasted\ntext");
+    assert_eq!(t.text(), "pasted\ntext");
+}
+
+#[test]
+fn shift_home_selection_is_visibly_highlighted() {
+    let mut t = TextArea::new();
+    t.insert_str("alpha beta");
+    t.input(KeyEvent::new(KeyCode::Home, KeyModifiers::SHIFT));
+    let area = Rect::new(0, 0, 20, 2);
+    let buffer = render(&t, area, &mut TextAreaState::default());
+    for x in 0..10 {
+        assert!(buffer[(x, 0)].modifier.contains(Modifier::REVERSED));
+    }
+    assert!(!buffer[(10, 0)].modifier.contains(Modifier::REVERSED));
+}
+
+#[test]
+fn shift_home_selection_replaces_atomic_elements_and_ignores_key_release() {
+    let mut t = TextArea::new();
+    t.insert_str("before ");
+    t.insert_element("[Image #1]");
+    t.input(KeyEvent::new_with_kind(
+        KeyCode::Home,
+        KeyModifiers::SHIFT,
+        KeyEventKind::Release,
+    ));
+    assert_eq!(t.mouse_selection_range(), None);
+    t.input(KeyEvent::new(KeyCode::Home, KeyModifiers::SHIFT));
+    t.insert_str("replacement");
+    assert_eq!(t.text(), "replacement");
+    assert!(t.elements.is_empty());
+}
