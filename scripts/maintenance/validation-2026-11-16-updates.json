@@ -1,6 +1,6 @@
 {
   "validated_at": "2026-11-16T22:10:12.898997+00:00",
-  "status": "updated-controller-pending",
+  "status": "updated",
   "upstream_head": "c0d47262f33fdb866e2012baad52cf6584e37c03",
   "upstream_commits_merged": 348,
   "runtime": {
@@ -44,11 +44,14 @@
     "inline_history_preferences_preserved": true,
     "scrollback_lines": 100000,
     "controller_handoff_scheduled": true,
-    "controller_handoff_verified": false
+    "controller_handoff_verified": true,
+    "controller_model_and_reasoning_preserved": true,
+    "controller_completed_goal_preserved": true,
+    "total_sessions_restored": 12
   },
   "private_report_and_captures_outside_repository": true,
-  "remaining_work": "The controlling turn must finish before its separate supervisor can replace the final TUI and verify this same native thread. Resume verification from the private handoff report without repeating completed updates or healthy reloads.",
   "upstream_contained_in_fork_head": true,
   "stable_versions_rechecked_current": true,
-  "source_followup": "One upstream core-source commit arrived during the final check and was synchronized without reinstalling or repeating healthy runtime reloads."
+  "source_followup": "One upstream core-source commit arrived during the final check and was synchronized without reinstalling or repeating healthy runtime reloads.",
+  "controller_verified_at": "2026-11-17T18:09:08.093885+00:00"
 }

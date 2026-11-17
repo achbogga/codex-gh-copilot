@@ -1,0 +1,51 @@
+{
+  "validated_at": "2026-11-17T18:09:08.089531+00:00",
+  "feature": "Native goal continuation through the Copilot Messages/Responses adapter",
+  "observed_failure": {
+    "upstream_status": 400,
+    "model": "claude-opus-5.5",
+    "reasoning": "max",
+    "native_version": "0.169.0",
+    "phase": "automatic goal continuation after a completed turn",
+    "context_source": "agent.goal_objective",
+    "native_item_type": "function_call_output",
+    "native_call_id_present": false,
+    "request_bytes": 11257857,
+    "last_input_tokens": 344196,
+    "reported_context_window": 950000,
+    "caller_cancelled": false,
+    "native_goal_status_after_rejection": "blocked"
+  },
+  "cause": "A named native context item was translated to an Anthropic tool_result without its required tool_use_id.",
+  "fix": [
+    "Keep the original native item unchanged; port plaintext named contextual outputs to explicitly labelled untrusted user context.",
+    "Apply the adaptation before SDK inference for Responses and Messages.",
+    "Preserve real tool-call IDs and put real Anthropic tool-result blocks before other context in their user message.",
+    "Reject missing context identities and protected encrypted context before forwarding; diagnostics contain only model and item count."
+  ],
+  "validation": {
+    "bridge_native_official_runtime_checks": 169,
+    "passed": 169,
+    "failed": 0,
+    "skipped": 0,
+    "captured_native_context_reproduced": true,
+    "both_provider_protocols_tested": true,
+    "parallel_results_and_named_notifications_tested": true,
+    "protected_encrypted_content_guards_tested": true
+  },
+  "live_verification": {
+    "same_thread": true,
+    "same_model_and_reasoning": true,
+    "same_goal_id_objective_and_budget": true,
+    "original_native_history_prefix_preserved": true,
+    "fresh_successful_tool_results": 4,
+    "observed_new_bridge_errors": 0,
+    "goal_status": "active",
+    "context_adapter_invocations": 5,
+    "targeted_story_bridge_reloaded": true,
+    "other_healthy_sessions_reloaded_for_this_repair": false
+  },
+  "evidence_note": "The old provider response body was intentionally not retained. Diagnosis uses the exact native context record, the required provider schema, and successful fresh Opus continuations after adapting it.",
+  "provider_contract": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/handle-tool-calls",
+  "private_artifacts_outside_repository": true
+}
