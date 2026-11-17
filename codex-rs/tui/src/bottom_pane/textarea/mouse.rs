@@ -19,6 +19,32 @@ pub(super) struct MouseSelection {
 }
 
 impl TextArea {
+    /// Extend an editable selection from its original anchor to a line boundary.
+    /// Keeping the anchor also makes repeated Shift+Home/End reversible.
+    pub(super) fn select_line_boundary(&mut self, to_end: bool) {
+        let anchor = self.cursor_pos;
+        let target = if to_end {
+            self.end_of_current_line()
+        } else {
+            self.beginning_of_current_line()
+        };
+        self.preferred_col = None;
+        self.clear_vim_replace_recovery();
+        self.vim_pending = VimPending::None;
+        let selection = self.mouse_selection.get_or_insert(MouseSelection {
+            pending_copy: None,
+            primary_owner: None,
+            origin: anchor..anchor,
+            unit: SelectionUnit::Character,
+            dragging: false,
+            moved: true,
+        });
+        selection.pending_copy = None;
+        selection.primary_owner = None;
+        selection.dragging = false;
+        self.cursor_pos = self.clamp_pos_to_nearest_boundary(target);
+    }
+
     pub(in crate::bottom_pane) fn defer_copy(&mut self, id: u64) {
         if let Some(range) = self.mouse_selection_range()
             && let Some(selection) = &mut self.mouse_selection

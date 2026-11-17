@@ -17,7 +17,9 @@
 //! Visible web URLs carry their complete terminal hyperlink destination across wrapped rows;
 //! masked rendering never exposes hyperlink destinations.
 //! Mouse selection and wheel browsing use those same visual rows and keep graphemes and elements
-//! atomic. Wheel browsing leaves the caret in place; moving or editing returns to caret following.
+//! atomic. Shift+Home/End extends the same editable selection to logical line boundaries.
+//! Typing, paste, and deletion replace the selection; unmodified movement clears it.
+//! Wheel browsing leaves the caret in place; moving or editing returns to caret following.
 //! The editing module resolves replacement targets shared by insertion and paste-context inspection.
 
 use crate::key_hint::KeyBindingListExt;
@@ -674,6 +676,22 @@ impl TextArea {
     pub fn input_with_keymap(&mut self, event: KeyEvent, keymap: &EditorKeymap) {
         self.last_click = None;
         self.end_mouse_drag();
+        // Shift+Home/End arrives as a normal modified key over SSH and Screen.
+        // Share the editable selection used by pointer input so typing, paste,
+        // and deletion replace the highlighted text consistently.
+        if event.modifiers == KeyModifiers::SHIFT {
+            match event.code {
+                KeyCode::Home => {
+                    self.select_line_boundary(false);
+                    return;
+                }
+                KeyCode::End => {
+                    self.select_line_boundary(true);
+                    return;
+                }
+                _ => {}
+            }
+        }
         if keymap.insert_newline.is_pressed(event) {
             self.insert_str("\n");
             return;
