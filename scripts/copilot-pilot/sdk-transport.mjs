@@ -351,6 +351,17 @@ export async function createSdkTransport({
       }
       const portableAgents = payload !== original;
       if (portableAgents) init = { ...init, body: JSON.stringify(payload) };
+      const nativeContextItems = Array.isArray(original.input)
+        ? original.input.filter(
+            (item) => item.type === "function_call_output" && item.call_id == null,
+          ).length
+        : 0;
+      if (nativeContextItems)
+        diagnose({
+          code: "NATIVE_CONTEXT_ADAPTED",
+          model: payload.model,
+          context_items: nativeContextItems,
+        });
       const model = compactionModel(
         payload,
         catalog.data.filter(

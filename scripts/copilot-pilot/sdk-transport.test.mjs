@@ -287,6 +287,53 @@ const init = (signal) => ({
   signal,
 });
 
+for (const messages of [false, true])
+  test(`native goal context survives the SDK ${messages ? "Messages" : "Responses"} transport without a fabricated tool result`, async (t) => {
+    const directory = await mkdtemp(join(tmpdir(), "native-goal-context-"));
+    t.after(() => rm(directory, { recursive: true, force: true }));
+    const diagnostics = join(directory, "diagnostics.jsonl");
+    const modelId = messages ? "claude-opus-5.5" : "test-model";
+    const context = {
+      type: "function_call_output", name: "goal_objective", namespace: "agent",
+      output: "SYNTHETIC_PRIVATE_OBJECTIVE: finish the existing task.",
+    };
+    const events = messages ? [
+      { type: "message_start", message: { id: "msg_goal", type: "message", role: "assistant", model: modelId, content: [], usage: { input_tokens: 1, output_tokens: 1 } } },
+      { type: "content_block_start", index: 0, content_block: { type: "text", text: "Continued." } },
+      { type: "content_block_stop", index: 0 },
+      { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 1 }, copilot_usage: { total_nano_aiu: 1 } },
+      { type: "message_stop" },
+    ] : [
+      { type: "response.completed", response: { id: "goal", output: [], usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 }, copilot_usage: { total_nano_aiu: 1 } } },
+    ];
+    const sdk = await fixture(t, () => new Response(
+      events.map(event => `data: ${JSON.stringify(event)}\n\n`).join(""),
+      { headers: { "content-type": "text/event-stream" } },
+    ), false, messages, undefined, modelId, diagnostics);
+    const original = {
+      model: modelId, reasoning: { effort: "max" },
+      input: [{ role: "user", content: "Start the synthetic task." },
+        { role: "assistant", content: "The first turn is finished." }, context,
+        { role: "user", content: "Continue the existing goal." }],
+    };
+    const saved = structuredClone(original);
+    const response = await sdk.transport("https://api.githubcopilot.com/responses", {
+      body: JSON.stringify(original), headers: {}, signal: new AbortController().signal,
+    });
+    assert.match(await response.text(), /response.completed/);
+    await sdk.close();
+    assert.equal(sdk.requests.length, 1);
+    const sent = JSON.parse(sdk.requests[0].body);
+    const items = messages ? sent.messages : sent.input;
+    assert.ok(items.some(item => item.role === "user" && Array.isArray(item.content) &&
+      item.content.some(part => part.text === context.output)));
+    assert.doesNotMatch(JSON.stringify(items), /"tool_result"|"function_call_output"/);
+    assert.deepEqual(original, saved);
+    const metadata = await readFile(diagnostics, "utf8");
+    assert.match(metadata, /NATIVE_CONTEXT_ADAPTED/);
+    assert.doesNotMatch(metadata, /SYNTHETIC_PRIVATE_OBJECTIVE/);
+  });
+
 test(
   "cancelling admission settles immediately and deletes only its late transport session",
   { timeout: 3000 },

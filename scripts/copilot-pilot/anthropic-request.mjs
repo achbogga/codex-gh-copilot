@@ -80,8 +80,15 @@ export function messagesRequest(payload, model) {
   const messages = [];
   const system = payload.instructions ? content(payload.instructions) : [];
   const append = (role, blocks) => {
-    if (messages.at(-1)?.role === role) messages.at(-1).content.push(...blocks);
-    else messages.push({ role, content: blocks });
+    if (messages.at(-1)?.role === role) {
+      const previous = messages.at(-1).content;
+      // Anthropic requires tool results before text/images in their user
+      // message. Native contextual notifications may arrive before a result.
+      if (role === "user" && blocks.every((part) => part.type === "tool_result")) {
+        const firstContext = previous.findIndex((part) => part.type !== "tool_result");
+        previous.splice(firstContext < 0 ? previous.length : firstContext, 0, ...blocks);
+      } else previous.push(...blocks);
+    } else messages.push({ role, content: blocks });
   };
   let assistantMessageId;
   const assistantBoundary = (id) => {
@@ -159,6 +166,8 @@ export function messagesRequest(payload, model) {
     } else if (
       ["function_call_output", "custom_tool_call_output"].includes(item.type)
     ) {
+      if (typeof item.call_id !== "string" || !item.call_id.length)
+        throw new Error("Anthropic tool results require a model tool-call ID.");
       append("user", [
         {
           type: "tool_result",

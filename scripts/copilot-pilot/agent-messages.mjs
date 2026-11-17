@@ -1,4 +1,5 @@
 import { mapResponseEvents } from "./responses-events.mjs";
+import { portableNativeContext } from "./native-context.mjs";
 
 const messageTools = new Set(["spawn_agent", "send_message", "followup_task"]);
 export const agentWireNamespace = "copilot_collaboration";
@@ -11,6 +12,8 @@ const incompatible = () =>
   });
 
 export function portableAgentMessage(item) {
+  const contextual = portableNativeContext(item);
+  if (contextual !== item) return contextual;
   if (item.type !== "agent_message") return item;
   if (item.content.some((part) => part.type === "encrypted_content"))
     throw incompatible();
@@ -78,11 +81,13 @@ export function portableAgentTools(payload) {
   };
   const tools = payload.tools?.map(adaptDefinition);
   const declarationsInput = Array.isArray(payload.input)
-    ? payload.input.map((item) =>
-        item.type === "additional_tools"
-          ? { ...item, tools: item.tools.map(adaptDefinition) }
-          : item,
-      )
+    ? payload.input.map((item) => {
+        const contextual = portableNativeContext(item);
+        if (contextual !== item) changed = true;
+        return contextual.type === "additional_tools"
+          ? { ...contextual, tools: contextual.tools.map(adaptDefinition) }
+          : contextual;
+      })
     : payload.input;
   if (!changed) return payload;
   const input = Array.isArray(declarationsInput)
