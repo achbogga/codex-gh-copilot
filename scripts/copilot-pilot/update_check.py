@@ -76,20 +76,20 @@ def release_status(name, repository, installed):
 
 
 def sdk_release_status(installed):
-    # The SDK repository publishes several language packages. Its latest
-    # GitHub tag need not exist as the Node package used by this bridge.
+    # The protocol-4 Node SDK moved from @github to @microsoft. Follow its
+    # published npm package rather than the frozen legacy npm namespace.
     request = urllib.request.Request(
-        'https://registry.npmjs.org/@github%2fcopilot-sdk/latest',
+        'https://registry.npmjs.org/@microsoft%2fcopilot-sdk/latest',
         headers={'User-Agent': 'codex-copilot-update-check'},
     )
     with urllib.request.urlopen(request, timeout=30) as response:
         package = json.loads(response.read(4 * 1024 * 1024))
     latest = package['version']
-    if package.get('name') != '@github/copilot-sdk' or not re.fullmatch(r'\d+\.\d+\.\d+', latest):
+    if package.get('name') != '@microsoft/copilot-sdk' or not re.fullmatch(r'\d+\.\d+\.\d+', latest):
         raise ValueError('Expected the stable published Copilot Node SDK.')
     return {'name': 'Copilot SDK', 'installed': '.'.join(map(str, version(installed))),
             'latest': latest, 'update_available': version(latest) > version(installed),
-            'url': 'https://www.npmjs.com/package/@github/copilot-sdk/v/' + latest}
+            'url': 'https://www.npmjs.com/package/@microsoft/copilot-sdk/v/' + latest}
 
 
 def save_report(path, report):
@@ -268,7 +268,7 @@ def main():
                         installed = json.loads(
                             (
                                 repo
-                                / "scripts/copilot-pilot/node_modules/@github/copilot-sdk/package.json"
+                                / "scripts/copilot-pilot/node_modules/@microsoft/copilot-sdk/package.json"
                             ).read_text()
                         )["version"]
                     else:

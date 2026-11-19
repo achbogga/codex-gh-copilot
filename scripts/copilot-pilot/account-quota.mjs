@@ -1,4 +1,4 @@
-import { CopilotClient } from "@github/copilot-sdk";
+import { CopilotClient, RuntimeConnection } from "@microsoft/copilot-sdk";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -30,7 +30,9 @@ export async function accountQuota({ cliPath = "copilot", Client = CopilotClient
   const directory = await mkdtemp(join(tmpdir(), "cxf-quota-"));
   let client, timer;
   try {
-    client = new Client({ cliPath, cwd: directory, autoRestart: false, logLevel: "none" });
+    client = new Client({ mode: "coding-agent",
+      runtime: RuntimeConnection.forSpawnedStdio({ path: cliPath, workingDirectory: directory }),
+      observability: { logLevel: "none" } });
     return await Promise.race([
       (async () => {
         await client.start();

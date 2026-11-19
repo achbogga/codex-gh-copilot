@@ -35,8 +35,9 @@ test("quota uses only the official read-only account RPC, starts no model sessio
   let directory;
   class Client {
     constructor(options) {
-      directory = options.cwd;
-      assert.equal(options.autoRestart, false);
+      directory = options.runtime.workingDirectory;
+      assert.equal(options.runtime.kind, "spawned-stdio");
+      assert.equal(options.mode, "coding-agent");
       this.rpc = { account: { getQuota: async (args) => {
         calls.push("getQuota");assert.deepEqual(args, {});
         return result({ tokenBasedBilling: true, usedRequests: 3 });

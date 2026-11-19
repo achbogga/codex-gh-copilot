@@ -151,7 +151,7 @@ def install(config, cache):
     with ThreadPoolExecutor(max_workers=4) as pool:
         codex_lookup = pool.submit(stable_release, 'openai/codex')
         copilot_lookup = pool.submit(stable_release, 'github/copilot-cli')
-        sdk_lookup = pool.submit(get, 'https://registry.npmjs.org/@github%2fcopilot-sdk/latest')
+        sdk_lookup = pool.submit(get, 'https://registry.npmjs.org/@microsoft%2fcopilot-sdk/latest')
         node_lookup = pool.submit(get, 'https://nodejs.org/dist/latest-v22.x/SHASUMS256.txt')
         codex_version, codex_release = codex_lookup.result()
         copilot_version, copilot_release = copilot_lookup.result()
@@ -205,13 +205,13 @@ def install(config, cache):
     # Preserve the installation inputs before changing pointers or SDK files.
     atomic_text(cache / 'launchers-before.json', json.dumps({str(p): old for p, old, _ in wrappers}, indent=2))
     package = repo / 'scripts/copilot-pilot/package.json'
-    current_sdk = json.loads(package.read_text())['dependencies']['@github/copilot-sdk']
-    installed_sdk_file = package.parent / 'node_modules/@github/copilot-sdk/package.json'
+    current_sdk = json.loads(package.read_text())['dependencies']['@microsoft/copilot-sdk']
+    installed_sdk_file = package.parent / 'node_modules/@microsoft/copilot-sdk/package.json'
     installed_sdk = json.loads(installed_sdk_file.read_text()).get('version') if installed_sdk_file.exists() else None
     if current_sdk != sdk_version or installed_sdk != sdk_version:
         environment = {**os.environ, 'PATH': str(node.parent) + os.pathsep + os.environ.get('PATH', '')}
         subprocess.run([str(node), str(npm), 'install', '--prefix', str(package.parent),
-                        '--ignore-scripts', '--save-exact', '@github/copilot-sdk@' + sdk_version],
+                        '--ignore-scripts', '--save-exact', '@microsoft/copilot-sdk@' + sdk_version],
                        env=environment, check=True, timeout=180)
     copilot_entry = Path(config['copilot_bin'])
     if copilot_entry.exists() and not copilot_entry.is_symlink():

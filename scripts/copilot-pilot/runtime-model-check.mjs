@@ -7,7 +7,7 @@ import {
   CopilotClient,
   CopilotRequestHandler,
   RuntimeConnection,
-} from "@github/copilot-sdk";
+} from "@microsoft/copilot-sdk";
 import { mapResponseEvents } from "./responses-events.mjs";
 import { sameInferenceModel } from "./inference-model.mjs";
 import { reasoningForModel } from "./model-config.mjs";
@@ -86,13 +86,14 @@ class Handler extends CopilotRequestHandler {
   }
 }
 const client = new CopilotClient({
-  connection: RuntimeConnection.forStdio({
+  mode: "coding-agent",
+  runtime: RuntimeConnection.forSpawnedStdio({
     path: process.env.COPILOT_PILOT_RUNTIME_BIN,
     env: { ...process.env, COPILOT_AUTO_UPDATE: "false" },
+    workingDirectory: project,
   }),
-  requestHandler: new Handler(),
-  workingDirectory: project,
-  logLevel: "none",
+  models: { requestHandler: new Handler() },
+  observability: { logLevel: "none" },
 });
 try {
   await client.start();

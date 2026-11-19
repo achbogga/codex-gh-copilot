@@ -2,7 +2,7 @@ import {
   CopilotClient,
   CopilotRequestHandler,
   RuntimeConnection,
-} from "@github/copilot-sdk";
+} from "@microsoft/copilot-sdk";
 import { randomUUID } from "node:crypto";
 import {
   messagesRequest,
@@ -294,10 +294,10 @@ export async function createSdkTransport({
     }
   }
   const client = new Client({
-    connection: RuntimeConnection.forStdio({ path: cliPath, env: environment }),
-    requestHandler: new Handler(),
-    logLevel: "none",
-    workingDirectory: directory,
+    mode: "coding-agent",
+    runtime: RuntimeConnection.forSpawnedStdio({ path: cliPath, env: environment, workingDirectory: directory }),
+    models: { requestHandler: new Handler() },
+    observability: { logLevel: "none" },
   });
   const sessionFailure = async (error, fallback, signal) => {
     if (signal.aborted) return requestError("COPILOT_REQUEST_CANCELLED");
@@ -318,8 +318,18 @@ export async function createSdkTransport({
     await client.start();
     const listed = await client.listModels();
     if (Array.isArray(listed)) runtimeModels = listed;
-  } catch {
+  } catch (error) {
     await client.stop();
+    const protocol = /^SDK protocol version mismatch: SDK supports versions (\d+)-(\d+), but server reports version (\d+)\./.exec(
+      String(error?.message ?? ""),
+    );
+    if (protocol) {
+      const failure = new Error(
+        `Copilot SDK/CLI protocol mismatch: SDK supports ${protocol[1]}-${protocol[2]}, CLI uses ${protocol[3]}. Run cxf update to upgrade both together.`,
+      );
+      failure.code = "COPILOT_SDK_PROTOCOL_MISMATCH";
+      throw failure;
+    }
     throw new Error(
       "Copilot SDK discovery failed; check copilot login and enterprise policy.",
     );

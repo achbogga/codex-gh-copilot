@@ -11,18 +11,18 @@ from update_check import display, release_status, sdk_release_status, version, r
 
 class UpdateCheckTests(unittest.TestCase):
     def test_node_sdk_updates_follow_the_published_npm_package(self):
-        payload = {'name': '@github/copilot-sdk', 'version': '1.0.34'}
-        for installed, available in [('1.0.33', True), ('1.0.34', False), ('1.0.35', False)]:
+        payload = {'name': '@microsoft/copilot-sdk', 'version': '2.0.1'}
+        for installed, available in [('1.0.34', True), ('2.0.0', True), ('2.0.1', False), ('2.0.2', False)]:
             with patch('urllib.request.urlopen', return_value=io.BytesIO(json.dumps(payload).encode())) as lookup:
                 result = sdk_release_status(installed)
-            self.assertEqual(result['latest'], '1.0.34')
+            self.assertEqual(result['latest'], '2.0.1')
             self.assertEqual(result['update_available'], available)
             self.assertIn('registry.npmjs.org', lookup.call_args.args[0].full_url)
-            self.assertEqual(result['url'], 'https://www.npmjs.com/package/@github/copilot-sdk/v/1.0.34')
+            self.assertEqual(result['url'], 'https://www.npmjs.com/package/@microsoft/copilot-sdk/v/2.0.1')
         for invalid in ({**payload, 'name': 'another-package'}, {**payload, 'version': '2.0.1-beta'}):
             with patch('urllib.request.urlopen', return_value=io.BytesIO(json.dumps(invalid).encode())):
                 with self.assertRaises(ValueError):
-                    sdk_release_status('1.0.34')
+                    sdk_release_status('2.0.1')
 
     def test_verified_install_clears_old_banner_without_hiding_newer_releases_or_errors(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -5,7 +5,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
-import { CopilotClient } from "@github/copilot-sdk";
+import { CopilotClient } from "@microsoft/copilot-sdk";
 import { listModels, startBridge } from "./bridge.mjs";
 import { modelArguments } from "./model-config.mjs";
 import { codexInvocation } from "./run.mjs";
@@ -269,11 +269,11 @@ test(
           class Client extends CopilotClient {
             constructor(options) {
               if (process.env.COPILOT_PILOT_RUNTIME_DEBUG)
-                options.logLevel = "debug";
-              const send = options.requestHandler.sendRequest.bind(
-                options.requestHandler,
+                options.observability.logLevel = "debug";
+              const send = options.models.requestHandler.sendRequest.bind(
+                options.models.requestHandler,
               );
-              options.requestHandler.sendRequest = async (request, context) => {
+              options.models.requestHandler.sendRequest = async (request, context) => {
                 if (request.method === "POST") {
                   runtimeRequests++;
                   const body = await request.clone().json();

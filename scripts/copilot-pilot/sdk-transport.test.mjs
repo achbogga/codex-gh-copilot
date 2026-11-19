@@ -8,12 +8,38 @@ import { responsesThinkingPrefix } from "./responses-tools.mjs";
 import { sealModelState } from "./model-state.mjs";
 import { httpFailure } from "./request-errors.mjs";
 
+test("discovery identifies protocol incompatibility without misclassifying authentication or forwarding private details", async () => {
+  for (const [message, expectedCode] of [
+    ["SDK protocol version mismatch: SDK supports versions 3-3, but server reports version 4. Private startup detail.",
+      "COPILOT_SDK_PROTOCOL_MISMATCH"],
+    ["Authentication denied. Private startup detail.", undefined],
+  ]) {
+    let stopped = 0;
+    class Client {
+      async start() { throw new Error(message); }
+      async stop() { stopped++; }
+      async listModels() { assert.fail("Failed startup must not list models or start inference"); }
+    }
+    await assert.rejects(createSdkTransport({ Client, forward: () => assert.fail("No network retry is authorized") }),
+      error => {
+        assert.equal(error.code, expectedCode);
+        assert.ok(!error.message.includes("Private startup detail"));
+        if (expectedCode) {
+          assert.match(error.message, /SDK supports 3-3, CLI uses 4/);
+          assert.match(error.message, /cxf update/);
+        } else assert.match(error.message, /login and enterprise policy/);
+        return true;
+      });
+    assert.equal(stopped, 1);
+  }
+});
+
 test("runtime metadata discovery preserves authentication, model catalog, and inference guards", async (t) => {
   let handler;
   const requests = [];
   const catalog = { data: [{ id: "test-model" }] };
   class Client {
-    constructor(options) { handler = options.requestHandler; }
+    constructor(options) { handler = options.models.requestHandler; }
     async start() {}
     async stop() {}
     async createSession() { assert.fail("Discovery must not create inference sessions"); }
@@ -52,7 +78,7 @@ test("metadata-only discovery uses the embedded models catalog without synthesiz
     capabilities: { limits: { max_context_window_tokens: 12345 } } };
   const catalog = { data: [model] };
   class Client {
-    constructor(options) { this.handler = options.requestHandler; }
+    constructor(options) { this.handler = options.models.requestHandler; }
     async start() {}
     async stop() {}
     async listModels() {
@@ -112,7 +138,7 @@ async function fixture(
   };
   class Client {
     constructor(options) {
-      this.handler = options.requestHandler;
+      this.handler = options.models.requestHandler;
     }
     async start() {}
     async ping() {
