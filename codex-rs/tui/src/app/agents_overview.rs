@@ -26,7 +26,9 @@ use super::*;
 use crate::app_event::AgentsOverviewThreadRefresh;
 use crate::backend_id::BackendId;
 use crate::bottom_pane::BottomPaneView;
+use crate::chatwidget::ReadOnlyThread;
 use crate::chatwidget::ThreadInputStateRestoreMode;
+use crate::session_start::is_archived_session_error;
 use crate::startup_draft::StartupDraftPump;
 use codex_app_server_protocol::SessionSource;
 use codex_app_server_protocol::Thread;
@@ -72,7 +74,7 @@ pub(super) struct AgentsOverviewState {
     pub(super) active_refresh_thread_ids: HashSet<ThreadId>,
     pub(super) pins_by_backend: std::collections::BTreeMap<BackendId, Option<Vec<ThreadId>>>,
     pub(super) pending_pin_change: Option<(Uuid, BackendId)>,
-    pub(super) refresh_task: Option<tokio::task::AbortHandle>,
+    pub(super) refresh_task: Option<tokio::task::JoinHandle<()>>,
     pub(super) refresh_notifications: HashMap<ThreadId, Vec<ServerNotification>>,
     pub(super) rendered_full_screen: bool,
     pub(super) visible_thread_ids: Vec<ThreadId>,
@@ -86,6 +88,9 @@ pub(super) struct AgentsOverviewState {
     pub(super) requested_permission_profiles: HashMap<ThreadId, PermissionProfileSelection>,
     /// Keep new tasks subscribed and reusable until a first turn makes them resumable.
     pub(super) blank_sessions: HashMap<ThreadId, crate::app_server_session::AppServerStartedThread>,
+    /// A host switch carries this choice with the draft, but only its original backend can use it.
+    pub(super) draft_cloud_environments:
+        HashMap<ThreadId, (BackendId, codex_app_server_client::SavedEnvironment)>,
     pub(super) input_states: HashMap<ThreadId, ThreadInputState>,
     pub(super) new_session_draft: Option<Box<StartupDraftPump>>,
     pub(super) dispatched_requests: HashMap<ThreadId, Vec<BufferedServerRequest>>,
@@ -380,13 +385,18 @@ impl App {
             .is_some_and(|owner| overview.has_more_for(&self.backend_registry, owner));
     }
 
-    pub(super) fn cancel_agents_overview_refresh(&mut self, backend_id: BackendId) {
+    pub(super) fn cancel_agents_overview_refresh(
+        &mut self,
+        backend_id: BackendId,
+    ) -> Option<tokio::task::JoinHandle<()>> {
         let overview = &mut self.agents_overview;
+        let mut canceled = None;
         if overview
             .active_refresh
             .is_some_and(|(_, owner)| owner == backend_id)
         {
-            if let Some(task) = overview.refresh_task.take() {
+            canceled = overview.refresh_task.take();
+            if let Some(task) = &canceled {
                 task.abort();
             }
             overview.active_refresh = None;
@@ -431,6 +441,7 @@ impl App {
             });
         }
         self.repaint_agents_overview();
+        canceled
     }
 
     pub(super) fn repaint_agents_overview(&mut self) {
@@ -708,6 +719,7 @@ impl App {
         if self.current_displayed_thread_id() == Some(root_thread_id)
             && (!self.thread_unavailable(root_thread_id) || self.chat_widget.is_read_only_view())
         {
+            self.cancel_cloud_inventory_refresh(app_server).await;
             // Keep the displayed read-only snapshot frozen; R explicitly retries attachment.
             if let Ok(mut state) = self.agents_overview.view_state.lock() {
                 state.completion = Some(crate::bottom_pane::ViewCompletion::Accepted);
@@ -923,13 +935,13 @@ impl App {
                 ThreadAttachPresentation::SessionLineage
             };
             let (resumed, read_only) = if let Some((_, started)) = started {
-                (started, false)
+                (started, None)
             } else if let Some(blank) = self
                 .live_blank_session(app_server, root_thread_id, &target_thread)
                 .await
             {
                 restored_blank_session = true;
-                (blank, false)
+                (blank, None)
             } else {
                 match app_server
                     .resume_thread_with_permission_overrides(
@@ -944,15 +956,21 @@ impl App {
                     Ok(resumed) => {
                         provider_resume_checked = true;
                         resumed_mode = Some(resumed.session.collaboration_mode.is_some());
-                        (resumed, false)
+                        (resumed, None)
                     }
                     Err(error)
                         if crate::app_server_session::is_active_writer_error(&error)
                             || crate::app_server_session::model_provider_error(&error)
-                                .is_some() =>
+                                .is_some()
+                            || is_archived_session_error(&error, root_thread_id) =>
                     {
                         provider_resume_checked = true;
                         provider_error = crate::app_server_session::model_provider_error(&error);
+                        let reason = if is_archived_session_error(&error, root_thread_id) {
+                            ReadOnlyThread::Archived
+                        } else {
+                            ReadOnlyThread::ExternalWriter
+                        };
                         match app_server
                             .read_thread_for_viewing(
                                 &resume_config,
@@ -963,7 +981,7 @@ impl App {
                         {
                             Ok((thread, notice)) => {
                                 history_notice = notice;
-                                (thread, true)
+                                (thread, Some(reason))
                             }
                             Err(_) => {
                                 tracing::warn!("Failed to load read-only conversation history");
@@ -1023,7 +1041,8 @@ impl App {
                 }
             }
             // Read-only views retain explicit choices but never another task's restored state.
-            let preserve_explicit_permissions = preserve_explicit_permissions || read_only;
+            let preserve_explicit_permissions =
+                preserve_explicit_permissions || read_only.is_some();
             self.runtime_approvals_reviewer_override = self
                 .runtime_approvals_reviewer_override
                 .filter(|_| preserve_explicit_permissions);
@@ -1071,10 +1090,16 @@ impl App {
             if let Some(error) = provider_error {
                 self.chat_widget
                     .show_provider_error(error, /*rejected_message_id*/ None);
-            } else if read_only {
-                self.ensure_thread_channel(root_thread_id)
-                    .mark_external_writer();
-                self.chat_widget.show_external_writer_thread();
+            } else if let Some(reason) = read_only {
+                let channel = self.ensure_thread_channel(root_thread_id);
+                match reason {
+                    ReadOnlyThread::Archived => {
+                        channel.archived = true;
+                        channel.mark_replay_only();
+                    }
+                    ReadOnlyThread::ExternalWriter => channel.mark_external_writer(),
+                }
+                self.chat_widget.show_read_only_thread(reason);
             }
             if let Some(notice) = history_notice {
                 self.chat_widget
@@ -1094,7 +1119,7 @@ impl App {
             if is_new_session {
                 self.remember_launch_permissions();
             }
-            if !read_only {
+            if read_only.is_none() {
                 let approval = self.config.permissions.approval_policy.value();
                 if self
                     .runtime_approval_policy_override
@@ -1231,7 +1256,7 @@ impl App {
         &mut self,
         tui: &mut tui::Tui,
         app_server: &mut AppServerSession,
-        cwd: Option<AbsolutePathBuf>,
+        cwd: Option<PathBuf>,
         mut startup_draft: Option<&mut StartupDraftPump>,
     ) -> Option<(Config, Option<PathBuf>)> {
         if self
@@ -1244,17 +1269,12 @@ impl App {
             );
             return None;
         }
-        let remote = app_server.uses_remote_workspace();
-        let remote_cwd = cwd
-            .as_ref()
-            .filter(|_| remote)
-            .map(AbsolutePathBuf::to_path_buf);
-        let local_cwd = if remote {
-            self.config.cwd.to_path_buf()
+        let (local_cwd, remote_cwd) = if app_server.uses_remote_workspace() {
+            (self.config.cwd.to_path_buf(), cwd)
         } else {
-            cwd.map_or_else(
-                || self.chat_widget.config_ref().cwd.to_path_buf(),
-                |cwd| cwd.to_path_buf(),
+            (
+                cwd.unwrap_or_else(|| self.chat_widget.session_cwd().to_path_buf()),
+                None,
             )
         };
         let mut config = match StartupDraftPump::run_with_optional_draft(

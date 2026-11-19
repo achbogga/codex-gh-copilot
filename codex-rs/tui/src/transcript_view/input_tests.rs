@@ -175,6 +175,55 @@ fn hover_links_match_wrapped_click_targets_and_refresh_after_scrolling() {
 }
 
 #[test]
+fn agent_activity_underlines_the_full_wrapped_label() {
+    use codex_app_server_protocol::SubAgentActivityKind;
+    use codex_app_server_protocol::ThreadItemPayload;
+    use ratatui::style::Modifier;
+
+    let cell = crate::multi_agents::sub_agent_activity_history_cell(
+        &ThreadItemPayload::SubAgentActivity {
+            id: "spawn".into(),
+            kind: SubAgentActivityKind::Started,
+            agent_thread_id: codex_protocol::ThreadId::new().to_string(),
+            agent_path: "/root/reviewer/verify_the_sidebar_layout".into(),
+            model: None,
+            reasoning_effort: None,
+        },
+    )
+    .expect("agent activity");
+    let cells: Vec<Arc<dyn HistoryCell>> = vec![Arc::new(cell)];
+    let mut view = TranscriptView {
+        agent_links: Some(crate::backend_id::BackendId::new()),
+        ..Default::default()
+    };
+    let area = Rect::new(
+        /*x*/ 0, /*y*/ 0, /*width*/ 22, /*height*/ 5,
+    );
+    let mut buffer = Buffer::empty(area);
+    view.render(area, &mut buffer, &cells);
+    let picture = buffer
+        .content
+        .chunks(usize::from(area.width))
+        .filter_map(|row| {
+            let text: String = row.iter().map(ratatui::buffer::Cell::symbol).collect();
+            let marks: String = row
+                .iter()
+                .map(|cell| {
+                    if cell.modifier.contains(Modifier::UNDERLINED) {
+                        '^'
+                    } else {
+                        ' '
+                    }
+                })
+                .collect();
+            (!text.trim().is_empty()).then(|| format!("{}\n{}", text.trim_end(), marks.trim_end()))
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    insta::assert_snapshot!(picture);
+}
+
+#[test]
 fn workspace_file_links_show_the_title_with_subtle_hover_and_open_the_same_location() {
     use crate::markdown_render::FileLink;
     use crate::markdown_render::SourceLocation;
@@ -325,9 +374,16 @@ fn shift_click_preserves_selection_units_and_allows_dragging() {
 
 #[test]
 fn ordinary_click_opens_bare_and_markdown_links_on_release() {
-    for markdown in [
-        "https://example.com/docs",
-        "[docs](https://example.com/docs)",
+    for (markdown, destination) in [
+        ("https://example.com/docs", "https://example.com/docs"),
+        (
+            "[docs](https://example.com/docs)",
+            "https://example.com/docs",
+        ),
+        (
+            "[other thread](codex://threads/019e60fc-0518-7c21-9596-980fe97225ba)",
+            "codex://threads/019e60fc-0518-7c21-9596-980fe97225ba",
+        ),
     ] {
         for width in [12, 60] {
             let (mut view, cells) = transcript(markdown, width);
@@ -356,7 +412,7 @@ fn ordinary_click_opens_bare_and_markdown_links_on_release() {
                     view.selected_text(&cells),
                     view.is_following()
                 ),
-                ("https://example.com/docs", None, true)
+                (destination, None, true)
             );
             assert!(view.handle_mouse(up, &cells).is_none());
         }

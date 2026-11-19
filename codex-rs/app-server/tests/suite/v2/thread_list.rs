@@ -757,7 +757,7 @@ async fn thread_list_pagination_next_cursor_none_on_last_page() -> Result<()> {
         assert_eq!(thread.model_provider, "mock_provider");
         assert!(thread.created_at > 0);
         assert_eq!(thread.updated_at, thread.created_at);
-        assert_eq!(thread.cwd, test_absolute_path("/"));
+        assert_eq!(thread.cwd, test_absolute_path("/").into());
         assert_eq!(thread.cli_version, "0.0.0");
         assert_eq!(thread.source, SessionSource::Cli);
         assert_eq!(thread.git_info, None);
@@ -785,7 +785,7 @@ async fn thread_list_pagination_next_cursor_none_on_last_page() -> Result<()> {
         assert_eq!(thread.model_provider, "mock_provider");
         assert!(thread.created_at > 0);
         assert_eq!(thread.updated_at, thread.created_at);
-        assert_eq!(thread.cwd, test_absolute_path("/"));
+        assert_eq!(thread.cwd, test_absolute_path("/").into());
         assert_eq!(thread.cli_version, "0.0.0");
         assert_eq!(thread.source, SessionSource::Cli);
         assert_eq!(thread.git_info, None);
@@ -841,7 +841,7 @@ async fn thread_list_respects_provider_filter() -> Result<()> {
     let expected_ts = chrono::DateTime::parse_from_rfc3339("2025-01-02T11:00:00Z")?.timestamp();
     assert_eq!(thread.created_at, expected_ts);
     assert_eq!(thread.updated_at, expected_ts);
-    assert_eq!(thread.cwd, test_absolute_path("/"));
+    assert_eq!(thread.cwd, test_absolute_path("/").into());
     assert_eq!(thread.cli_version, "0.0.0");
     assert_eq!(thread.source, SessionSource::Cli);
     assert_eq!(thread.git_info, None);
@@ -1287,6 +1287,22 @@ async fn thread_search_filters_by_source_kind() -> Result<()> {
     assert_eq!(ids, vec![exec_id.as_str()]);
     assert_ne!(cli_id, exec_id);
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn thread_search_preserves_large_query_compatibility_on_empty_history() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    create_minimal_config(codex_home.path())?;
+    let mut server = init_mcp(codex_home.path()).await?;
+    for term in ["s".repeat(65_536), "x".repeat(65_537)] {
+        let request_id = server
+            .send_raw_request("thread/search", Some(json!({"searchTerm": term})))
+            .await?;
+        let response: ThreadSearchResponse =
+            timeout(DEFAULT_READ_TIMEOUT, server.read_response(request_id)).await??;
+        assert!(response.data.is_empty());
+    }
     Ok(())
 }
 
@@ -2520,7 +2536,7 @@ async fn thread_list_includes_git_info() -> Result<()> {
     };
     assert_eq!(thread.git_info, Some(expected_git));
     assert_eq!(thread.source, SessionSource::Cli);
-    assert_eq!(thread.cwd, test_absolute_path("/"));
+    assert_eq!(thread.cwd, test_absolute_path("/").into());
     assert_eq!(thread.cli_version, "0.0.0");
 
     Ok(())

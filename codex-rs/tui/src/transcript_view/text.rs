@@ -47,6 +47,7 @@ use ratatui::text::Line;
 /// One cell's logical text and its width-dependent display rows.
 pub(crate) struct TextLayout {
     pub(super) image: Option<std::sync::Arc<crate::transcript_image::TranscriptImage>>,
+    pub(super) image_left_aligned: bool,
     logical: Vec<LogicalLine>,
     text: String,
     rows: Vec<TextRow>,
@@ -212,6 +213,7 @@ impl TextLayout {
             layout = layout.with_control(control.label.clone(), control.anchor);
         }
         layout.image = self.image.clone();
+        layout.image_left_aligned = self.image_left_aligned;
         if self.leading_blank_hidden {
             layout = layout.without_leading_blank_row();
         }
@@ -849,6 +851,27 @@ impl TextLayout {
         }
     }
 
+    pub(super) fn underline_agent_links(&self, area: Rect, buf: &mut Buffer, row: usize) {
+        let Some((inset, links)) = self.row_links(row) else {
+            return;
+        };
+        for link in links.iter().filter(|link| link.agent_id().is_some()) {
+            let columns = (inset + link.columns.start)
+                ..(inset + link.columns.end).min(usize::from(area.width));
+            if !columns.is_empty() {
+                buf.set_style(
+                    Rect::new(
+                        area.x + columns.start as u16,
+                        area.y,
+                        columns.len() as u16,
+                        1,
+                    ),
+                    Style::default().underlined(),
+                );
+            }
+        }
+    }
+
     pub(super) fn document_links(&self) -> Vec<(Range<usize>, ReaderLink)> {
         let mut stops: Vec<(Range<usize>, ReaderLink)> = Vec::new();
         let mut previous_source = None;
@@ -941,6 +964,7 @@ impl TextLayout {
         }
         Self {
             image: None,
+            image_left_aligned: false,
             logical,
             text,
             rows,

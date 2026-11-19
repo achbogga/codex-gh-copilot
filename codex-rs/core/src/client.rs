@@ -83,6 +83,7 @@ use codex_login::default_client::add_originator_header;
 use codex_otel::SessionTelemetry;
 use codex_otel::WEBSOCKET_CONTINUATION_COUNT_METRIC;
 use codex_otel::current_span_w3c_trace_context;
+use codex_otel::inject_span_w3c_trace_headers;
 use codex_protocol::ItemIdGenerator;
 use codex_protocol::ResponseItemId;
 use codex_protocol::auth::AuthMode;
@@ -91,6 +92,7 @@ use codex_protocol::ThreadId;
 use codex_protocol::config_types::ReasoningSummary as ReasoningSummaryConfig;
 use codex_protocol::config_types::Verbosity as VerbosityConfig;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::models::ToolResultBody;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ReasoningEffort as ReasoningEffortConfig;
 use codex_protocol::protocol::AuthRecoveryEvent;
@@ -135,6 +137,7 @@ use crate::context::ContextualUserFragment;
 use crate::cyber_access_program;
 use crate::feedback_tags;
 use crate::responses_metadata::CodexResponsesMetadata;
+use crate::responses_metadata::CodexResponsesRequestKind;
 use crate::responses_metadata::subagent_header_value;
 use crate::session::turn_context::TurnContext;
 use crate::util::emit_feedback_auth_recovery_tags;
@@ -277,6 +280,55 @@ impl std::fmt::Debug for ModelClientState {
 enum ClientRouting {
     Workspace,
     ConfiguredProvider,
+}
+
+pub(crate) fn is_local_connector_result_gateway(base_url: &str) -> bool {
+    let url = base_url.strip_suffix('/').unwrap_or(base_url);
+    matches!(
+        url,
+        codex_model_provider_info::CHATGPT_CODEX_BASE_URL
+            | "https://chatgpt-staging.com/backend-api/codex"
+    )
+}
+
+#[derive(Debug, PartialEq)]
+struct ResultBodyDestination {
+    owner: AuthOwner,
+}
+
+fn sampling_result_destination(
+    setup: &CurrentClientSetup,
+    include_internal: bool,
+    responses_headers: &ApiHeaderMap,
+) -> Option<ResultBodyDestination> {
+    if !include_internal
+        || !responses_headers.is_empty()
+        || setup
+            .api_provider
+            .query_params
+            .as_ref()
+            .is_some_and(|params| !params.is_empty())
+    {
+        return None;
+    }
+    let owner = setup
+        .auth_owner
+        .as_ref()
+        .filter(|owner| owner.is_current())?
+        .clone();
+    let headers = &setup.api_provider.headers;
+    (matches!(
+        setup.auth.as_ref(),
+        Some(CodexAuth::Chatgpt(_) | CodexAuth::ChatgptAuthTokens(_))
+    ) && is_local_connector_result_gateway(&setup.api_provider.base_url)
+        && headers.keys().all(|name| {
+            matches!(
+                name.as_str(),
+                codex_model_provider::ACCOUNT_ROUTING_HEADER
+                    | codex_model_provider_info::RESIDENCY_HEADER_NAME
+            ) || ExecutedToolCalls::is_result_body_provider_header(name.as_str())
+        }))
+    .then_some(ResultBodyDestination { owner })
 }
 
 #[derive(Clone, Copy)]
@@ -1313,8 +1365,12 @@ impl ModelClient {
                         .any(|supported| supported.id == *tier)
             });
         if !include_internal {
+            let captures_result_bodies = self.captures_result_bodies();
             for item in &mut input {
                 item.clear_tool_result_metadata();
+                if captures_result_bodies {
+                    item.clear_tool_result_ids();
+                }
             }
         }
         let client_metadata = responses_metadata.client_metadata(include_internal);
@@ -1407,6 +1463,48 @@ impl ModelClient {
             self.http_client_factory.clone(),
         )
         .await
+    }
+
+    fn prepared_prompt_for_trace(
+        &self,
+        attempt: &InferenceTraceAttempt,
+        prompt: &Arc<Prompt>,
+    ) -> Arc<Prompt> {
+        let mut prepared = Arc::clone(prompt);
+        if attempt.is_enabled()
+            && let Some(recorder) = &self.executed_tool_calls
+        {
+            recorder.scope_request_metadata_with(|| &mut Arc::make_mut(&mut prepared).input);
+        }
+        prepared
+    }
+
+    fn captures_result_bodies(&self) -> bool {
+        self.executed_tool_calls
+            .as_ref()
+            .is_some_and(ExecutedToolCalls::captures_result_bodies)
+    }
+
+    /// Collect bodies only after selecting the inference credentials and the physical input.
+    fn sampling_result_bodies(
+        &self,
+        metadata: &CodexResponsesMetadata,
+        destination: Option<&ResultBodyDestination>,
+        input: &[ResponseItem],
+    ) -> Vec<(usize, usize, Arc<ToolResultBody>)> {
+        if matches!(metadata.request_kind, Some(CodexResponsesRequestKind::Turn))
+            && let Some(turn_id) = metadata.turn_id.as_deref()
+            && let Some(turn) = self
+                .executed_tool_calls
+                .as_ref()
+                .and_then(|calls| calls.result_body_turn(turn_id))
+        {
+            let Some(destination) = destination else {
+                return Vec::new();
+            };
+            return turn.for_input(input, &destination.owner);
+        }
+        Vec::new()
     }
 
     fn responses_headers(&self, auth: Option<&CodexAuth>, model: &str) -> ApiHeaderMap {
@@ -1504,6 +1602,7 @@ impl ModelClient {
     ) -> std::result::Result<ApiWebSocketConnection, ApiError> {
         let mut headers = self.build_websocket_headers(responses_metadata).await;
         headers.extend(responses_headers.clone());
+        inject_span_w3c_trace_headers(&tracing::Span::current(), &mut headers);
         if let Some(affinity) = parent_routing_affinity {
             let uri = api_provider
                 .websocket_url_for_path(RESPONSES_PATH)
@@ -1691,6 +1790,7 @@ impl<'a> ResponsesHttpExecutor<'a> {
                 headers
             },
             compression,
+            tool_results: Vec::new(),
             turn_state: Some(Arc::clone(turn_state)),
         }
     }
@@ -2037,6 +2137,11 @@ impl ResponsesHttpExecutor<'_> {
             let responses_headers = self
                 .client
                 .responses_headers(client_setup.auth.as_ref(), &model_info.slug);
+            let result_body_destination = sampling_result_destination(
+                &client_setup,
+                include_internal && self.client.captures_result_bodies(),
+                &responses_headers,
+            );
             tracing::Span::current().record("api.path", "/responses");
             let transport = client_setup.http_transport("/responses")?;
             let request_auth_context = AuthRequestTelemetryContext::new(
@@ -2100,8 +2205,12 @@ impl ResponsesHttpExecutor<'_> {
             )?;
             self.client
                 .validate_required_cyber_access_program(request.access_programs)?;
+            let history_ids = inference_trace.stripped_output_ids(&request.input);
             self.client
                 .prepare_response_items_for_request(&mut request.input);
+            if let Some(recorder) = &self.client.executed_tool_calls {
+                let _ = recorder.scope_request_metadata(&mut request.input);
+            }
             let request_session_telemetry =
                 session_telemetry_for_request(session_telemetry, &request);
             options.extra_headers.extend(responses_headers);
@@ -2139,11 +2248,18 @@ impl ResponsesHttpExecutor<'_> {
                 client_setup.api_auth,
             )
             .with_telemetry(Some(request_telemetry), Some(sse_telemetry));
+            options.tool_results = self.client.sampling_result_bodies(
+                responses_metadata,
+                result_body_destination.as_ref(),
+                &request.input,
+            );
             let stream_result = client
                 .stream_request_with_observer(request, options, |wire| {
                     inference_trace_attempt.record_started(
                         wire.clone(),
-                        Arc::clone(prompt),
+                        self.client
+                            .prepared_prompt_for_trace(&inference_trace_attempt, prompt),
+                        history_ids,
                         || Ok(None),
                     );
                 })
@@ -2261,6 +2377,11 @@ impl ModelClientSession {
             let responses_headers = self
                 .client
                 .responses_headers(client_setup.auth.as_ref(), &model_info.slug);
+            let result_body_destination = sampling_result_destination(
+                &client_setup,
+                include_internal && self.client.captures_result_bodies(),
+                &responses_headers,
+            );
             tracing::Span::current().record("api.path", "/responses");
             let request_auth_context = AuthRequestTelemetryContext::new(
                 client_setup.auth.as_ref().map(CodexAuth::auth_mode),
@@ -2416,6 +2537,13 @@ impl ModelClientSession {
                 Some(continuation) => (Some(continuation.response_id), Some(continuation.items)),
                 None => (None, None),
             };
+            // The full context captured after a warmup already carries the original IDs.
+            let history_ids = if previous_response_id_from_untraced_warmup {
+                Vec::new()
+            } else {
+                inference_trace
+                    .stripped_output_ids(incremental_items.as_deref().unwrap_or(&request.input))
+            };
             let original_item_ids = if let Some(incremental_items) = &mut incremental_items {
                 self.client
                     .prepare_response_items_for_request(incremental_items);
@@ -2430,6 +2558,16 @@ impl ModelClientSession {
                     .prepare_response_items_for_request(&mut request.input);
                 Some(original_item_ids)
             };
+            let mut original_metadata = Vec::new();
+            if let Some(recorder) = &self.client.executed_tool_calls {
+                if let Some(items) = &mut incremental_items {
+                    let _ = recorder.scope_request_metadata(items);
+                }
+                // A continuation from a warmup also records the full context for rollout replay.
+                if incremental_items.is_none() || previous_response_id_from_untraced_warmup {
+                    original_metadata = recorder.scope_request_metadata(&mut request.input);
+                }
+            }
             let mut request = Arc::new(request);
             let mut ws_payload = ResponseCreateWsRequest {
                 previous_response_id,
@@ -2496,6 +2634,18 @@ impl ModelClientSession {
                     ),
                 ],
             );
+            // Prewarm selects the inference route but never carries private result bodies.
+            let result_body_destination = if warmup {
+                None
+            } else {
+                result_body_destination
+            };
+            let ResponsesWsRequest::ResponseCreate(payload) = &mut ws_request;
+            payload.tool_results = self.client.sampling_result_bodies(
+                responses_metadata,
+                result_body_destination.as_ref(),
+                payload.input,
+            );
             let stream_result = websocket_connection
                 .stream_request_with_observer(
                     ws_request,
@@ -2504,7 +2654,9 @@ impl ModelClientSession {
                     |wire| {
                         inference_trace_attempt.record_started(
                             wire.clone(),
-                            Arc::clone(prompt),
+                            self.client
+                                .prepared_prompt_for_trace(&inference_trace_attempt, prompt),
+                            history_ids,
                             move || {
                                 #[derive(serde::Serialize)]
                                 struct WarmupContext<'a> {
@@ -2526,6 +2678,12 @@ impl ModelClientSession {
                 {
                     item.set_id(original_item_id);
                 }
+            }
+            if !original_metadata.is_empty() {
+                ExecutedToolCalls::restore_request_metadata(
+                    &mut Arc::make_mut(&mut request).input,
+                    original_metadata,
+                );
             }
             self.websocket_session.last_request = Some(request);
             self.websocket_session.last_response_from_untraced_warmup = warmup;
@@ -2610,6 +2768,7 @@ impl ModelClientSession {
         summary: ReasoningSummaryConfig,
         service_tier: Option<String>,
         responses_metadata: &CodexResponsesMetadata,
+        reuse_response: bool,
     ) -> Result<()> {
         if !self.client.responses_websocket_enabled() {
             return Ok(());
@@ -2637,6 +2796,13 @@ impl ModelClientSession {
             .await
         {
             Ok(WebsocketStreamOutcome::Stream(opened)) => {
+                if !reuse_response {
+                    // Keep the socket and its normalized images. Drop the continuation
+                    // before waiting so cancellation cannot expose the warm-up ID.
+                    self.websocket_session.last_response_rx = None;
+                    self.websocket_session.continuation_reset_reason =
+                        Some("restored_history_warmup");
+                }
                 let mut stream = (*opened).into_raw_stream()?;
                 // Wait for the v2 warmup request to complete before sending the first turn request.
                 while let Some(event) = stream.next().await {
@@ -2920,6 +3086,7 @@ where
         }
         loop {
             let event = tokio::select! {
+                biased;
                 _ = consumer_dropped.cancelled() => {
                     inference_trace_attempt.record_cancelled(
                         STREAM_DROPPED_REASON,
@@ -2943,6 +3110,7 @@ where
             };
             let event = match event {
                 Ok(ResponseEvent::OutputItemDone(mut item)) => {
+                    provider.normalize_completed_output_item(&mut item);
                     // Assign IDs after interceptors, which may replace provider items.
                     // Reuse the added event's ID so tracing and the harness agree.
                     if item.id().is_none_or(|id| id.is_empty()) {

@@ -885,6 +885,29 @@ client_request_definitions! {
         serialization: None,
         response: v2::ThreadSearchResponse,
     },
+    #[experimental("thread/search/stream")]
+    /// Search with best-effort incremental `thread/search/partial` notifications. The final
+    /// response is authoritative for results, ordering, and cursors.
+    ThreadSearchStream => "thread/search/stream" {
+        params: v2::ThreadSearchParams,
+        serialization: None,
+        manual_payload_conversion: manual,
+        response: v2::ThreadSearchResponse,
+    },
+    #[experimental("thread/search/cancel")]
+    ThreadSearchCancel => "thread/search/cancel" {
+        params: v2::ThreadSearchCancelParams,
+        serialization: None,
+        response: v2::ThreadSearchCancelResponse,
+    },
+    #[experimental("thread/search/stream/cancel")]
+    /// Cancel a `thread/search/stream` request on this connection.
+    ThreadSearchStreamCancel => "thread/search/stream/cancel" {
+        params: v2::ThreadSearchCancelParams,
+        serialization: None,
+        manual_payload_conversion: manual,
+        response: v2::ThreadSearchCancelResponse,
+    },
     #[experimental("thread/searchOccurrences")]
     ThreadSearchOccurrences => "thread/searchOccurrences" {
         params: v2::ThreadSearchOccurrencesParams,
@@ -2109,6 +2132,8 @@ server_notification_definitions! {
     /// Stream base64-encoded stdout/stderr chunks for a running `process/spawn` session.
     #[experimental("process/outputDelta")]
     ProcessOutputDelta => "process/outputDelta" (v2::ProcessOutputDeltaNotification),
+    #[experimental("thread/search/partial")]
+    ThreadSearchPartial => "thread/search/partial" (v2::ThreadSearchPartialNotification),
     /// Final exit notification for a `process/spawn` session.
     #[experimental("process/exited")]
     ProcessExited => "process/exited" (v2::ProcessExitedNotification),
@@ -3354,7 +3379,7 @@ mod tests {
                     recency_at: Some(3),
                     status: v2::ThreadStatus::Idle,
                     path: None,
-                    cwd: cwd.clone(),
+                    cwd: cwd.clone().into(),
                     cli_version: "0.0.0".to_string(),
                     source: v2::SessionSource::Exec,
                     can_accept_direct_input: None,
@@ -3369,7 +3394,7 @@ mod tests {
                 model: "gpt-5".to_string(),
                 model_provider: "openai".to_string(),
                 service_tier: None,
-                cwd,
+                cwd: cwd.into(),
                 runtime_workspace_roots: Vec::new(),
                 instruction_sources: vec![
                     codex_utils_path_uri::LegacyAppPathString::from_abs_path(&absolute_path(
@@ -3496,11 +3521,13 @@ mod tests {
                 v2::LoginAccountParams::AmazonBedrock {
                     api_key: "secret".to_string(),
                     region: "us-west-2".to_string(),
+                    provider_id: None,
                 },
                 json!({
                     "type": "amazonBedrock",
                     "apiKey": "secret",
-                    "region": "us-west-2"
+                    "region": "us-west-2",
+                    "providerId": null
                 }),
             ),
             (
@@ -3509,13 +3536,15 @@ mod tests {
                     secret_access_key: "secret-access-key".to_string(),
                     session_token: Some("session-token".to_string()),
                     region: "us-west-2".to_string(),
+                    provider_id: Some(v2::BedrockProviderId::AmazonBedrockRuntime),
                 },
                 json!({
                     "type": "amazonBedrockAccessKeys",
                     "accessKeyId": "access-key-id",
                     "secretAccessKey": "secret-access-key",
                     "sessionToken": "session-token",
-                    "region": "us-west-2"
+                    "region": "us-west-2",
+                    "providerId": "amazon-bedrock-runtime"
                 }),
             ),
         ] {
@@ -4615,7 +4644,7 @@ mod tests {
                 thread_settings: v2::ThreadSettings {
                     disabled_plugin_ids: Vec::new(),
                     environments: Some(Vec::new()),
-                    cwd: absolute_path("/tmp/repo"),
+                    cwd: absolute_path("/tmp/repo").into(),
                     approval_policy: v2::AskForApproval::Never,
                     approvals_reviewer: v2::ApprovalsReviewer::User,
                     sandbox_policy: v2::SandboxPolicy::DangerFullAccess,

@@ -120,8 +120,19 @@ async fn document_preview_scenario() -> Result<()> {
     assert!(loading.contains("Opening…"), "{loading}");
 
     Box::pin(app.handle_event(&mut tui, &mut server, next_document_event(false).await)).await?;
-    let error = side_frame(&mut app, &mut tui, size)?;
-    assert!(error.contains("Could not open file"), "{error}");
+    let error = side_frame(&mut app, &mut tui, Size::new(size.width, /*height*/ 24))?;
+    let pane_text: String = error
+        .lines()
+        .filter_map(|line| line.split_once('│'))
+        .map(|(_, pane)| pane.trim())
+        .collect();
+    let directory = dir.path().canonicalize()?;
+    assert!(
+        pane_text.contains(&format!("File not foundguide.mdin {}", directory.display())),
+        "{error}"
+    );
+
+    assert!(pane_text.ends_with("esc close"), "{error}");
 
     std::fs::write(
         dir.path().join("guide.md"),
@@ -451,7 +462,7 @@ async fn document_preview_scenario() -> Result<()> {
         .collect::<Vec<_>>()
         .join("\n");
     insta::assert_snapshot!(preview, @"
-    guide.md       × main.rs        ×                              +
+    guide.md      ×  main.rs       ×                              +
     3 let value = 3;                                               ↑
     ↑/↓ read · f3 find · Tab link · f8 select · Esc clear highlight
     ");
@@ -493,6 +504,40 @@ async fn document_preview_scenario() -> Result<()> {
             .await?;
         assert_eq!(app.sidebar().unwrap().documents.len(), remaining);
     }
+    app.chat_widget
+        .set_pet_image_support_for_tests(crate::pets::PetImageSupport::Unsupported(
+            crate::pets::PetImageUnsupportedReason::Terminal,
+        ));
+    image::RgbImage::new(24, 16).save(dir.path().join("figure.png"))?;
+    app.open_document(
+        &mut tui,
+        &mut server,
+        parent,
+        FileLink {
+            path: "figure.png".into(),
+            location: None,
+        },
+    )
+    .await?;
+    Box::pin(app.handle_event(&mut tui, &mut server, next_document_event(true).await)).await?;
+    Box::pin(app.handle_event(&mut tui, &mut server, next_document_event(false).await)).await?;
+    let image = side_frame(&mut app, &mut tui, Size::new(160, 15))?;
+    let image_rows = image
+        .lines()
+        .map(|row| row.rsplit('│').next().unwrap_or(row).trim())
+        .filter(|row| {
+            row.contains("PNG ·")
+                || row.contains("Image preview unavailable")
+                || row.contains("←/→ tabs")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    insta::assert_snapshot!(image_rows, @"
+    PNG · 24 × 16
+    Image preview unavailable in this terminal
+    ←/→ tabs · Esc close
+    ");
+    assert_eq!(app.sidebar().unwrap().documents.len(), 2);
     app.open_document(
         &mut tui,
         &mut server,
@@ -507,11 +552,41 @@ async fn document_preview_scenario() -> Result<()> {
         crate::pager_overlay::TranscriptOverlay::new(Vec::new(), app.keymap.pager.clone()),
     ));
     Box::pin(app.handle_event(&mut tui, &mut server, next_document_event(true).await)).await?;
-    assert_eq!(app.sidebar().unwrap().documents.len(), 2);
+    assert_eq!(app.sidebar().unwrap().documents.len(), 3);
     assert!(app.overlay.take().is_some());
     Box::pin(app.handle_event(&mut tui, &mut server, next_document_event(false).await)).await?;
     let after_overlay = side_frame(&mut app, &mut tui, size)?;
-    assert!(after_overlay.contains("Last section."), "{after_overlay}");
+    assert!(after_overlay.contains("PNG · 24 × 16"), "{after_overlay}");
+    std::fs::write(
+        dir.path().join("pointer.png"),
+        "version https://git-lfs.github.com/spec/v1
+size 123
+",
+    )?;
+    app.open_document(
+        &mut tui,
+        &mut server,
+        parent,
+        FileLink {
+            path: "pointer.png".into(),
+            location: None,
+        },
+    )
+    .await?;
+    Box::pin(app.handle_event(&mut tui, &mut server, next_document_event(true).await)).await?;
+    Box::pin(app.handle_event(&mut tui, &mut server, next_document_event(false).await)).await?;
+    let pointer = side_frame(&mut app, &mut tui, Size::new(200, 15))?;
+    insta::assert_snapshot!(pointer.lines().filter_map(|row| row.split_once('│')).map(|(_, row)| row.trim()).filter_map(|row| row.split_once(' ').map(|(_, line)| line.trim())).filter(|row| row.starts_with("version ") || row.starts_with("size ")).collect::<Vec<_>>().join("
+"), @"
+    version https://git-lfs.github.com/spec/v1
+    size 123
+    ");
+    let Some(SidebarContent::Document(pointer_id)) = app.sidebar().unwrap().visible_content()
+    else {
+        panic!("the pointer preview should be visible");
+    };
+    app.sidebar_mut().remove_document(pointer_id);
+
     let child = ThreadId::new();
     app.side_threads.insert(child, SideThreadState::new(parent));
     let (stream, display) = app.chat_widget.take_side_display(/*width*/ 120);
@@ -572,7 +647,7 @@ async fn document_preview_scenario() -> Result<()> {
         .sidebar_tab_strip()
         .expect("tab strip");
     let narrow_labels = visible_sidebar_row(&tui, strip, strip.y);
-    insta::assert_snapshot!(narrow_labels, @"‹ fe…eA/g….md× fe…eB/g….md×   +");
+    insta::assert_snapshot!(narrow_labels, @"‹  fe…eA/g…md×  fe…eB/g…md×   +");
     for directory in ["feature-alpha-build", "feature-beta-build"] {
         std::fs::create_dir_all(dir.path().join(directory))?;
         std::fs::write(dir.path().join(directory).join("guide.md"), "# Guide")?;
@@ -595,7 +670,25 @@ async fn document_preview_scenario() -> Result<()> {
         .sidebar_tab_strip()
         .expect("tab strip");
     let narrow_labels = visible_sidebar_row(&tui, strip, strip.y);
-    insta::assert_snapshot!(narrow_labels, @"‹ 1:f…ld/g…md× 2:f…ld/g…md×   +");
+    insta::assert_snapshot!(narrow_labels, @"‹  1:f…ld/g…d×  2:f…ld/g…d×   +");
+    // If resolution itself fails, there is no new tab in which to show the path.
+    let tab_count = app.sidebar().unwrap().documents.len();
+    app.open_document(
+        &mut tui,
+        &mut server,
+        parent,
+        FileLink {
+            path: "~/notes.md".into(),
+            location: None,
+        },
+    )
+    .await?;
+    Box::pin(app.handle_event(&mut tui, &mut server, next_document_event(true).await)).await?;
+    assert_eq!(app.sidebar().unwrap().documents.len(), tab_count);
+    assert!(std::iter::from_fn(|| events.try_recv().ok()).any(|event| {
+        matches!(event, AppEvent::InsertHistoryCell(cell) if cell.display_lines(/*width*/ 120).iter()
+            .any(|line| line.to_string().contains("Could not open ~/notes.md:")))
+    }));
     server.shutdown().await?;
     Ok(())
 }
@@ -607,4 +700,40 @@ fn visible_sidebar_row(tui: &crate::tui::Tui, sidebar: Rect, row: u16) -> String
         .collect::<String>()
         .trim()
         .to_owned()
+}
+
+#[test]
+fn preview_error_keeps_the_filename_visible_in_a_narrow_pane() -> Result<()> {
+    let path = PathUri::parse("file:///archive/worktrees/docs/2026-09-11-tmux-attach-freeze.md")?;
+    let message = |method: &str, reason: &str| {
+        let error = codex_app_server_client::TypedRequestError::Server {
+            method: method.into(),
+            source: codex_app_server_protocol::JSONRPCErrorError {
+                code: -32603,
+                data: None,
+                message: reason.into(),
+            },
+        };
+        open_error::lines(&path, &error.into(), /*width*/ 38)
+            .iter()
+            .map(Line::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    insta::assert_snapshot!(message("fs/readFile", "No such file or directory (os error 2)"), @"
+    File not found
+
+    2026-09-11-tmux-attach-freeze.md
+    in /archive/worktrees/docs/
+
+    This file may have moved since the
+    link was added.
+    ");
+
+    let denied = message("fs/readFile", "Permission denied (os error 13)");
+    assert_eq!(denied.lines().next(), Some("Permission denied"));
+    let thread_error = message("thread/read", "No such file or directory (os error 2)");
+    assert_eq!(thread_error.lines().next(), Some("Could not open file"));
+    assert!(message("fs/readFile", "Storage offline").ends_with("Storage offline"));
+    Ok(())
 }

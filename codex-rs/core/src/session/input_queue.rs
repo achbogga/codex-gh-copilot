@@ -8,7 +8,7 @@ use codex_history::ResponseItemEnvelope;
 use codex_protocol::ThreadId;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::turn_input::TurnStartOptions;
-use codex_protocol::user_input::UserInput;
+use codex_user_input::ResolvedUserInput;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -30,6 +30,9 @@ pub struct UserInputMetadata {
     /// Optional host-assigned UUID for this particular Responses user item.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_item_uuid: Option<uuid::Uuid>,
+    /// Core-assigned handoff identity carried through the input queue.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub realtime_handoff_id: Option<uuid::Uuid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub used_dictation: Option<bool>,
     #[serde(
@@ -43,7 +46,7 @@ pub struct UserInputMetadata {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum TurnInput {
     UserInput {
-        content: Vec<UserInput>,
+        content: Vec<ResolvedUserInput>,
         client_id: Option<String>,
         #[serde(flatten)]
         metadata: UserInputMetadata,
@@ -231,38 +234,44 @@ impl InputQueue {
                 .is_some_and(|(_, _, updates)| *updates.borrow())
     }
 
-    /// Native mailbox backlog qualifies regardless of turn ID or delivery phase.
-    /// Injected mail qualifies only while its matching turn still accepts mail.
+    /// Native and injected mail qualify only while the matching turn still accepts mail.
     pub(crate) async fn should_preempt_sampling_for_mail(
         &self,
         active_turn: &Mutex<Option<ActiveTurn>>,
         sub_id: &str,
     ) -> bool {
-        if self.has_pending_mailbox_items().await {
-            return true;
-        }
+        let native_mail_pending = self.has_pending_mailbox_items().await;
         let Some(turn_state) = self.turn_state_for_sub_id(active_turn, sub_id).await else {
             return false;
         };
         let turn_state = turn_state.lock().await;
         turn_state.accepts_mailbox_delivery_for_current_turn()
-            && turn_state.pending_input.items.iter().any(|input| {
-                matches!(
-                    input,
-                    TurnInput::ResponseItem(ResponseItemEnvelope {
-                        item: ResponseItem::AgentMessage { .. },
-                        ..
-                    })
-                )
-            })
+            && (native_mail_pending
+                || turn_state.pending_input.items.iter().any(|input| {
+                    matches!(
+                        input,
+                        TurnInput::ResponseItem(ResponseItemEnvelope {
+                            item: ResponseItem::AgentMessage { .. },
+                            ..
+                        })
+                    )
+                }))
     }
 
     pub(crate) async fn has_trigger_turn_mailbox_items(&self) -> bool {
+        self.has_mailbox_items_matching(|mail| mail.trigger_turn)
+            .await
+    }
+
+    pub(crate) async fn has_mailbox_items_matching(
+        &self,
+        predicate: impl Fn(&crate::PendingAgentMessage) -> bool,
+    ) -> bool {
         self.mailbox_pending_mails
             .lock()
             .await
             .iter()
-            .any(|mail| mail.communication.trigger_turn)
+            .any(|mail| predicate(&mail.communication))
     }
 
     pub(crate) async fn drain_mailbox(&self) -> Vec<PendingMailboxCommunication> {
@@ -569,7 +578,7 @@ mod tests {
     use codex_history::CodexHarnessMetadata;
     use codex_protocol::AgentPath;
     use codex_protocol::protocol::InterAgentCommunication;
-    use codex_protocol::user_input::UserInput;
+    use codex_user_input::ResolvedUserInput;
     use pretty_assertions::assert_eq;
 
     #[test]
@@ -697,10 +706,7 @@ mod tests {
                 &turn_state,
                 vec![TurnInput::UserInput {
                     metadata: Default::default(),
-                    content: vec![UserInput::Text {
-                        text: "steer".to_string(),
-                        text_elements: Vec::new(),
-                    }],
+                    content: vec![ResolvedUserInput::text("steer".to_string())],
                     client_id: None,
                 }],
             )
@@ -789,10 +795,7 @@ mod tests {
                 &turn_state,
                 vec![TurnInput::UserInput {
                     metadata: Default::default(),
-                    content: vec![UserInput::Text {
-                        text: "already pending".to_string(),
-                        text_elements: Vec::new(),
-                    }],
+                    content: vec![ResolvedUserInput::text("already pending".to_string())],
                     client_id: None,
                 }],
             )

@@ -52,25 +52,36 @@ fn spawn_startup_thread_start(
     });
 }
 
-pub(super) async fn prepare_fresh_startup_config(
-    config: &mut Config,
-    app_server: &AppServerSession,
+pub(super) fn startup_config_cwd<'a>(
+    config: &'a Config,
+    app_server: &'a AppServerSession,
     app_server_target: &AppServerTarget,
-    cli_kv_overrides: &[(String, TomlValue)],
-    harness_overrides: &ConfigOverrides,
-    environments: &EnvironmentManager,
-) -> Result<crate::projectless::AppliedDefaults> {
-    let defaults_cwd = match app_server_target {
+) -> &'a Path {
+    match app_server_target {
         AppServerTarget::Embedded | AppServerTarget::LocalDaemon { .. } => config.cwd.as_path(),
         AppServerTarget::Remote { .. } | AppServerTarget::Cloud => {
             app_server.remote_cwd_override().unwrap_or(Path::new("."))
         }
-    };
-    let defaults = crate::config_update::read_effective_config_with_layers(
-        &app_server.request_handle(),
-        defaults_cwd.display().to_string(),
-    )
-    .await?;
+    }
+}
+
+pub(super) fn statusline_enabled(config: &codex_app_server_protocol::Config) -> bool {
+    config
+        .additional
+        .get("features")
+        .and_then(|features| features.get(Feature::TuiExtensionsStatusLine.key()))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
+
+pub(super) fn prepare_fresh_startup_config(
+    config: &mut Config,
+    app_server: &AppServerSession,
+    defaults: &crate::config_update::EffectiveConfig,
+    cli_kv_overrides: &[(String, TomlValue)],
+    harness_overrides: &ConfigOverrides,
+    environments: &EnvironmentManager,
+) -> crate::projectless::AppliedDefaults {
     super::new_session::overlay_new_session_defaults(
         config,
         &defaults.config,
@@ -82,7 +93,7 @@ pub(super) async fn prepare_fresh_startup_config(
         harness_overrides,
         app_server,
         environments,
-        &defaults,
+        defaults,
     );
     apply_managed_new_thread_defaults(
         config,
@@ -90,7 +101,7 @@ pub(super) async fn prepare_fresh_startup_config(
         cli_kv_overrides,
         harness_overrides,
     );
-    Ok(projectless)
+    projectless
 }
 
 pub(super) fn startup_model(
@@ -190,7 +201,9 @@ impl App {
             return Ok(());
         }
         self.chat_widget.pre_draw_tick();
-        self.render_chat_widget_frame(tui, tui.terminal.last_known_screen_size)?;
+        let screen_size = tui.prepare_draw_size()?;
+        self.handle_draw_pre_render(tui, screen_size)?;
+        self.render_chat_widget_frame(tui, screen_size)?;
         if self.chat_widget.has_active_modal() && self.startup_protected_input_boundary {
             self.discard_startup_modal_input(tui)?;
         }
@@ -249,6 +262,7 @@ impl App {
         tui: &mut tui::Tui,
         initial_backends: super::backend_sessions::InitialBackendSessions,
         mut config: Config,
+        statusline_metrics: crate::statusline_metrics::StatuslineMetrics,
         launch_cwd: PathBuf,
         backend_preference_context: backend_selection::BackendPreferenceContext,
         cli_kv_overrides: Vec<(String, TomlValue)>,
@@ -381,31 +395,47 @@ impl App {
                 config.model_reasoning_effort = None;
             }
         }
-        let startup_defaults = if fresh_start {
-            match startup_draft
-                .run_until(
-                    tui,
-                    prepare_fresh_startup_config(
-                        &mut config,
-                        &app_server,
-                        &app_server_target,
-                        &cli_kv_overrides,
-                        &harness_overrides,
-                        &environment_manager,
-                    ),
-                )
-                .await
-            {
-                Ok(Ok(defaults)) => defaults,
-                Ok(Err(err)) => {
-                    return shutdown_on_startup_error(app_server, &mut other_backends, err).await;
+        let cwd = startup_config_cwd(&config, &app_server, &app_server_target)
+            .display()
+            .to_string();
+        let startup_config = match startup_draft
+            .run_until(tui, async {
+                let request_handle = app_server.request_handle();
+                let read_config = crate::config_update::read_effective_config_with_optional_layers(
+                    &request_handle,
+                    cwd,
+                    /*include_layers*/ fresh_start,
+                );
+                if fresh_start {
+                    read_config.await
+                } else {
+                    tokio::time::timeout(Duration::from_secs(/*secs*/ 2), read_config).await?
                 }
-                Err(err) => {
-                    return shutdown_on_startup_error(app_server, &mut other_backends, err).await;
-                }
+            })
+            .await
+        {
+            Ok(Ok(config)) => Some(config),
+            Ok(Err(_)) if !fresh_start => None,
+            Ok(Err(err)) => {
+                return shutdown_on_startup_error(app_server, &mut other_backends, err).await;
             }
-        } else {
-            crate::projectless::AppliedDefaults::default()
+            Err(err) => {
+                return shutdown_on_startup_error(app_server, &mut other_backends, err).await;
+            }
+        };
+        let statusline_feature_enabled = startup_config
+            .as_ref()
+            .is_some_and(|response| statusline_enabled(&response.config));
+        let startup_defaults = match startup_config.as_ref() {
+            Some(defaults) if fresh_start => prepare_fresh_startup_config(
+                &mut config,
+                &app_server,
+                defaults,
+                &cli_kv_overrides,
+                &harness_overrides,
+                &environment_manager,
+            ),
+            _ => crate::projectless::AppliedDefaults::default(),
         };
         let mut launch_choices = crate::app_server_session::StartupLaunchChoices::from_launch(
             &cli_kv_overrides,
@@ -934,9 +964,11 @@ impl App {
                 .borrow_mut()
                 .continue_from(&mut startup_draft.blossom.borrow_mut());
         }
+        chat_widget.statusline_feature_enabled = statusline_feature_enabled;
         chat_widget.remote_connection = remote_connection;
         chat_widget.snapshot_local_images = app_server_target.uses_remote_workspace();
         chat_widget.thread_params_mode = app_server.thread_params_mode();
+        chat_widget.app_server_path_convention = app_server.path_convention();
         chat_widget.pending_cloud_turn_settings = app_server.pending_cloud_turn_settings();
         chat_widget.set_local_worktree_operations(!crate::uses_remote_workspace_or_environment(
             &app_server_target,
@@ -987,6 +1019,8 @@ See the Codex keymap documentation for supported actions and examples."
         let agents_overview =
             agents_overview::AgentsOverviewState::new(local_settings.tui.agents_overview_grouping);
         let mut app = Self {
+            statusline_picker: None,
+            statusline_metrics,
             provider_writes,
             feature_write_lock: Arc::default(),
             config_notification_test_generation: 0,
@@ -1054,6 +1088,7 @@ See the Codex keymap documentation for supported actions and examples."
             daemon_cli_executable,
             pending_update_action: None,
             daemon_restart: None,
+            remote_control_pending: false,
             pending_shutdown_exit_thread_id: None,
             windows_sandbox: WindowsSandboxState {
                 prompt_after_trust: should_prompt_windows_sandbox_nux_at_startup
@@ -1090,6 +1125,7 @@ See the Codex keymap documentation for supported actions and examples."
             divider_drag: None,
             pane_resize: None,
             passive_link_drag: None,
+            sidebar_press: None,
             abandoned_side_threads: HashSet::new(),
             active_thread_id: None,
             active_thread_rx: None,
@@ -1307,6 +1343,9 @@ See the Codex keymap documentation for supported actions and examples."
         let mut settled_size_tags = crate::terminal_size_telemetry::tags(last_screen_size);
         let mut pending_resize: Option<(ratatui::layout::Size, Instant)> = None;
         let mut reconnect = None;
+        let mut cloud_environment_picker: Option<
+            futures::future::LocalBoxFuture<'static, crate::bottom_pane::SelectionViewParams>,
+        > = None;
         let mut waiting_for_initial_session_configured = wait_for_initial_session_configured;
         let mut waiting_for_initial_session_header = true;
 
@@ -1360,14 +1399,32 @@ See the Codex keymap documentation for supported actions and examples."
                 }
                 backends.replay_ready_side_startup(&app);
                 let multi_backend = app.config.features.enabled(Feature::TuiMultiBackend);
-                let next_backend = if multi_backend && app.can_cycle_conversation_backend() {
-                    backends.next_listening_backend(displayed_owner)
-                } else {
-                    None
-                };
+                let draft = multi_backend.then(|| app.backend_draft()).flatten();
+                let next_backend = draft
+                    .is_some()
+                    .then(|| backends.next_listening_backend(displayed_owner))
+                    .flatten();
                 let current_label =
                     next_backend.and_then(|_| backends.displayed_name(&app.app_server_target));
-                app.chat_widget.set_new_backend_control(current_label);
+                let cloud_draft = draft.filter(|_| {
+                    app.app_server_target == AppServerTarget::Cloud
+                        && backends.is_listening(displayed_owner)
+                });
+                let environment_name = cloud_draft.map(|id| {
+                    app.agents_overview
+                        .draft_cloud_environments
+                        .get(&id)
+                        .filter(|(owner, _)| *owner == displayed_owner)
+                        .map(|(_, env)| {
+                            crate::terminal_title::sanitize_terminal_title(
+                                &env.name,
+                                crate::terminal_title::TitleEncoding::Unicode,
+                            )
+                        })
+                        .unwrap_or_else(|| "Default".into())
+                });
+                app.chat_widget
+                    .set_new_backend_control(current_label, environment_name);
                 if !backends.is_listening(displayed_owner)
                     && !app.pending_startup_thread_start
                     && !app.reconnect.offline
@@ -1522,6 +1579,13 @@ See the Codex keymap documentation for supported actions and examples."
                         }
                         AppRunControl::Continue
                     }
+                    Some(view) = futures::future::OptionFuture::from(cloud_environment_picker.as_mut()) => {
+                        cloud_environment_picker = None;
+                        app.chat_widget.replace_selection_view_if_present(
+                            super::cloud_environments::LOADING_VIEW_ID, view,
+                        );
+                        AppRunControl::Continue
+                    }
                     Some(event) = app.saved_openings.next_event(&mut app_event_rx) => {
                         if let AppEvent::ArchiveFinished { backend_id, thread_id, result: Ok(()) } = &event
                             && *backend_id != displayed_owner
@@ -1529,7 +1593,35 @@ See the Codex keymap documentation for supported actions and examples."
                         {
                             backends.parked_inputs_mut(slot).remove(thread_id);
                         }
+                        if matches!(&event, AppEvent::RemoteControl(_) | AppEvent::RemoteControlForBackend { .. } | AppEvent::RemoteControlFinished { .. }) {
+                            super::remote_control::handle(&mut app, &backends, event);
+                            if app.chat_widget.has_active_modal()
+                                && let Err(err) = app.render_startup_frame(tui, &app_event_rx)
+                            {
+                                break Err(err);
+                            }
+                            continue;
+                        }
                         let switch_backend = match &event {
+                            AppEvent::ChooseCloudEnvironment => {
+                                if let Some(source) = cloud_draft
+                                    && app.chat_widget.no_modal_or_popup_active()
+                                    && let AppServerRequestHandle::Cloud(handle) = backends.session_at(displayed_session).request_handle()
+                                {
+                                    app.chat_widget.show_selection_view(super::cloud_environments::loading_view());
+                                    cloud_environment_picker = Some(Box::pin(async move {
+                                        let environments = handle.list_saved_environments().await.map_err(|error| error.to_string());
+                                        super::cloud_environments::cloud_environment_picker(environments, source)
+                                    }));
+                                }
+                                continue;
+                            }
+                            AppEvent::StartCloudConversation { source, saved_environment }
+                                if cloud_draft == Some(*source) =>
+                            {
+                                Some((displayed_owner, NewBackendSession::ChangeCloudEnvironment(saved_environment.clone())))
+                            }
+                            AppEvent::StartCloudConversation { .. } => continue,
                             AppEvent::ChooseNewSessionCheckout { name } | AppEvent::NewSession { name }
                                 if multi_backend => app.other_new_session_backend(&backends).await
                                     .map(|owner| (owner, NewBackendSession::Fresh { name: name.clone() })),
@@ -1565,6 +1657,7 @@ See the Codex keymap documentation for supported actions and examples."
                             AppEvent::SavedSideChatsLoaded { backend_id, .. }
                             | AppEvent::SidebarDocumentResolved { backend_id, .. }
                             | AppEvent::SidebarDocumentLoaded { backend_id, .. }
+                            | AppEvent::SidebarFilesLoaded { backend_id, .. }
                             | AppEvent::StartupThreadStarted { backend_id, .. } => {
                                 backends.slot(*backend_id).unwrap_or(displayed_session)
                             }

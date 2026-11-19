@@ -141,7 +141,7 @@ impl LocalAgentControl {
     pub(crate) async fn spawn_agent_with_metadata(
         &self,
         config: Config,
-        initial_input: Vec<UserInput>,
+        initial_input: Vec<ResolvedUserInput>,
         source: SessionSource,
         options: SpawnAgentOptions,
     ) -> CodexResult<LiveAgent> {
@@ -181,8 +181,8 @@ async fn test_config() -> (TempDir, Config) {
     test_config_with_cli_overrides(Vec::new()).await
 }
 
-fn text_input(text: &str) -> Vec<UserInput> {
-    vec![UserInput::Text {
+fn text_input(text: &str) -> Vec<ResolvedUserInput> {
+    vec![ResolvedUserInput::Text {
         text: text.to_string(),
         text_elements: Vec::new(),
     }]
@@ -584,14 +584,7 @@ async fn assert_thread_not_loaded(manager: &ThreadManager, thread_id: ThreadId) 
 async fn send_input_errors_when_manager_dropped() {
     let control = LocalAgentControl::default();
     let err = control
-        .send_input(
-            ThreadId::new(),
-            vec![UserInput::Text {
-                text: "hello".to_string(),
-                text_elements: Vec::new(),
-            }],
-            Default::default(),
-        )
+        .send_input(ThreadId::new(), text_input("hello"), Default::default())
         .await
         .expect_err("send_input should fail without a manager");
     assert_eq!(
@@ -880,10 +873,14 @@ async fn cancelled_spawn_after_input_admission_discards_child() {
     });
     let child = poll_fn(|cx| {
         assert!(spawn.as_mut().poll(cx).is_pending());
-        let threads = state.threads.try_read().expect("uncontended manager");
+        let threads = state.threads.state.try_read().expect("uncontended manager");
         // On this single-thread runtime the session loop cannot consume the first
         // input until this poll returns. Leave spawn waiting for its admission reply.
-        match threads.values().find(|thread| !thread.io.tx_sub.is_empty()) {
+        match threads
+            .threads
+            .values()
+            .find(|thread| !thread.io.tx_sub.is_empty())
+        {
             Some(child) => Poll::Ready(Arc::clone(child)),
             None => Poll::Pending,
         }
@@ -971,14 +968,7 @@ async fn send_input_errors_when_thread_missing() {
     let thread_id = ThreadId::new();
     let err = harness
         .control
-        .send_input(
-            thread_id,
-            vec![UserInput::Text {
-                text: "hello".to_string(),
-                text_elements: Vec::new(),
-            }],
-            Default::default(),
-        )
+        .send_input(thread_id, text_input("hello"), Default::default())
         .await
         .expect_err("send_input should fail for missing thread");
     assert_matches!(
@@ -1063,10 +1053,7 @@ async fn send_input_submits_user_message() {
             caller: ThreadId::new(),
             target: AgentTarget::Id(thread_id),
             resume_config: harness.config.clone(),
-            input: AgentInput::UserInput(vec![UserInput::Text {
-                text: "hello from tests".to_string(),
-                text_elements: Vec::new(),
-            }]),
+            input: AgentInput::UserInput(text_input("hello from tests")),
             start_options: Default::default(),
         })
         .await
@@ -1204,10 +1191,10 @@ async fn cancelled_v2_send_finishes_reload_registration() {
     let mut send = control.send(followup_request("cancelled follow-up"));
     let (reloaded, pin_blocker) = poll_fn(|cx| {
         assert!(send.as_mut().poll(cx).is_pending());
-        let Ok(threads) = state.threads.try_read() else {
+        let Ok(threads) = state.threads.state.try_read() else {
             return Poll::Pending;
         };
-        let Some(reloaded) = threads.get(&child_id).cloned() else {
+        let Some(reloaded) = threads.threads.get(&child_id).cloned() else {
             return Poll::Pending;
         };
         // On this single-thread runtime, intercept publication before the detached

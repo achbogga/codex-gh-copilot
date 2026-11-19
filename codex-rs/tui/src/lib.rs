@@ -219,6 +219,7 @@ mod session_start;
 mod session_state;
 mod shortcut_help;
 mod sidebar_chooser;
+mod sidebar_image;
 mod sidebar_tab_strip;
 mod skills_helpers;
 mod slash_command;
@@ -231,6 +232,7 @@ mod startup_presentation;
 mod startup_recovery;
 mod status;
 mod status_indicator_widget;
+mod statusline_metrics;
 mod statusline_provider;
 mod streaming;
 mod style;
@@ -249,6 +251,7 @@ mod text_selection;
 mod theme_picker;
 mod thread_color;
 mod thread_label;
+mod thread_links;
 mod thread_transcript;
 mod token_usage;
 mod tool_output;
@@ -1160,6 +1163,7 @@ async fn run_ratatui_app(
     mut app_server_target: AppServerTarget,
     remote_cwd_override: Option<PathBuf>,
     initial_config: Config,
+    statusline_metrics: statusline_metrics::StatuslineMetrics,
     manually_selected_oss_provider: Option<String>,
     overrides: ConfigOverrides,
     cli_kv_overrides: Vec<(String, toml::Value)>,
@@ -2294,6 +2298,7 @@ async fn run_ratatui_app(
         &mut tui,
         initial_backends,
         config,
+        statusline_metrics,
         current_cwd.to_path_buf(),
         backend_preference_context,
         cli_kv_overrides.clone(),

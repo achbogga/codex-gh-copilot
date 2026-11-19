@@ -645,7 +645,7 @@ async fn submission_preserves_text_elements_and_local_images() {
         approvals_reviewer: ApprovalsReviewer::User,
         permission_profile: PermissionProfile::read_only(),
         active_permission_profile: None,
-        cwd: test_path_buf("/home/user/project").abs(),
+        cwd: test_path_buf("/home/user/project").abs().into(),
         runtime_workspace_roots: Vec::new(),
         instruction_source_paths: Vec::new(),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
@@ -758,7 +758,7 @@ async fn submission_includes_configured_active_permission_profile() {
         approvals_reviewer: ApprovalsReviewer::User,
         permission_profile: expected_permission_profile,
         active_permission_profile: Some(expected_active_permission_profile.clone()),
-        cwd: test_path_buf("/home/user/project").abs(),
+        cwd: test_path_buf("/home/user/project").abs().into(),
         runtime_workspace_roots: Vec::new(),
         instruction_source_paths: Vec::new(),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
@@ -817,7 +817,7 @@ async fn submission_omits_active_permission_profile_for_legacy_snapshot() {
         approvals_reviewer: ApprovalsReviewer::User,
         permission_profile: expected_permission_profile,
         active_permission_profile: None,
-        cwd: test_path_buf("/home/user/project").abs(),
+        cwd: test_path_buf("/home/user/project").abs().into(),
         runtime_workspace_roots: Vec::new(),
         instruction_source_paths: Vec::new(),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
@@ -866,7 +866,7 @@ async fn submission_with_remote_and_local_images_keeps_local_placeholder_numberi
         approvals_reviewer: ApprovalsReviewer::User,
         permission_profile: PermissionProfile::read_only(),
         active_permission_profile: None,
-        cwd: test_path_buf("/home/user/project").abs(),
+        cwd: test_path_buf("/home/user/project").abs().into(),
         runtime_workspace_roots: Vec::new(),
         instruction_source_paths: Vec::new(),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
@@ -970,7 +970,7 @@ async fn enter_with_only_remote_images_submits_user_turn() {
         approvals_reviewer: ApprovalsReviewer::User,
         permission_profile: PermissionProfile::read_only(),
         active_permission_profile: None,
-        cwd: test_path_buf("/home/user/project").abs(),
+        cwd: test_path_buf("/home/user/project").abs().into(),
         runtime_workspace_roots: Vec::new(),
         instruction_source_paths: Vec::new(),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
@@ -1043,7 +1043,7 @@ async fn shift_enter_with_only_remote_images_does_not_submit_user_turn() {
         approvals_reviewer: ApprovalsReviewer::User,
         permission_profile: PermissionProfile::read_only(),
         active_permission_profile: None,
-        cwd: test_path_buf("/home/user/project").abs(),
+        cwd: test_path_buf("/home/user/project").abs().into(),
         runtime_workspace_roots: Vec::new(),
         instruction_source_paths: Vec::new(),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
@@ -1088,7 +1088,7 @@ async fn enter_with_only_remote_images_does_not_submit_when_modal_is_active() {
         approvals_reviewer: ApprovalsReviewer::User,
         permission_profile: PermissionProfile::read_only(),
         active_permission_profile: None,
-        cwd: test_path_buf("/home/user/project").abs(),
+        cwd: test_path_buf("/home/user/project").abs().into(),
         runtime_workspace_roots: Vec::new(),
         instruction_source_paths: Vec::new(),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
@@ -1133,7 +1133,7 @@ async fn enter_with_only_remote_images_does_not_submit_when_input_disabled() {
         approvals_reviewer: ApprovalsReviewer::User,
         permission_profile: PermissionProfile::read_only(),
         active_permission_profile: None,
-        cwd: test_path_buf("/home/user/project").abs(),
+        cwd: test_path_buf("/home/user/project").abs().into(),
         runtime_workspace_roots: Vec::new(),
         instruction_source_paths: Vec::new(),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
@@ -1181,7 +1181,7 @@ async fn submission_prefers_selected_duplicate_skill_path() {
         approvals_reviewer: ApprovalsReviewer::User,
         permission_profile: PermissionProfile::read_only(),
         active_permission_profile: None,
-        cwd: test_path_buf("/home/user/project").abs(),
+        cwd: test_path_buf("/home/user/project").abs().into(),
         runtime_workspace_roots: Vec::new(),
         instruction_source_paths: Vec::new(),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
@@ -1472,6 +1472,12 @@ async fn startup_draft_handoff_preserves_cursor_and_large_paste() {
     chat.restore_startup_draft(startup_draft.clone());
 
     assert_eq!(chat.bottom_pane.composer_draft_snapshot(), startup_draft);
+    chat.handle_key_event(KeyEvent::from(KeyCode::F(7)));
+    assert!(chat.bottom_pane.composer_is_empty());
+    chat.handle_key_event(KeyEvent::new(KeyCode::F(7), KeyModifiers::SHIFT));
+    let mut restored = chat.bottom_pane.composer_draft_snapshot();
+    restored.last_composer_activity_at = startup_draft.last_composer_activity_at;
+    assert_eq!(restored, startup_draft);
 }
 
 #[tokio::test]
@@ -1497,6 +1503,8 @@ async fn startup_draft_handoff_merges_existing_prompt_images_and_large_pastes() 
     );
     let initial_paste = "y".repeat(/*n*/ 1_001);
     chat.bottom_pane.handle_paste(initial_paste.clone());
+    chat.bottom_pane
+        .set_composer_cursor(image_placeholder.len() + 1);
     let existing_draft = chat.bottom_pane.composer_draft_snapshot();
     let existing_placeholder = existing_draft.pending_pastes[0].0.clone();
 
@@ -1526,6 +1534,15 @@ async fn startup_draft_handoff_merges_existing_prompt_images_and_large_pastes() 
             }],
         )
     );
+    let merged = chat.bottom_pane.composer_draft_snapshot();
+    chat.handle_key_event(KeyEvent::from(KeyCode::F(7)));
+    let mut undone = chat.bottom_pane.composer_draft_snapshot();
+    undone.last_composer_activity_at = existing_draft.last_composer_activity_at;
+    assert_eq!(undone, existing_draft);
+    chat.handle_key_event(KeyEvent::new(KeyCode::F(7), KeyModifiers::SHIFT));
+    let mut redone = chat.bottom_pane.composer_draft_snapshot();
+    redone.last_composer_activity_at = merged.last_composer_activity_at;
+    assert_eq!(redone, merged);
 }
 
 #[tokio::test]

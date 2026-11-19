@@ -200,7 +200,7 @@ pub(crate) async fn apply_bespoke_event_handling(
                 .await;
         }
         EventMsg::TurnComplete(turn_complete_event) => {
-            respond_to_pending_interrupts(&thread_state, &outgoing).await;
+            respond_to_pending_interrupts(&event_turn_id, &thread_state, &outgoing).await;
             if finishes_latest_turn {
                 let turn_failed = thread_state
                     .lock()
@@ -485,7 +485,7 @@ pub(crate) async fn apply_bespoke_event_handling(
                 if matches!(
                     &item.content,
                     codex_protocol::realtime::RealtimeItemContent::TurnInputAccepted { .. }
-                        | codex_protocol::realtime::RealtimeItemContent::SessionEndInputSaved { .. }
+                        | codex_protocol::realtime::RealtimeItemContent::SessionInputSaved { .. }
                 ) => {}
             RealtimeEvent::HistoryItemStarted(item) => {
                 outgoing
@@ -1093,12 +1093,7 @@ pub(crate) async fn apply_bespoke_event_handling(
                 return;
             }
 
-            let turn_error = TurnError {
-                misalignment: ev.misalignment.map(Into::into),
-                message: ev.message,
-                codex_error_info: ev.codex_error_info.map(V2CodexErrorInfo::from),
-                additional_details: None,
-            };
+            let turn_error = TurnError::from(ev);
             handle_error_notification(
                 conversation_id,
                 &event_turn_id,
@@ -1239,12 +1234,7 @@ pub(crate) async fn apply_bespoke_event_handling(
                     TurnCompletionMetadata {
                         status: TurnStatus::Interrupted,
                         root_turn_id: aborted.root_turn_id,
-                        error: aborted.error.map(|error| TurnError {
-                            message: error.message,
-                            codex_error_info: error.codex_error_info.map(Into::into),
-                            misalignment: error.misalignment.map(Into::into),
-                            additional_details: None,
-                        }),
+                        error: aborted.error.map(TurnError::from),
                         last_agent_message: None,
                         started_at: aborted.started_at,
                         completed_at: aborted.completed_at,
@@ -1297,7 +1287,7 @@ pub(crate) async fn apply_bespoke_event_handling(
         }
         // If this is a TurnAborted, reply to any pending interrupt requests.
         EventMsg::TurnAborted(turn_aborted_event) => {
-            respond_to_pending_interrupts(&thread_state, &outgoing).await;
+            respond_to_pending_interrupts(&event_turn_id, &thread_state, &outgoing).await;
 
             if finishes_latest_turn {
                 thread_watch_manager
@@ -1330,7 +1320,13 @@ pub(crate) async fn apply_bespoke_event_handling(
             let (mut config_snapshot, selected_service_tier) =
                 conversation.resume_config_snapshot().await;
             config_snapshot.service_tier = selected_service_tier;
-            let thread_settings = thread_settings_from_config_snapshot(&config_snapshot);
+            let thread_settings = match thread_settings_from_config_snapshot(&config_snapshot) {
+                Ok(settings) => settings,
+                Err(error) => {
+                    tracing::warn!(%conversation_id, message = %error.message, "cannot publish thread settings");
+                    return;
+                }
+            };
             let changed = {
                 let mut state = thread_state.lock().await;
                 state.note_thread_settings(thread_settings.clone())
@@ -1635,12 +1631,7 @@ async fn handle_turn_interrupted(
         TurnCompletionMetadata {
             status: TurnStatus::Interrupted,
             root_turn_id: turn_aborted_event.root_turn_id,
-            error: turn_aborted_event.error.map(|error| TurnError {
-                message: error.message,
-                codex_error_info: error.codex_error_info.map(Into::into),
-                misalignment: error.misalignment.map(Into::into),
-                additional_details: None,
-            }),
+            error: turn_aborted_event.error.map(TurnError::from),
             last_agent_message: None,
             started_at: turn_summary.started_at,
             completed_at: turn_aborted_event.completed_at,
@@ -1652,12 +1643,17 @@ async fn handle_turn_interrupted(
 }
 
 async fn respond_to_pending_interrupts(
+    event_turn_id: &str,
     thread_state: &Arc<Mutex<ThreadState>>,
     outgoing: &ThreadScopedOutgoingMessageSender,
 ) {
     let pending = {
         let mut state = thread_state.lock().await;
-        std::mem::take(&mut state.pending_interrupts)
+        state
+            .pending_interrupts
+            .extract_if(.., |(turn_id, _)| turn_id == event_turn_id)
+            .map(|(_, request_id)| request_id)
+            .collect::<Vec<_>>()
     };
 
     for request_id in pending {

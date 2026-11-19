@@ -53,10 +53,10 @@ use crate::style::accent_color;
 use crate::style::table_separator_style;
 use crate::terminal_hyperlinks::HyperlinkLine;
 use crate::terminal_hyperlinks::TerminalHyperlink;
+use crate::terminal_hyperlinks::markdown_destination;
 use crate::terminal_hyperlinks::remap_wrapped_line;
 use crate::terminal_hyperlinks::source_span_width;
 use crate::terminal_hyperlinks::visible_lines;
-use crate::terminal_hyperlinks::web_destination;
 use crate::width::display_width;
 use crate::wrapping::RtOptions;
 use crate::wrapping::word_wrap_line;
@@ -84,6 +84,7 @@ mod local_links;
 pub(crate) use local_links::FileLink;
 pub(crate) use local_links::SourceLocation;
 pub(crate) use local_links::is_markdown_file;
+pub(crate) use local_links::sidebar_file_link;
 mod math;
 mod mermaid;
 pub(crate) mod preferences;
@@ -109,6 +110,24 @@ mod list_spacing_tests;
 #[path = "markdown_render/task_list_tests.rs"]
 mod task_list_tests;
 pub(crate) use web_links::hide_web_link_destination;
+
+/// Find file destinations in source order, including Codex file citations.
+pub(crate) fn file_links(input: &str, cwd: Option<&Path>) -> Vec<FileLink> {
+    let options = Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TABLES;
+    let directives = InlineDirectives::new(input, options);
+    directives
+        .events(
+            Parser::new_ext(&directives.markdown, options).into_offset_iter(),
+            cwd,
+        )
+        .filter_map(|(event, _)| match event {
+            Event::Start(Tag::Link { dest_url, .. } | Tag::Image { dest_url, .. }) => {
+                sidebar_file_link(&dest_url)
+            }
+            _ => None,
+        })
+        .collect()
+}
 
 pub(crate) fn hide_reader_link_destination(destination: &str) -> bool {
     hide_web_link_destination(destination) || local_links::sidebar_file_link(destination).is_some()
@@ -2291,7 +2310,7 @@ impl<'a, 'policy> Writer<'a, 'policy> {
 
     fn style_link_label(&mut self, mut span: Span<'static>) -> Span<'static> {
         if let Some(link) = self.link.as_mut()
-            && (link.style_label || web_destination(&link.destination).is_some())
+            && (link.style_label || markdown_destination(&link.destination).is_some())
         {
             link.has_visible_label |=
                 !span.content.trim().is_empty() && display_width(&span.content) > 0;
@@ -2340,7 +2359,7 @@ impl<'a, 'policy> Writer<'a, 'policy> {
                 self.pop_inline_style();
             }
             if link.show_destination
-                || (!link.has_visible_label && web_destination(&link.destination).is_some())
+                || (!link.has_visible_label && markdown_destination(&link.destination).is_some())
             {
                 // Link destinations are rendered as " (url)" suffixes. When parsing table cells,
                 // append the suffix into the active cell buffer rather than the outer paragraph
@@ -2430,7 +2449,7 @@ impl<'a, 'policy> Writer<'a, 'policy> {
 
     fn push_link_target(&mut self, span: Span<'static>, destination: &str, source: usize) {
         let mut target = HyperlinkLine::default();
-        if let Some(link) = local_links::sidebar_file_link(destination) {
+        if let Some(link) = sidebar_file_link(destination) {
             let width = span_width(&span);
             target.line.push_span(span);
             target
@@ -2632,7 +2651,7 @@ impl<'a, 'policy> Writer<'a, 'policy> {
             if let Some(destination) = self
                 .link
                 .as_ref()
-                .and_then(|link| web_destination(&link.destination))
+                .and_then(|link| markdown_destination(&link.destination))
             {
                 // Inline code and HTML retain source columns until the transcript expands tabs.
                 let start = self.source_columns.measure(line, source_span_width);
@@ -2675,7 +2694,7 @@ impl<'a, 'policy> Writer<'a, 'policy> {
         let destination = self
             .link
             .as_ref()
-            .and_then(|link| web_destination(&link.destination));
+            .and_then(|link| markdown_destination(&link.destination));
         if let Some(path) = self.label_document_path() {
             self.document_label_span(span, path)
         } else if let Some(destination) = destination {

@@ -94,6 +94,7 @@ struct VisibleRow {
 /// Shared scrolling and interaction state for compact and detailed transcript presentations.
 pub(crate) struct TranscriptView {
     pub(crate) image_protocol: Option<crate::pets::ImageProtocol>,
+    pub(crate) agent_links: Option<crate::backend_id::BackendId>,
     pub(crate) document_links: bool,
     pub(crate) mouse_scroll_speed: f64,
     pending_mouse_scroll: f64,
@@ -137,6 +138,7 @@ impl Default for TranscriptView {
     fn default() -> Self {
         Self {
             image_protocol: None,
+            agent_links: None,
             document_links: false,
             mouse_scroll_speed: 1.0,
             pending_mouse_scroll: 0.0,
@@ -179,6 +181,17 @@ impl Default for TranscriptView {
 }
 
 impl TranscriptView {
+    pub(crate) fn can_scroll_without_refresh(
+        &self,
+        cells: &[Arc<dyn HistoryCell>],
+        live_key: Option<ActiveCellTranscriptKey>,
+    ) -> bool {
+        !self.area.is_empty()
+            && !self.cache.has_mutable_source()
+            && self.last_tail == cells.last().map(EntryKey::cell)
+            && self.live_key.map(|(_, key)| key) == live_key
+    }
+
     /// Rows left after the last render, including all startup notices and live entries.
     /// Callers can paint temporary UI here without changing selection or saved history.
     pub(crate) fn remaining_area(&self) -> Rect {
@@ -314,6 +327,9 @@ impl TranscriptView {
             };
             let row_area = Rect::new(area.x, y, area.width, /*height*/ 1);
             layout.render(row_area, buf, row);
+            if self.agent_links.is_some() {
+                layout.underline_agent_links(row_area, buf, row);
+            }
             self.render_disclosure(&activity_ids, &layout, row, row_area, buf);
             if self.highlight == Some(index) && self.selection.is_none() && !self.search.is_active()
             {
@@ -439,8 +455,14 @@ impl TranscriptView {
             if skip >= rows.len() {
                 continue;
             }
+            let image_indent = if visible.layout.image_left_aligned {
+                // Match the two-column prefix the assistant's Markdown uses.
+                2
+            } else {
+                self.area.width.saturating_sub(image.columns) / 2
+            };
             let area = Rect::new(
-                self.area.x + self.area.width.saturating_sub(image.columns) / 2,
+                self.area.x + image_indent,
                 entry_y + skip as u16,
                 image.columns,
                 (rows.len() - skip) as u16,
@@ -450,6 +472,7 @@ impl TranscriptView {
                 area,
                 first_row: visible.row.saturating_sub(image_start),
                 file: None,
+                terminal_id: None,
             });
         }
         placements
@@ -681,8 +704,7 @@ impl TranscriptView {
         }
         // Anchor visible content, not a hidden header that stays ahead of every older page.
         let index = self.next_nonempty(cells, index).unwrap_or(index);
-        let bottom = self.bottom_start(cells);
-        if rows > 0 && (index, row) >= bottom {
+        if rows > 0 && (index, row) >= self.bottom_start(cells) {
             if self.selection.is_none() && !self.search.is_active() {
                 self.jump_to_latest();
             } else {

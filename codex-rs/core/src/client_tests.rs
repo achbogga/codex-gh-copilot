@@ -12,6 +12,7 @@ use super::X_CODEX_PARENT_THREAD_ID_HEADER;
 use super::X_CODEX_TURN_METADATA_HEADER;
 use super::X_CODEX_WINDOW_ID_HEADER;
 use super::X_OPENAI_SUBAGENT_HEADER;
+use super::sampling_result_destination;
 use crate::AttestationContext;
 use crate::AttestationProvider;
 use crate::GenerateAttestationFuture;
@@ -73,6 +74,7 @@ use codex_protocol_test_support::uuid_v7_item_id_generator_for_test;
 use codex_rollout_trace::ExecutionStatus;
 use codex_rollout_trace::InferenceTraceAttempt;
 use codex_rollout_trace::InferenceTraceContext;
+use codex_rollout_trace::RawPayloadKind;
 use codex_rollout_trace::RawTraceEventPayload;
 use codex_rollout_trace::RolloutTrace;
 use codex_rollout_trace::TraceWriter;
@@ -445,12 +447,38 @@ async fn client_setup_rebuilds_chatgpt_refresh_but_rejects_account_switches() {
             .current_client_setup(super::ClientRouting::ConfiguredProvider)
             .await;
         if expected_calls == 2 {
-            let setup = result.unwrap();
+            let mut setup = result.unwrap();
             let mut headers = http::HeaderMap::new();
             setup.api_auth.add_auth_headers(&mut headers).unwrap();
             assert_eq!(
                 headers.get(http::header::AUTHORIZATION).unwrap(),
                 &format!("Bearer {refreshed_token}")
+            );
+            let empty = http::HeaderMap::new();
+            // A configured provider using the same ChatGPT credentials cannot receive results.
+            assert_eq!(
+                sampling_result_destination(&setup, /*include_internal*/ true, &empty),
+                None
+            );
+            setup.api_provider.base_url = codex_model_provider_info::CHATGPT_CODEX_BASE_URL.into();
+            for (internal, response_headers, owner) in [
+                (true, &empty, setup.auth_owner.clone()),
+                (false, &empty, None),
+                (true, &headers, None),
+            ] {
+                assert_eq!(
+                    sampling_result_destination(&setup, internal, response_headers)
+                        .map(|destination| destination.owner),
+                    owner
+                );
+            }
+            setup.api_provider.headers.insert(
+                "openai-organization",
+                http::HeaderValue::from_static("another-organization"),
+            );
+            assert_eq!(
+                sampling_result_destination(&setup, /*include_internal*/ true, &empty),
+                None,
             );
             assert_eq!(setup.auth.unwrap().get_token().unwrap(), refreshed_token);
             assert_eq!(
@@ -1444,7 +1472,9 @@ where
     }
 }
 
-fn started_inference_attempt(temp: &TempDir) -> anyhow::Result<InferenceTraceAttempt> {
+fn inference_trace_fixture(
+    temp: &TempDir,
+) -> anyhow::Result<(Arc<TraceWriter>, InferenceTraceAttempt)> {
     let writer = Arc::new(TraceWriter::create(
         temp.path(),
         "trace-1".to_string(),
@@ -1468,7 +1498,11 @@ fn started_inference_attempt(temp: &TempDir) -> anyhow::Result<InferenceTraceAtt
         "gpt-test".to_string(),
         "test-provider".to_string(),
     );
-    let attempt = inference_trace.start_attempt();
+    Ok((writer, inference_trace.start_attempt()))
+}
+
+fn started_inference_attempt(temp: &TempDir) -> anyhow::Result<InferenceTraceAttempt> {
+    let (writer, attempt) = inference_trace_fixture(temp)?;
     let request = json!({
         "model": "gpt-test",
         "input": [{
@@ -1477,12 +1511,75 @@ fn started_inference_attempt(temp: &TempDir) -> anyhow::Result<InferenceTraceAtt
             "content": [{"type": "input_text", "text": "hello"}]
         }],
     });
-    attempt.record_started(serde_json::to_vec(&request)?, Arc::new(request), || {
-        Ok(None)
-    });
+    attempt.record_started(
+        serde_json::to_vec(&request)?,
+        Arc::new(request),
+        Vec::new(),
+        || Ok(None),
+    );
     // Cancellation tests can start replaying as soon as this helper returns.
     writer.flush()?;
     Ok(attempt)
+}
+
+#[tokio::test]
+async fn prepared_prompt_trace_respects_connector_only_capture() -> anyhow::Result<()> {
+    let mut bound =
+        ExecutedToolCall::new("mcp__codex_apps__search".into(), json!({"query": "docs"}));
+    bound.set_tool_result_metadata(
+        ToolResultMetadata::default().with_result_id(Some(uuid::Uuid::new_v4())),
+    );
+    let unbound = ExecutedToolCall::new(
+        "exec_command".into(),
+        json!({"cmd": "unbound-shell-argument"}),
+    );
+    let mut item = ResponseItem::from(ResponseInputItem::CustomToolCallOutput {
+        call_id: "exec".into(),
+        name: None,
+        output: FunctionCallOutputPayload::from_text("done".into()),
+    });
+    item.append_executed_tool_calls(vec![unbound.clone(), bound.clone()]);
+    let prompt = Arc::new(Prompt {
+        input: vec![item],
+        ..Default::default()
+    });
+
+    for general in [false, true] {
+        let mut features = codex_features::Features::default();
+        features.enable(codex_features::Feature::ConnectorToolResultPassthrough);
+        if general {
+            features.enable(codex_features::Feature::ExecutedToolCallMetadata);
+        }
+        let mut client = test_model_client(SessionSource::Cli);
+        client.executed_tool_calls = Some(crate::tools::ExecutedToolCalls::new(
+            &features,
+            &codex_history::InitialHistory::New,
+        ));
+        let temp = TempDir::new()?;
+        let (writer, attempt) = inference_trace_fixture(&temp)?;
+        let prepared = client.prepared_prompt_for_trace(&attempt, &prompt);
+        attempt.record_started(br#"{"input":[]}"#, prepared, Vec::new(), || Ok(None));
+        writer.flush()?;
+        let rollout = replay_bundle(temp.path())?;
+        let payload = rollout
+            .raw_payloads
+            .values()
+            .find(|p| p.kind == RawPayloadKind::PreparedPrompt)
+            .expect("prepared prompt payload");
+        let recorded: serde_json::Value = serde_json::from_slice(
+            codex_rollout_trace::PayloadReader::new(temp.path()).read(payload)?,
+        )?;
+        let expected = if general {
+            json!([unbound, bound])
+        } else {
+            json!([bound])
+        };
+        assert_eq!(
+            recorded["input"][0]["internal_chat_message_metadata_passthrough"]["executed_tool_calls"],
+            expected
+        );
+    }
+    Ok(())
 }
 
 fn output_message(id: &str, text: &str) -> ResponseItem {
@@ -1510,6 +1607,15 @@ async fn replay_until_cancelled(temp: &TempDir) -> anyhow::Result<RolloutTrace> 
             .next()
             .expect("inference should be reduced");
         if inference.execution.status == ExecutionStatus::Cancelled {
+            // Cancellation publishes one partial response. Prepared prompts can index shared child records.
+            assert_eq!(
+                rollout
+                    .raw_payloads
+                    .values()
+                    .filter(|p| p.kind == RawPayloadKind::InferenceResponse)
+                    .count(),
+                1
+            );
             return Ok(rollout);
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -1811,7 +1917,6 @@ async fn dropped_response_stream_traces_cancelled_partial_output() -> anyhow::Re
         rollout.threads["thread-root"].conversation_item_ids,
         inference.request_item_ids
     );
-    assert_eq!(rollout.raw_payloads.len(), 3);
 
     Ok(())
 }
@@ -2084,7 +2189,6 @@ async fn dropped_backpressured_response_stream_traces_cancelled_partial_output()
 
     assert_eq!(inference.execution.status, ExecutionStatus::Cancelled);
     assert_eq!(inference.response_item_ids.len(), 1);
-    assert_eq!(rollout.raw_payloads.len(), 3);
 
     Ok(())
 }

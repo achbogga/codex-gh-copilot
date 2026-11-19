@@ -74,6 +74,7 @@ impl std::fmt::Debug for TerminalHyperlink {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum DestinationKind {
+    Agent(codex_protocol::ThreadId),
     Web,
     /// A generated visualization, validated workspace artifact, or locally viewed image.
     TrustedFile,
@@ -83,13 +84,16 @@ enum DestinationKind {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum ReaderLink {
+    Agent(codex_protocol::ThreadId),
     External(String),
     Document(FileLink),
 }
 
+#[cfg(test)]
 impl ReaderLink {
     pub(crate) fn into_destination(self) -> String {
         match self {
+            Self::Agent(id) => format!("codex-agent:{id}"),
             Self::External(url) => url,
             Self::Document(link) => link.path,
         }
@@ -202,6 +206,22 @@ impl TerminalHyperlink {
         }
     }
 
+    pub(crate) fn agent(columns: Range<usize>, id: codex_protocol::ThreadId) -> Self {
+        Self {
+            columns,
+            destination: id.to_string(),
+            destination_kind: DestinationKind::Agent(id),
+            markdown_source: None,
+        }
+    }
+
+    pub(crate) fn agent_id(&self) -> Option<codex_protocol::ThreadId> {
+        match self.destination_kind {
+            DestinationKind::Agent(id) => Some(id),
+            _ => None,
+        }
+    }
+
     pub(crate) fn document(columns: Range<usize>, link: FileLink) -> Self {
         Self {
             columns,
@@ -235,9 +255,25 @@ impl TerminalHyperlink {
         }
     }
 
+    pub(crate) fn sidebar_destination(&self) -> Option<ReaderLink> {
+        match self.destination_kind {
+            DestinationKind::TrustedFile | DestinationKind::Agent(_) => None,
+            DestinationKind::Document(_) | DestinationKind::Web => {
+                self.reader_destination(/*documents*/ true)
+            }
+        }
+    }
+
+    pub(crate) fn interaction_destination(&self) -> Option<String> {
+        if crate::thread_links::thread_id(&self.destination).is_some() {
+            return Some(self.destination.clone());
+        }
+        self.terminal_destination()
+    }
+
     pub(crate) fn terminal_destination(&self) -> Option<String> {
         match self.destination_kind {
-            DestinationKind::Document(_) => None,
+            DestinationKind::Document(_) | DestinationKind::Agent(_) => None,
             DestinationKind::Web => web_destination(&self.destination),
             DestinationKind::TrustedFile => trusted_file_destination(&self.destination),
         }
@@ -310,7 +346,7 @@ impl HyperlinkLine {
     }
 
     pub(crate) fn push_span(&mut self, span: Span<'static>, destination: Option<&str>) {
-        if let Some(destination) = destination.and_then(web_destination) {
+        if let Some(destination) = destination.and_then(markdown_destination) {
             self.push_linked_span(span, self.source_width(), destination);
         } else {
             self.source = None;
@@ -773,6 +809,13 @@ fn trailing_url_end(candidate: &str) -> usize {
         end -= ch.len_utf8();
     }
     end
+}
+
+pub(crate) fn markdown_destination(destination: &str) -> Option<String> {
+    if crate::thread_links::thread_id(destination).is_some() {
+        return Some(destination.to_string());
+    }
+    web_destination(destination)
 }
 
 pub(crate) fn web_destination(destination: &str) -> Option<String> {

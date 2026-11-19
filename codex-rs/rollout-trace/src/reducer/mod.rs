@@ -73,6 +73,7 @@ pub fn replay_bundle(bundle_dir: impl AsRef<Path>) -> Result<RolloutTrace> {
         terminal_ids_by_process: BTreeMap::new(),
         process_ids_by_terminal: BTreeMap::new(),
         thread_conversation_snapshots: BTreeMap::new(),
+        structured_output_hashes: BTreeMap::new(),
         pending_compaction_replacement_item_ids: BTreeMap::new(),
         code_cell_ids_by_runtime: BTreeMap::new(),
         last_thread_resume_seq: BTreeMap::new(),
@@ -80,7 +81,8 @@ pub fn replay_bundle(bundle_dir: impl AsRef<Path>) -> Result<RolloutTrace> {
         pending_code_cell_lifecycle_events: BTreeMap::new(),
         pending_agent_interaction_edges: Vec::new(),
         first_acceptances: BTreeMap::new(),
-        receipt_only_items: BTreeMap::new(),
+        receivable_ids: BTreeMap::new(),
+        snapshot_output_anchors: BTreeSet::new(),
     };
 
     let event_log_path = bundle_dir.join(RAW_EVENT_LOG_FILE_NAME);
@@ -206,8 +208,11 @@ struct TraceReducer {
     payload_reader: PayloadReader,
     /// First (wall time, sequence) by receiving thread and Responses item ID.
     first_acceptances: BTreeMap<String, BTreeMap<String, (i64, crate::RawEventSeq)>>,
-    /// Delivered items awaiting their first model-visible sighting, keyed by thread and wire ID.
-    receipt_only_items: BTreeMap<(String, String), String>,
+    /// A native delivery or tool output has one graph ID until its first snapshot.
+    /// None means a snapshot already supplied its body (and a later acceptance is a duplicate).
+    receivable_ids: BTreeMap<(String, String), Option<String>>,
+    /// Accepted tool outputs first encountered in the batch about to be appended.
+    snapshot_output_anchors: BTreeSet<String>,
     next_conversation_item_ordinal: u64,
     next_terminal_operation_ordinal: u64,
     /// Latest session for each thread-local runtime handle; each exec replaces it.
@@ -216,6 +221,8 @@ struct TraceReducer {
     process_ids_by_terminal: BTreeMap<String, String>,
     /// Latest request and its response items, used to reconcile the next request.
     thread_conversation_snapshots: BTreeMap<String, Vec<String>>,
+    /// Full identities for JSON tool outputs whose reduced bodies contain only a preview.
+    structured_output_hashes: BTreeMap<String, [u8; 32]>,
     /// Replacement snapshot installed by compaction but not yet seen in a sampling request.
     ///
     /// The first full request after compaction should compare against the installed replacement
@@ -347,13 +354,17 @@ impl TraceReducer {
             RawTraceEventPayload::HistoryItemAccepted {
                 item_id,
                 agent_message_payload,
+                tool_output_payload,
             } => {
                 let thread_id = event
                     .thread_id
                     .context("history acceptance has no thread")?;
                 self.thread_mut(&thread_id)?;
-                if let Some(payload) = agent_message_payload {
-                    self.record_agent_receipt(
+                // Keep the acceptance edge even when a capture limit hid the receipt body.
+                if let Some(payload) = agent_message_payload.or(tool_output_payload)
+                    && payload.capture.is_complete()
+                {
+                    self.record_accepted_item(
                         &thread_id,
                         event.codex_turn_id,
                         event.wall_time_unix_ms,
@@ -376,6 +387,7 @@ impl TraceReducer {
                 request_payload,
                 prepared_prompt_payload,
                 warmup_context_payload,
+                stripped_tool_output_ids,
             } => {
                 self.start_inference_call(
                     event.seq,
@@ -389,6 +401,7 @@ impl TraceReducer {
                         request_payload,
                         prepared_prompt_payload,
                         warmup_context_payload,
+                        stripped_tool_output_ids,
                     },
                 )?;
             }

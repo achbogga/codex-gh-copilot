@@ -270,10 +270,16 @@ pub(super) struct HistorySearch {
 
 pub(super) fn matches_query(thread: &Thread, query: &str) -> bool {
     let name = thread.name.as_deref().unwrap_or_default();
-    let cwd = thread.cwd.display();
+    let cwd = &thread.cwd;
     format!("{name} {} {cwd}", thread.preview)
         .to_lowercase()
         .contains(query)
+        || thread.id.to_lowercase().contains(query)
+        || thread
+            .git_info
+            .as_ref()
+            .and_then(|git| git.branch.as_deref())
+            .is_some_and(|branch| branch.to_lowercase().contains(query))
 }
 
 impl App {

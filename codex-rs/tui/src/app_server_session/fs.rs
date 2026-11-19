@@ -5,6 +5,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use codex_app_server_client::AppServerPath;
 use codex_app_server_client::AppServerRequestHandle;
+use codex_app_server_client::TypedRequestError;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::FsCreateDirectoryParams;
 use codex_app_server_protocol::FsCreateDirectoryResponse;
@@ -81,6 +82,10 @@ impl AppServerSession {
         let bytes = self
             .read_preview_file(source, original_path, resolved_path)
             .await?;
+        Self::preview_text(bytes)
+    }
+
+    pub(crate) fn preview_text(bytes: Vec<u8>) -> Result<String> {
         let text = String::from_utf8(bytes).wrap_err("Not a UTF-8 text file")?;
         color_eyre::eyre::ensure!(
             !text
@@ -234,8 +239,13 @@ impl AppServerFileSystem {
                     })
                     .await
                     .wrap_err_with(|| format!("{method} failed in TUI"))?;
-                serde_json::from_value(response.map_err(|source| {
-                    color_eyre::eyre::eyre!("{method} failed in TUI: {}", source.message)
+                serde_json::from_value(response.map_err(|mut source| {
+                    // Callers log these errors. Keep raw server diagnostics out of the logs.
+                    source.data = None;
+                    TypedRequestError::Server {
+                        method: method.to_string(),
+                        source,
+                    }
                 })?)
                 .wrap_err_with(|| format!("{method} returned invalid data"))
             }

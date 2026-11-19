@@ -37,6 +37,7 @@ use codex_history::ResponseItemEnvelope;
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::models::ToolResultMetadata;
 use codex_protocol::parse_command::ParsedCommand;
 use codex_protocol::protocol::EventMsg;
 use codex_rollout::state_db;
@@ -392,7 +393,7 @@ impl ToolOutput for PostToolUseFeedbackOutput {
         self.original.code_mode_result(payload)
     }
 
-    fn tool_result_metadata(&self) -> Option<&Value> {
+    fn tool_result_metadata(&self) -> ToolResultMetadata {
         self.original.tool_result_metadata()
     }
 }
@@ -441,6 +442,7 @@ pub(crate) struct RegisteredTool {
     pub(crate) runtime: Arc<dyn CoreToolRuntime>,
     pub(crate) exposure: ToolExposure,
     pub(crate) native_review: NativeReview,
+    pub(super) is_trusted: bool,
     /// Per-step description override; never written back to a shared runtime.
     pub(crate) model_spec: Option<Arc<ToolSpec>>,
 }
@@ -485,21 +487,31 @@ impl ToolRegistry {
         }
     }
 
-    /// Apply catalog prefixes to this step's specs, budgeting only reachable tools.
-    /// The planner supplies the names; this does not change execution or exposure.
+    /// Prepare registered functions and the exec/wait wrappers added later in the plan.
     pub(crate) fn apply_functions_namespace_function_prefixes(
         &mut self,
         prefixes: Option<&BTreeMap<String, String>>,
-        available_tools: impl IntoIterator<Item = ToolName>,
-    ) -> Result<(), &'static str> {
-        let prefixes = FunctionsNamespaceFunctionPrefixes::new(prefixes, available_tools)?;
+    ) {
+        let registered = self
+            .tools
+            .iter()
+            .filter(|(_, tool)| tool.exposure != ToolExposure::Hidden)
+            .map(|(name, _)| name.clone());
+        let wrappers = [
+            codex_code_mode::PUBLIC_TOOL_NAME,
+            codex_code_mode::WAIT_TOOL_NAME,
+        ]
+        .into_iter()
+        .map(ToolName::plain)
+        .filter(|name| self.tool_policy.allows(name));
+        let prefixes =
+            FunctionsNamespaceFunctionPrefixes::new(prefixes, registered.chain(wrappers));
         for tool in self.tools.values_mut() {
             tool.model_spec = prefixes
                 .prepare(&tool.runtime.tool_name(), || tool.runtime.spec())
                 .map(Arc::new);
         }
         self.functions_namespace_function_prefixes = prefixes;
-        Ok(())
     }
 
     fn prepare_tool(
@@ -515,6 +527,7 @@ impl ToolRegistry {
             runtime,
             exposure,
             native_review: NativeReview::Disabled,
+            is_trusted: false,
             model_spec,
         }
     }
@@ -576,6 +589,7 @@ impl ToolRegistry {
         }
         let mut tool = self.prepare_tool(runtime, exposure);
         tool.native_review = native_review;
+        tool.is_trusted = true;
         match self.tools.entry(tool_name) {
             Entry::Vacant(entry) => {
                 entry.insert(tool);
@@ -598,7 +612,8 @@ impl ToolRegistry {
         }
 
         let exposure = runtime.exposure();
-        let tool = self.prepare_tool(runtime, exposure);
+        let mut tool = self.prepare_tool(runtime, exposure);
+        tool.is_trusted = true;
         self.tools.shift_insert(0, tool_name, tool);
     }
 
@@ -664,6 +679,21 @@ impl ToolRegistry {
 
     pub(crate) fn entries_mut(&mut self) -> impl Iterator<Item = &mut RegisteredTool> {
         self.tools.values_mut()
+    }
+
+    pub(crate) fn indirect_namespace_prefixes<'a>(
+        &self,
+        prefixes: Option<&'a codex_protocol::openai_models::IndirectDescriptionPrefixes>,
+    ) -> Result<
+        codex_tools::IndirectNamespacePrefixes<'a>,
+        codex_tools::IndirectNamespacePrefixConflict,
+    > {
+        let builtin_tools = self
+            .tools
+            .iter()
+            .filter(|(_, tool)| !tool.runtime.is_third_party_tool())
+            .map(|(name, _)| name);
+        codex_tools::IndirectNamespacePrefixes::new(prefixes, self.mcp_namespaces(), builtin_tools)
     }
 
     /// Returns configured MCP server names and their registered callable namespaces.
@@ -994,7 +1024,7 @@ impl ToolRegistry {
 
         let log_payload = tool_log_payload(&invocation.payload, &invocation.source);
 
-        let result = otel
+        let mut result = otel
             .log_tool_result_with_tags(
                 &tool_name,
                 &call_id_owned,
@@ -1024,9 +1054,9 @@ impl ToolRegistry {
         emit_metric_for_tool_read(&invocation, success);
         let post_tool_use_payload = if success {
             result
-                .as_ref()
+                .as_mut()
                 .ok()
-                .and_then(|result| result.post_tool_use_payload.clone())
+                .and_then(|result| result.post_tool_use_payload.take())
         } else {
             None
         };

@@ -21,6 +21,7 @@ use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::fmt;
+use std::num::NonZeroU64;
 use std::path::PathBuf;
 use std::str::FromStr;
 use wildmatch::WildMatchPattern;
@@ -39,6 +40,7 @@ use crate::browser_computer_use_requirements::ComputerUseRequirementsToml;
 use crate::config_toml::ConfigToml;
 use crate::mcp_requirements::validate_mcp_server_requirement;
 use crate::mcp_types::AppToolApproval;
+use crate::permissions_toml::CredentialPermissionsToml;
 use crate::permissions_toml::PermissionProfileToml;
 use crate::types::AuthCredentialsStoreMode;
 use crate::types::FeedbackConfigToml;
@@ -761,8 +763,9 @@ pub struct PermissionsRequirementsToml {
     // Keep the optional raw payload out of config-loading futures' inline storage.
     #[serde(default, deserialize_with = "deserialize_permissions_network")]
     pub network: Option<Box<NetworkRequirementsToml>>,
-    // `filesystem` and `network` are reserved for requirements-level
-    // constraints and cannot name profiles.
+    #[serde(default, deserialize_with = "deserialize_permissions_credentials")]
+    pub credentials: Option<CredentialPermissionsToml>,
+    // Shared requirements tables cannot name profiles.
     #[serde(default, flatten)]
     pub profiles: BTreeMap<String, PermissionProfileToml>,
 }
@@ -772,7 +775,10 @@ impl PermissionsRequirementsToml {
     pub(crate) fn take_network(table: &mut Option<Self>) -> Option<Box<NetworkRequirementsToml>> {
         let permissions = table.as_mut()?;
         let network = permissions.network.take()?;
-        if permissions.filesystem.is_none() && permissions.profiles.is_empty() {
+        if permissions.filesystem.is_none()
+            && permissions.credentials.is_none()
+            && permissions.profiles.is_empty()
+        {
             *table = None;
         }
         Some(network)
@@ -784,6 +790,32 @@ fn deserialize_permissions_network<'de, D>(
 ) -> Result<Option<Box<NetworkRequirementsToml>>, D::Error>
 where
     D: serde::Deserializer<'de>,
+{
+    deserialize_shared_permission_table(
+        deserializer,
+        "`permissions.network` in requirements.toml is reserved for shared network constraints; rename the managed profile (for example, to `network-access`) and update `default_permissions`, `allowed_permission_profiles`, and `extends`; check saved session profile references. Profiles named `network` in config.toml remain valid",
+    )
+}
+
+fn deserialize_permissions_credentials<'de, D>(
+    deserializer: D,
+) -> Result<Option<CredentialPermissionsToml>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_shared_permission_table(
+        deserializer,
+        "`permissions.credentials` in requirements.toml is reserved for shared credential policy; rename the managed profile (for example, to `credential-access`) and update `default_permissions`, `allowed_permission_profiles`, and `extends`; check saved session profile references. Profiles named `credentials` in config.toml remain valid",
+    )
+}
+
+fn deserialize_shared_permission_table<'de, D, T>(
+    deserializer: D,
+    rename_error: &'static str,
+) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
 {
     let table = toml::Table::deserialize(deserializer)?;
     if table.is_empty()
@@ -797,9 +829,7 @@ where
         .iter()
         .any(|key| table.contains_key(*key))
     {
-        return Err(D::Error::custom(
-            "`permissions.network` in requirements.toml is reserved for shared network constraints; rename the managed profile (for example, to `network-access`) and update `default_permissions`, `allowed_permission_profiles`, and `extends`; check saved session profile references. Profiles named `network` in config.toml remain valid",
-        ));
+        return Err(D::Error::custom(rename_error));
     }
     toml::Value::Table(table)
         .try_into()
@@ -1253,6 +1283,11 @@ pub struct ConfigRequirementsToml {
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct OtelRequirementsToml {
+    pub headers_helper: Option<String>,
+    pub headers_helper_refresh_interval_ms: Option<NonZeroU64>,
+    // Computed during composition. A policy cannot grant a helper access to another layer's collector.
+    #[serde(skip)]
+    managed_helper_targets: OtelHeadersHelperTargets,
     pub tool_result: Option<ToolResultLogConfig>,
     pub log_sse_deltas: Option<bool>,
     pub log_user_prompt: Option<bool>,
@@ -1266,9 +1301,49 @@ pub struct OtelRequirementsToml {
     pub tracestate: Option<BTreeMap<String, BTreeMap<String, String>>>,
 }
 
+/// Signals whose collector may receive the configured helper's credentials.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct OtelHeadersHelperTargets {
+    pub logs: bool,
+    pub traces: bool,
+    pub metrics: bool,
+}
+
+impl OtelHeadersHelperTargets {
+    fn merge_layer(&mut self, layer: &OtelRequirementsToml) {
+        let has_helper = layer.headers_helper.is_some();
+        let update = |target: &mut bool, exporter: &Option<OtelExporterKind>| {
+            // Replacing either side of the binding revokes the previous grant.
+            // An empty HTTP endpoint falls back to the process environment in the OTLP SDK.
+            if has_helper || exporter.is_some() {
+                *target = has_helper
+                    && matches!(exporter, Some(OtelExporterKind::OtlpHttp { endpoint, .. }) if !endpoint.is_empty());
+            }
+        };
+        update(&mut self.logs, &layer.exporter);
+        update(&mut self.traces, &layer.trace_exporter);
+        update(&mut self.metrics, &layer.metrics_exporter);
+    }
+}
+
 impl OtelRequirementsToml {
+    /// A managed helper serves its own layer's exporters. A user helper serves unmanaged exporters.
+    pub fn headers_helper_targets(&self) -> OtelHeadersHelperTargets {
+        if self.headers_helper.is_some() {
+            self.managed_helper_targets
+        } else {
+            OtelHeadersHelperTargets {
+                logs: self.exporter.is_none(),
+                traces: self.trace_exporter.is_none(),
+                metrics: self.metrics_exporter.is_none(),
+            }
+        }
+    }
+
     pub(crate) fn is_empty(&self) -> bool {
-        self.tool_result.is_none()
+        self.headers_helper.is_none()
+            && self.headers_helper_refresh_interval_ms.is_none()
+            && self.tool_result.is_none()
             && self.log_sse_deltas.is_none()
             && self.log_user_prompt.is_none()
             && self.log_agent_responses.is_none()
@@ -1951,7 +2026,7 @@ impl ConfigRequirementsToml {
             return Some("model_providers");
         }
         let otel = self.otel.as_ref();
-        let managed_fields: [(bool, &[&str], &'static str); 18] = [
+        let managed_fields: [(bool, &[&str], &'static str); 20] = [
             (
                 self.model_provider.is_some(),
                 &["model_provider"],
@@ -1996,6 +2071,16 @@ impl ConfigRequirementsToml {
                 otel.is_some_and(|otel| otel.tool_result.is_some()),
                 &["otel", "tool_result"],
                 "otel.tool_result",
+            ),
+            (
+                otel.is_some_and(|otel| otel.headers_helper.is_some()),
+                &["otel", "headers_helper"],
+                "otel.headers_helper",
+            ),
+            (
+                otel.is_some_and(|otel| otel.headers_helper_refresh_interval_ms.is_some()),
+                &["otel", "headers_helper_refresh_interval_ms"],
+                "otel.headers_helper_refresh_interval_ms",
             ),
             (
                 otel.is_some_and(|otel| otel.log_user_prompt.is_some()),
@@ -2073,6 +2158,9 @@ macro_rules! otel_merge_functions {
                 );
                 contributed = true;
             }
+            if let Some(merged) = requirements {
+                merged.managed_helper_targets.merge_layer(higher_priority);
+            }
             contributed
         }
 
@@ -2097,6 +2185,8 @@ macro_rules! otel_merge_functions {
 }
 
 otel_merge_functions!(
+    headers_helper,
+    headers_helper_refresh_interval_ms,
     tool_result,
     log_sse_deltas,
     log_user_prompt,
@@ -2753,6 +2843,8 @@ mod tests {
     #[test_case::test_case(&["otel"], Some("otel.tool_result"); "otel_parent")]
     #[test_case::test_case(&["otel", "tool_result"], Some("otel.tool_result"); "tool_result")]
     #[test_case::test_case(&["otel", "tool_result", "max_bytes"], Some("otel.tool_result"); "tool_result_max_bytes")]
+    #[test_case::test_case(&["otel", "headers_helper"], Some("otel.headers_helper"); "headers_helper")]
+    #[test_case::test_case(&["otel", "headers_helper_refresh_interval_ms"], Some("otel.headers_helper_refresh_interval_ms"); "headers_helper_refresh_interval_ms")]
     #[test_case::test_case(&["otel", "log_user_prompt"], Some("otel.log_user_prompt"); "log_user_prompt")]
     #[test_case::test_case(&["otel", "log_sse_deltas"], Some("otel.log_sse_deltas"); "log_sse_deltas")]
     #[test_case::test_case(&["otel", "environment"], Some("otel.environment"); "environment")]
@@ -2776,6 +2868,8 @@ mod tests {
             r#"
 [otel]
 tool_result = { max_bytes = 1024 }
+headers_helper = "/opt/company/otel-headers"
+headers_helper_refresh_interval_ms = 60000
 log_user_prompt = false
 environment = "managed"
 log_sse_deltas = false
@@ -2790,6 +2884,8 @@ tracestate = { managed = { tenant = "enterprise" }, empty = {} }
             r#"
 [otel]
 tool_result = { max_bytes = 4096 }
+headers_helper = "user-headers"
+headers_helper_refresh_interval_ms = 90000
 log_user_prompt = true
 environment = "user"
 log_sse_deltas = true
@@ -2808,6 +2904,8 @@ tracestate = { managed = { tenant = "user", region = "us" }, other = { keep = "y
                 r#"
 [otel]
 tool_result = { max_bytes = 1024 }
+headers_helper = "/opt/company/otel-headers"
+headers_helper_refresh_interval_ms = 60000
 log_user_prompt = false
 environment = "managed"
 log_sse_deltas = false

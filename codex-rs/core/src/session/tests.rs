@@ -1014,6 +1014,7 @@ async fn preview_session_start_hooks(
         },
         thread_id,
         Arc::new(CoreHookMcpExecutor {
+            session: Default::default(),
             runtime: Arc::new(McpRuntime::empty(config.prefix_mcp_tool_names())),
             thread_id,
         }),
@@ -2822,6 +2823,7 @@ async fn annotated_history_uses_explicit_model_without_a_step(
         metadata.history_sequence = Some(index as u64 + 1);
         metadata.sampled_through_sequence = Some(0);
         metadata.history_truncation_token_limit = Some(expected_budget);
+        metadata.model_search_state = Some(codex_history::ModelSearchState::Unused);
         let (ResponseItem::FunctionCallOutput { output, .. }
         | ResponseItem::CustomToolCallOutput { output, .. }) = &mut envelope.item
         else {
@@ -3944,7 +3946,11 @@ async fn start_new_context_window_persists_checkpoint_state(clear_tools: bool) {
     );
     let expected_snapshot = world_state.render_full().0.into_object();
     session
-        .start_new_context_window(&step_context, world_state)
+        .start_new_context_window(
+            &step_context,
+            world_state,
+            &codex_rollout_trace::CompactionTraceContext::disabled(),
+        )
         .await;
 
     let live_history = session.clone_history().await;
@@ -5640,6 +5646,7 @@ async fn active_profile_update_rebuilds_network_proxy_config(
             (
                 "locked-down".to_string(),
                 PermissionProfileToml {
+                    credentials: None,
                     description: None,
                     extends: None,
                     workspace_roots: None,
@@ -5656,6 +5663,7 @@ async fn active_profile_update_rebuilds_network_proxy_config(
             (
                 "web-enabled".to_string(),
                 PermissionProfileToml {
+                    credentials: None,
                     description: None,
                     extends: None,
                     workspace_roots: None,
@@ -6155,7 +6163,8 @@ async fn standalone_settings_invalidate_continuation_before_delivering_acceptanc
             op: Op::ThreadSettings {
                 thread_settings: ThreadSettingsOverrides::default(),
                 reply: Some(reply),
-            },
+            }
+            .into(),
             trace: None,
             parent_turn_id: None,
             root_turn_id: None,
@@ -6259,8 +6268,25 @@ async fn compaction_persists_resume_metadata_and_companion_records() {
     session
         .record_started_turn(&turn_context.sub_id, Some(turn_context.attribution()))
         .await;
-    let input_goal_ids =
-        crate::context::UserGoalUpdate::message_ids(session.clone_history().await.raw_items());
+    let input = session.clone_history().await;
+    let input_goal_ids = crate::context::UserGoalUpdate::message_ids(input.raw_items());
+    let bundle = tempfile::tempdir().unwrap();
+    let thread = session.thread_id().to_string();
+    let writer = codex_rollout_trace::TraceWriter::create(
+        bundle.path(),
+        "trace".into(),
+        "rollout".into(),
+        thread.clone(),
+    )
+    .unwrap();
+    let trace = codex_rollout_trace::CompactionTraceContext::enabled(
+        Arc::new(writer),
+        thread,
+        turn_context.sub_id.clone(),
+        "reset".into(),
+        "test".into(),
+        "test".into(),
+    );
     // The goal edit is accepted after the compaction input was captured.
     session
         .record_user_goal_update(crate::context::UserGoalUpdate::Clear)
@@ -6280,15 +6306,18 @@ async fn compaction_persists_resume_metadata_and_companion_records() {
             turn_context_baseline.clone(),
             world_state.render_full().0,
             /*rejected_audio_file_ids*/ Default::default(),
-            CompactedHistoryMetadata {
-                input_goal_ids,
-                message: String::new(),
-                window_number,
-                window_ids,
-                compaction_response_id: None,
-                compaction_model_hash: None,
-                reviewer_compaction_hash: None,
-            },
+            CompactedHistoryInstallation::Complete(
+                CompactedHistoryMetadata {
+                    input_goal_ids,
+                    message: String::new(),
+                    window_number,
+                    window_ids,
+                    compaction_response_id: None,
+                    compaction_model_hash: None,
+                    reviewer_compaction_hash: None,
+                },
+                Some((&trace, &input)),
+            ),
         )
         .await;
     let live_history = session.clone_history().await.annotated_items().to_vec();
@@ -6311,6 +6340,41 @@ async fn compaction_persists_resume_metadata_and_companion_records() {
     else {
         panic!("unexpected compaction records: {compaction_items:#?}");
     };
+    // A goal edit accepted after installation must not appear in either checkpoint history.
+    session
+        .record_user_goal_update(crate::context::UserGoalUpdate::Clear)
+        .await
+        .unwrap();
+    drop(trace); // Drain the writer before reading the checkpoint shard.
+    let events = std::fs::read_to_string(bundle.path().join("trace.jsonl")).unwrap();
+    let checkpoint_payload = events
+        .lines()
+        .find_map(|line| {
+            let event: codex_rollout_trace::RawTraceEvent = serde_json::from_str(line).unwrap();
+            match event.payload {
+                codex_rollout_trace::RawTraceEventPayload::CompactionInstalled {
+                    checkpoint_payload,
+                    ..
+                } => Some(checkpoint_payload),
+                _ => None,
+            }
+        })
+        .unwrap();
+    let checkpoint = codex_rollout_trace::PayloadReader::new(bundle.path())
+        .read_json(&checkpoint_payload)
+        .unwrap();
+    let replacement: Vec<_> = live_history.iter().map(|entry| &entry.item).collect();
+    assert_eq!(
+        checkpoint,
+        json!({
+            "input_history": input.raw_items().collect::<Vec<_>>(),
+            "replacement_history": replacement,
+        })
+    );
+    assert_ne!(
+        session.clone_history().await.annotated_items(),
+        live_history
+    );
     assert_eq!(compacted.replacement_history, Some(live_history));
     assert_eq!(compacted.resume_metadata.as_ref(), Some(&expected));
     assert_eq!(
@@ -6890,6 +6954,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         },
         thread_id,
         Arc::new(CoreHookMcpExecutor {
+            session: Default::default(),
             runtime: Arc::clone(&mcp_runtime),
             thread_id,
         }),
@@ -7005,6 +7070,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         parent_observer_event_tx: OnceLock::new(),
         agent_status: agent_status_tx,
         state: Mutex::new(state),
+        initial_context_publication: Semaphore::new(/*permits*/ 1),
         thread_settings_persistence: Semaphore::new(/*permits*/ 1),
         code_mode_message_tasks: Default::default(),
         managed_network_proxy_refresh_lock: Semaphore::new(/*permits*/ 1),
@@ -8250,7 +8316,7 @@ fn submission_dispatch_span_prefers_submission_trace_context() {
         submission_dispatch_span(&Submission {
             turn_extension_init: None,
             id: "sub-1".into(),
-            op: Op::Interrupt,
+            op: Op::Interrupt.into(),
             parent_turn_id: None,
             root_turn_id: None,
             residency_guard: None,
@@ -8281,7 +8347,8 @@ fn submission_dispatch_span_uses_debug_for_realtime_audio() {
                 samples_per_channel: Some(160),
                 item_id: None,
             },
-        }),
+        })
+        .into(),
         parent_turn_id: None,
         root_turn_id: None,
         residency_guard: None,
@@ -8644,7 +8711,7 @@ async fn spawn_task_turn_span_inherits_dispatch_trace_context() {
     let dispatch_span = submission_dispatch_span(&Submission {
         turn_extension_init: None,
         id: "sub-1".into(),
-        op: Op::Interrupt,
+        op: Op::Interrupt.into(),
         parent_turn_id: None,
         root_turn_id: None,
         residency_guard: None,
@@ -8660,10 +8727,7 @@ async fn spawn_task_turn_span_inherits_dispatch_trace_context() {
             Arc::clone(&tc),
             vec![TurnInput::UserInput {
                 metadata: Default::default(),
-                content: vec![UserInput::Text {
-                    text: "hello".to_string(),
-                    text_elements: Vec::new(),
-                }],
+                content: vec![ResolvedUserInput::text("hello".to_string())],
                 client_id: None,
             }],
             TraceCaptureTask {
@@ -9016,7 +9080,7 @@ async fn shutdown_and_wait_allows_multiple_waiters() {
     let (_tx_event, rx_event) = async_channel::unbounded();
     let session_loop_handle = tokio::spawn(async move {
         let shutdown = rx_sub.recv().await.expect("shutdown submission");
-        assert!(matches!(shutdown.op, Op::Shutdown));
+        assert!(matches!(shutdown.op.as_protocol(), Some(Op::Shutdown)));
         tokio::time::sleep(StdDuration::from_millis(50)).await;
     });
     let io = Arc::new(SessionIo {
@@ -9247,6 +9311,7 @@ where
         },
         thread_id,
         Arc::new(CoreHookMcpExecutor {
+            session: Default::default(),
             runtime: Arc::clone(&mcp_runtime),
             thread_id,
         }),
@@ -9362,6 +9427,7 @@ where
         parent_observer_event_tx: OnceLock::new(),
         agent_status: agent_status_tx,
         state: Mutex::new(state),
+        initial_context_publication: Semaphore::new(/*permits*/ 1),
         thread_settings_persistence: Semaphore::new(/*permits*/ 1),
         code_mode_message_tasks: Default::default(),
         managed_network_proxy_refresh_lock: Semaphore::new(/*permits*/ 1),
@@ -10419,10 +10485,7 @@ async fn spawn_task_does_not_update_previous_turn_settings_for_non_run_turn_task
         .await;
     let input = vec![TurnInput::UserInput {
         metadata: Default::default(),
-        content: vec![UserInput::Text {
-            text: "hello".to_string(),
-            text_elements: Vec::new(),
-        }],
+        content: vec![ResolvedUserInput::text("hello".to_string())],
         client_id: None,
     }];
 
@@ -12373,10 +12436,9 @@ async fn extension_interrupt_survives_the_calling_runtime() {
     let (sess, tc, rx) = make_session_and_context_with_rx().await;
     let input = vec![TurnInput::UserInput {
         metadata: Default::default(),
-        content: vec![UserInput::Text {
-            text: "keep turn active for extension interruption".to_string(),
-            text_elements: Vec::new(),
-        }],
+        content: vec![ResolvedUserInput::text(
+            "keep turn active for extension interruption".to_string(),
+        )],
         client_id: None,
     }];
     sess.spawn_task(
@@ -12438,10 +12500,7 @@ async fn turn_complete_flushes_terminal_event_after_delivery() {
 
     let input = vec![TurnInput::UserInput {
         metadata: Default::default(),
-        content: vec![UserInput::Text {
-            text: "complete normally".to_string(),
-            text_elements: Vec::new(),
-        }],
+        content: vec![ResolvedUserInput::text("complete normally".to_string())],
         client_id: None,
     }];
     sess.spawn_task(Arc::clone(&tc), input, CompletingTask)
@@ -12466,10 +12525,7 @@ async fn turn_aborted_flushes_terminal_event_after_delivery() {
 
     let input = vec![TurnInput::UserInput {
         metadata: Default::default(),
-        content: vec![UserInput::Text {
-            text: "interrupt me".to_string(),
-            text_elements: Vec::new(),
-        }],
+        content: vec![ResolvedUserInput::text("interrupt me".to_string())],
         client_id: None,
     }];
     sess.spawn_task(
@@ -12509,10 +12565,7 @@ async fn abort_regular_task_emits_marker_before_turn_aborted() {
     let (sess, tc, rx) = make_session_and_context_with_rx().await;
     let input = vec![TurnInput::UserInput {
         metadata: Default::default(),
-        content: vec![UserInput::Text {
-            text: "hello".to_string(),
-            text_elements: Vec::new(),
-        }],
+        content: vec![ResolvedUserInput::text("hello".to_string())],
         client_id: None,
     }];
     sess.spawn_task(
@@ -12551,10 +12604,7 @@ async fn abort_gracefully_emits_marker_before_turn_aborted() {
     let (sess, tc, rx) = make_session_and_context_with_rx().await;
     let input = vec![TurnInput::UserInput {
         metadata: Default::default(),
-        content: vec![UserInput::Text {
-            text: "hello".to_string(),
-            text_elements: Vec::new(),
-        }],
+        content: vec![ResolvedUserInput::text("hello".to_string())],
         client_id: None,
     }];
     sess.spawn_task(
@@ -12590,7 +12640,7 @@ async fn abort_gracefully_emits_marker_before_turn_aborted() {
 
 async fn submit_steer_only(
     sess: &Arc<Session>,
-    input: Vec<UserInput>,
+    input: Vec<ResolvedUserInput>,
     expected_turn_id: &str,
 ) -> TurnInputSubmission {
     super::turn_input::handle(
@@ -12628,10 +12678,7 @@ async fn task_finish_emits_turn_item_lifecycle_for_leftover_pending_user_input()
     );
     let input = vec![TurnInput::UserInput {
         metadata: Default::default(),
-        content: vec![UserInput::Text {
-            text: "hello".to_string(),
-            text_elements: Vec::new(),
-        }],
+        content: vec![ResolvedUserInput::text("hello".to_string())],
         client_id: None,
     }];
     sess.spawn_task(
@@ -12667,7 +12714,16 @@ async fn task_finish_emits_turn_item_lifecycle_for_leftover_pending_user_input()
             detail: Some(ImageDetail::High),
         },
     ];
-    let submission = submit_steer_only(&sess, pending_user_input.clone(), &tc.sub_id).await;
+    let submission = submit_steer_only(
+        &sess,
+        pending_user_input
+            .iter()
+            .cloned()
+            .map(ResolvedUserInput::from_client)
+            .collect(),
+        &tc.sub_id,
+    )
+    .await;
     assert!(matches!(submission, TurnInputSubmission::Steered { .. }));
 
     let mut current = tc.initial_settings.as_ref().clone();
@@ -13094,10 +13150,7 @@ async fn steered_input_reopens_mailbox_delivery_for_current_turn() {
         .await;
     let submission = submit_steer_only(
         &sess,
-        vec![UserInput::Text {
-            text: "follow up".to_string(),
-            text_elements: Vec::new(),
-        }],
+        vec![ResolvedUserInput::text("follow up".to_string())],
         &tc.sub_id,
     )
     .await;
@@ -13111,10 +13164,7 @@ async fn steered_input_reopens_mailbox_delivery_for_current_turn() {
                     acceptance_order: Some(0),
                     ..Default::default()
                 },
-                content: vec![UserInput::Text {
-                    text: "follow up".to_string(),
-                    text_elements: Vec::new(),
-                }],
+                content: vec![ResolvedUserInput::text("follow up".to_string())],
                 client_id: None,
             },
             TurnInput::InterAgentCommunication(communication.into()),
@@ -13150,10 +13200,7 @@ async fn stale_defer_mailbox_delivery_does_not_override_steered_input() {
         .await;
     let submission = submit_steer_only(
         &sess,
-        vec![UserInput::Text {
-            text: "follow up".to_string(),
-            text_elements: Vec::new(),
-        }],
+        vec![ResolvedUserInput::text("follow up".to_string())],
         &tc.sub_id,
     )
     .await;
@@ -13171,10 +13218,7 @@ async fn stale_defer_mailbox_delivery_does_not_override_steered_input() {
                     acceptance_order: Some(0),
                     ..Default::default()
                 },
-                content: vec![UserInput::Text {
-                    text: "follow up".to_string(),
-                    text_elements: Vec::new(),
-                }],
+                content: vec![ResolvedUserInput::text("follow up".to_string())],
                 client_id: None,
             },
             TurnInput::InterAgentCommunication(communication.into()),
@@ -13247,10 +13291,7 @@ async fn abort_review_task_emits_exited_then_aborted_and_records_history() {
     let (sess, tc, rx) = make_session_and_context_with_rx().await;
     let input = vec![TurnInput::UserInput {
         metadata: Default::default(),
-        content: vec![UserInput::Text {
-            text: "start review".to_string(),
-            text_elements: Vec::new(),
-        }],
+        content: vec![ResolvedUserInput::text("start review".to_string())],
         client_id: None,
     }];
     sess.spawn_task(Arc::clone(&tc), input, ReviewTask::new())

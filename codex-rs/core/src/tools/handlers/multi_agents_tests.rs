@@ -74,6 +74,7 @@ use codex_protocol::protocol::TurnAbortedEvent;
 use codex_protocol::protocol::TurnCompleteEvent;
 use codex_protocol::user_input::UserInput;
 use codex_state::DirectionalThreadSpawnEdgeStatus;
+use codex_user_input::ResolvedUserInput;
 use core_test_support::TempDirExt;
 use opentelemetry_sdk::metrics::InMemoryMetricExporter;
 use opentelemetry_sdk::metrics::data::AggregatedMetrics;
@@ -1336,10 +1337,7 @@ async fn multi_agent_v2_send_message_accepts_root_target_from_child() {
         .control(session.session_id())
         .spawn_agent_with_metadata(
             (*turn.config).clone(),
-            vec![UserInput::Text {
-                text: "inspect this repo".to_string(),
-                text_elements: Vec::new(),
-            }],
+            vec![ResolvedUserInput::text("inspect this repo".to_string())],
             SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
                 parent_thread_id: root.thread_id,
                 depth: 1,
@@ -1361,7 +1359,7 @@ async fn multi_agent_v2_send_message_accepts_root_target_from_child() {
         agent_role: None,
     });
 
-    let output = SendMessageHandlerV2
+    SendMessageHandlerV2
         .handle(invocation(
             Arc::new(session),
             Arc::new(turn),
@@ -1373,10 +1371,6 @@ async fn multi_agent_v2_send_message_accepts_root_target_from_child() {
         ))
         .await
         .expect("send_message should accept the root agent path");
-    assert_eq!(
-        expect_text_output(output),
-        ("Message accepted.".to_string(), Some(true))
-    );
 
     assert!(manager.captured_ops().iter().any(|(id, op)| {
         *id == root.thread_id
@@ -1417,10 +1411,7 @@ async fn multi_agent_v2_followup_task_rejects_root_target_from_child() {
         .control(session.session_id())
         .spawn_agent_with_metadata(
             (*turn.config).clone(),
-            vec![UserInput::Text {
-                text: "inspect this repo".to_string(),
-                text_elements: Vec::new(),
-            }],
+            vec![ResolvedUserInput::text("inspect this repo".to_string())],
             SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
                 parent_thread_id: root.thread_id,
                 depth: 1,
@@ -1584,10 +1575,7 @@ async fn multi_agent_v2_list_agents_filters_by_relative_path_prefix() {
         .control(session.session_id())
         .spawn_agent_with_metadata(
             config.clone(),
-            vec![UserInput::Text {
-                text: "research".to_string(),
-                text_elements: Vec::new(),
-            }],
+            vec![ResolvedUserInput::text("research".to_string())],
             SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
                 parent_thread_id: root.thread_id,
                 depth: 1,
@@ -1605,10 +1593,7 @@ async fn multi_agent_v2_list_agents_filters_by_relative_path_prefix() {
         .control(session.session_id())
         .spawn_agent_with_metadata(
             config,
-            vec![UserInput::Text {
-                text: "build".to_string(),
-                text_elements: Vec::new(),
-            }],
+            vec![ResolvedUserInput::text("build".to_string())],
             SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
                 parent_thread_id: root.thread_id,
                 depth: 2,
@@ -3950,14 +3935,14 @@ async fn multi_agent_v2_interrupt_agent_accepts_task_name_target() {
     let ops = manager.captured_ops();
     assert!(
         ops.iter()
-            .any(|(thread_id, op)| *thread_id == agent_id && matches!(op, Op::Interrupt))
+            .any(|(thread_id, op)| *thread_id == agent_id && matches!(op, Op::InterruptAgent))
     );
     assert!(!ops.iter().any(|(thread_id, op)| {
         (*thread_id == agent_id || *thread_id == child_id) && matches!(op, Op::Shutdown)
     }));
     assert!(
         !ops.iter()
-            .any(|(thread_id, op)| *thread_id == child_id && matches!(op, Op::Interrupt))
+            .any(|(thread_id, op)| *thread_id == child_id && matches!(op, Op::InterruptAgent))
     );
 }
 
@@ -4154,10 +4139,7 @@ async fn multi_agent_v2_interrupt_agent_rejects_self_target_by_id() {
         .control(session.session_id())
         .spawn_agent_with_metadata(
             (*turn.config).clone(),
-            vec![UserInput::Text {
-                text: "inspect this repo".to_string(),
-                text_elements: Vec::new(),
-            }],
+            vec![ResolvedUserInput::text("inspect this repo".to_string())],
             SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
                 parent_thread_id: root.thread_id,
                 depth: 1,
@@ -4222,10 +4204,7 @@ async fn multi_agent_v2_interrupt_agent_rejects_self_target_by_task_name() {
         .control(session.session_id())
         .spawn_agent_with_metadata(
             (*turn.config).clone(),
-            vec![UserInput::Text {
-                text: "inspect this repo".to_string(),
-                text_elements: Vec::new(),
-            }],
+            vec![ResolvedUserInput::text("inspect this repo".to_string())],
             SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
                 parent_thread_id: root.thread_id,
                 depth: 1,

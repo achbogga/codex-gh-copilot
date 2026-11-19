@@ -57,14 +57,15 @@ use codex_protocol::protocol::ThreadSource;
 use codex_protocol::protocol::TokenUsage;
 use codex_protocol::protocol::TurnStartedEvent;
 use codex_protocol::protocol::UserMessageEvent;
-use codex_protocol::user_input::UserInput;
 use codex_thread_store::InMemoryThreadStore;
+use codex_user_input::ResolvedUserInput;
 use codex_utils_path_uri::PathUri;
 use core_test_support::PathBufExt;
 use core_test_support::PathExt;
 use core_test_support::responses::mount_models_once;
 use core_test_support::responses::strip_response_item_ids_from_json;
 use pretty_assertions::assert_eq;
+use std::collections::HashMap;
 use std::time::Duration;
 use tempfile::tempdir;
 use wiremock::MockServer;
@@ -794,7 +795,7 @@ async fn thread_id_generator_applies_to_roots_children_and_forks() {
         .control(root.thread.session.session_id())
         .spawn_agent_with_metadata(
             config.clone(),
-            vec![UserInput::Text {
+            vec![ResolvedUserInput::Text {
                 text: "child task".to_string(),
                 text_elements: Vec::new(),
             }],

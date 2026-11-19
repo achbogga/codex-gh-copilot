@@ -304,6 +304,9 @@ impl App {
             self.agents_overview.pending_pin_change = None;
             self.agents_overview.pending_usage = None;
             self.agents_overview.usage_disabled = false;
+            self.statusline_picker = None;
+            self.chat_widget
+                .dismiss_provider_view(super::statusline_picker::PICKER);
             self.reconnect.presentation = if self
                 .chat_widget
                 .selected_index_for_active_view(agents_overview::AGENTS_OVERVIEW_VIEW_ID)
@@ -356,6 +359,7 @@ impl App {
     ) {
         self.chat_widget.snapshot_local_images = self.app_server_target.uses_remote_workspace();
         self.chat_widget.thread_params_mode = app_server.thread_params_mode();
+        self.chat_widget.app_server_path_convention = app_server.path_convention();
         self.chat_widget.pending_cloud_turn_settings = app_server.pending_cloud_turn_settings();
         self.chat_widget.set_local_worktree_operations(
             !crate::uses_remote_workspace_or_environment(
@@ -416,8 +420,12 @@ impl App {
         *app_event_rx = rx;
         for pane in self.sidebars.values_mut() {
             pane.focus_document_request = None;
+            pane.agents.pending_link = None;
             for doc in pane.documents.values_mut() {
                 doc.connection_replaced();
+            }
+            if let Some(files) = &mut pane.files {
+                files.connection_replaced();
             }
         }
         // The old timer targets the discarded channel, so a new preview can be scheduled.
@@ -559,6 +567,11 @@ impl App {
                 self.agent_navigation.mark_stopped(id);
             }
             if self.primary_thread_id == Some(id) {
+                self.restore_sidebar_agent_outcomes(
+                    id,
+                    &started.turns,
+                    super::sidebar_subagents::OutcomeReplay::Reconnect,
+                );
                 self.primary_session_configured = Some(started.session.clone());
             }
             if started.blocks_direct_input {
@@ -578,9 +591,12 @@ impl App {
             self.active_thread_id = Some(id);
             self.active_thread_rx = Some(receiver);
             self.recap.seed_from_turns(&snapshot.turns, Instant::now());
-            if let Err(err) = self.render_thread_snapshot(
-                tui, app_server, id, snapshot, /*resume_restored_queue*/ false,
-            ) {
+            if let Err(err) = self
+                .render_thread_snapshot(
+                    tui, app_server, id, snapshot, /*resume_restored_queue*/ false,
+                )
+                .await
+            {
                 if discard_replaced_view_input
                     && let Err(drain_err) = tui.discard_pending_input_before_interactive_screen()
                 {
@@ -644,6 +660,9 @@ impl App {
         if self.reconnect.presentation == ReconnectPresentation::Overview {
             self.refresh_agents_overview_threads(app_server);
         }
+        self.chat_widget.forget_inherited_quota_provider();
+        self.chat_widget.statusline_disconnected = false;
+        self.chat_widget.refresh_status_line();
         self.chat_widget.update_account_state(
             bootstrap.status_account_display,
             bootstrap.plan_type,

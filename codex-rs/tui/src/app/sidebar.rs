@@ -2,6 +2,7 @@
 //! can paint the closing frames and reverse direction if reopened mid-slide.
 
 use super::App;
+use super::agent_navigation::AgentNavigationState;
 use super::pane_motion::PaneMotion;
 use super::side_pane;
 use super::side_pane::SidePaneLayout;
@@ -12,8 +13,10 @@ use crate::app_server_session::SideChat;
 use crate::app_server_session::SideChatStorage;
 use crate::app_server_session::side_chat_prompt_preview;
 use crate::sidebar_chooser::ChatTabs;
+use crate::sidebar_chooser::ChooserScroll;
 use crate::sidebar_chooser::Discovery;
 use crate::sidebar_tab_strip::SidebarTab;
+use crate::terminal_hyperlinks::ReaderLink;
 use crate::tui::Tui;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ThreadItemPayload;
@@ -28,6 +31,7 @@ pub(super) enum SidebarContent {
     Chooser,
     Chat(ThreadId),
     Document(uuid::Uuid),
+    Subagents,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -64,9 +68,11 @@ impl SideCreation {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum ChooserSelection {
+    Agent(ThreadId),
     New,
     Chat(ThreadId),
     Retry,
+    File(usize),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -74,16 +80,23 @@ pub(super) struct SidebarInputState {
     pub(super) revision: usize,
     pub(super) selected_tab: Option<SidebarTab>,
     pub(super) choice: ChooserSelection,
+    scroll: ChooserScroll,
+    content: SidebarContent,
+    showing_file_path: bool,
+    file_path_scroll: usize,
 }
 
 #[derive(Default)]
 pub(super) struct SidebarPane {
     pub(super) creation: Option<SideCreation>,
     pub(super) close: Option<super::sidebar_close::Confirmation>,
+    pub(super) files: Option<super::sidebar_files::Files>,
+    pub(super) opened_files: Vec<codex_utils_path_uri::PathUri>,
     pub(super) documents: HashMap<uuid::Uuid, super::sidebar_document::Document>,
     pub(super) focus_document_request: Option<uuid::Uuid>,
     content: SidebarContent,
     tabs: Vec<SidebarTab>,
+    pub(super) agents: super::sidebar_subagents::Overview,
     // The chooser keeps the same order when an attached chat becomes a live tab.
     choices: Vec<SideChat>,
     // A snapshot of the visible rows at the last explicit chooser refresh.
@@ -94,13 +107,17 @@ pub(super) struct SidebarPane {
     // Visit order is independent of the order in which tabs appear.
     visits: Vec<SidebarTab>,
     pub(super) choice: usize,
-    tabs_revision: usize,
+    pub(super) chooser_scroll: ChooserScroll,
+    pub(super) showing_file_path: bool,
+    pub(super) file_path_scroll: usize,
+    pub(super) file_preview_unavailable: Option<&'static str>,
+    pub(super) tabs_revision: usize,
     focus: Option<PaneFocus>,
     motion: PaneMotion,
 }
 
 impl SidebarPane {
-    pub(super) fn visible_link_at(&self, column: u16, row: u16) -> Option<String> {
+    pub(super) fn visible_link_at(&self, column: u16, row: u16) -> Option<ReaderLink> {
         let SidebarContent::Document(id) = self.visible_content()? else {
             return None;
         };
@@ -144,12 +161,18 @@ impl SidebarPane {
             self.cancel_hidden_document_primary(/*visible*/ false);
         }
         self.focus_document_request = None;
+        self.agents.pending_link = None;
+        if self.content != content {
+            self.showing_file_path = false;
+        }
         match content {
             SidebarContent::Chat(id) => {
                 self.add_tab(id);
                 self.visit(SidebarTab::Chat(id));
             }
-            SidebarContent::Chooser if self.content != content || self.focus.is_none() => {
+            SidebarContent::Chooser
+                if self.focus.is_none() || matches!(self.content, SidebarContent::Chat(_)) =>
+            {
                 self.reset_choice();
             }
             SidebarContent::Document(id) => {
@@ -157,39 +180,119 @@ impl SidebarPane {
                 self.add_document_tab(id);
                 self.visit(tab);
             }
+            SidebarContent::Subagents => {
+                if !self.tabs.contains(&SidebarTab::Subagents) {
+                    self.tabs.push(SidebarTab::Subagents);
+                    self.tabs_revision += 1;
+                }
+                self.visit(SidebarTab::Subagents);
+            }
             SidebarContent::Chooser => {}
         }
         if content != SidebarContent::Chooser || focus == PaneFocus::Main {
             self.opening = None;
         }
+        if content != SidebarContent::Chooser
+            && let Some(files) = &mut self.files
+        {
+            files.scan = None;
+        }
         self.content = content;
         self.focus = Some(focus);
+    }
+
+    pub(super) fn clear_files(&mut self) {
+        if self.files.take().is_some() {
+            self.showing_file_path = false;
+            self.choice = self.choice.min(self.chat_tabs().choice_count() - 1);
+            self.tabs_revision += 1;
+        }
     }
 
     pub(super) fn chat_tabs(&self) -> ChatTabs<'_> {
         ChatTabs {
             label_style: crate::thread_label::ThreadLabelStyle::Plain,
             discovery: &self.discovery,
+            scroll: self.chooser_scroll,
             opening: self.opening.as_ref(),
             ids: &self.tabs,
             choices: &self.choices,
+            agents: &self.agents.rows,
+            agent_title: self.agents.detail.and_then(|id| {
+                self.agents
+                    .rows
+                    .iter()
+                    .find(|agent| agent.id == id)
+                    .map(|agent| agent.name.as_str())
+            }),
             latest_prompts: &self.latest_prompts,
             selected: self.visits.last().copied(),
+            files: self
+                .files
+                .as_ref()
+                .map_or(&[], |files| files.entries.as_slice()),
+            files_cwd: self.files.as_ref().and_then(|files| files.cwd.as_ref()),
+            file_preview_unavailable: self.file_preview_unavailable,
+            files_loading: self
+                .files
+                .as_ref()
+                .is_some_and(|files| files.scan.is_some()),
+        }
+    }
+
+    pub(super) fn sync_agent_rows(&mut self, nav: &AgentNavigationState) {
+        let rows = self.agents.chooser_rows(nav);
+        let reordered = self
+            .agents
+            .rows
+            .iter()
+            .map(|agent| agent.id)
+            .ne(rows.iter().map(|agent| agent.id));
+        let selection = self.input_state().choice;
+        self.agents.rows = rows;
+        if reordered {
+            self.restore_choice(selection);
+            self.tabs_revision += 1;
+        }
+    }
+
+    fn restore_choice(&mut self, selection: ChooserSelection) {
+        let tabs = self.chat_tabs();
+        let index = match selection {
+            ChooserSelection::New => Some(0),
+            ChooserSelection::Chat(id) => tabs.choice_index(id),
+            ChooserSelection::Agent(id) => tabs.agent_index(id),
+            ChooserSelection::File(offset) => {
+                Some(tabs.file_start() + offset).filter(|&index| tabs.file(index).is_some())
+            }
+            ChooserSelection::Retry => {
+                Some(tabs.choices.len() + 1).filter(|&index| tabs.retry_row(index))
+            }
+        };
+        if let Some(index) = index {
+            self.choice = index;
+        } else {
+            self.reset_choice();
         }
     }
 
     pub(super) fn set_discovery(&mut self, discovery: Discovery) {
-        if matches!(discovery, Discovery::Failed(_)) && self.choices.is_empty() {
-            self.choice = 1;
-        }
+        let selection = self.input_state().choice;
         self.discovery = discovery;
-        self.choice = self.choice.min(self.chat_tabs().choice_count() - 1);
+        if self.choices.is_empty()
+            && matches!(self.discovery, Discovery::Failed(_))
+            && selection == ChooserSelection::New
+        {
+            self.choice = 1;
+        } else {
+            self.restore_choice(selection);
+        }
         self.tabs_revision += 1;
     }
 
     pub(super) fn update_saved_chats(&mut self, mut chats: Vec<SideChat>) {
-        let selection = self.chat_tabs().choice(self.choice);
-        let keep_new = self.choice == 0 && !self.choices.is_empty();
+        let selection = self.input_state().choice;
+        let was_empty = self.choices.is_empty();
         for chat in &mut self.choices {
             if !self.tabs.contains(&SidebarTab::Chat(chat.id)) {
                 continue;
@@ -208,15 +311,17 @@ impl SidebarPane {
         self.choices = chats;
         if reordered {
             self.tabs_revision += 1;
-            if let Some(index) = selection.and_then(|id| self.chat_tabs().choice_index(id)) {
-                self.choice = index;
-            } else if !keep_new {
+            if selection == ChooserSelection::New && was_empty {
                 self.reset_choice();
+            } else {
+                self.restore_choice(selection);
             }
         }
     }
 
     fn reset_choice(&mut self) {
+        self.showing_file_path = false;
+        self.chooser_scroll = ChooserScroll::default();
         self.choice = self
             .selected_chat()
             .and_then(|id| self.chat_tabs().choice_index(id))
@@ -252,7 +357,7 @@ impl SidebarPane {
     pub(super) fn selected_chat(&self) -> Option<ThreadId> {
         self.visits.iter().rev().find_map(|tab| match *tab {
             SidebarTab::Chat(id) => Some(id),
-            SidebarTab::Document(_) => None,
+            SidebarTab::Document(_) | SidebarTab::Subagents => None,
         })
     }
 
@@ -328,12 +433,24 @@ impl SidebarPane {
         self.tabs_revision += 1;
     }
 
+    pub(super) fn close_agents(&mut self) -> bool {
+        self.agents.detail = None;
+        self.tabs.retain(|tab| *tab != SidebarTab::Subagents);
+        self.visits.retain(|tab| *tab != SidebarTab::Subagents);
+        self.tabs_revision += 1;
+        self.visible_content() == Some(SidebarContent::Subagents)
+    }
+
     pub(super) fn input_state(&self) -> SidebarInputState {
         let tabs = self.chat_tabs();
         let choice = if let Some(id) = tabs.choice(self.choice) {
             ChooserSelection::Chat(id)
         } else if tabs.retry_row(self.choice) {
             ChooserSelection::Retry
+        } else if let Some(offset) = tabs.file_offset(self.choice) {
+            ChooserSelection::File(offset)
+        } else if let Some(agent) = tabs.agent(self.choice) {
+            ChooserSelection::Agent(agent.id)
         } else {
             ChooserSelection::New
         };
@@ -341,13 +458,19 @@ impl SidebarPane {
             revision: self.tabs_revision,
             selected_tab: tabs.selected,
             choice,
+            scroll: self.chooser_scroll,
+            content: self.content,
+            showing_file_path: self.showing_file_path,
+            file_path_scroll: self.file_path_scroll,
         }
     }
 
     fn add_tab(&mut self, id: ThreadId) {
         if !self.tabs.contains(&SidebarTab::Chat(id)) {
             if self.chat_tabs().choice_index(id).is_none() {
+                let selection = self.input_state().choice;
                 self.choices.push(id.into());
+                self.restore_choice(selection);
             }
             self.tabs.push(SidebarTab::Chat(id));
             self.tabs_revision += 1;
@@ -371,7 +494,12 @@ impl SidebarPane {
     pub(super) fn hide(&mut self) {
         self.cancel_hidden_document_primary(/*visible*/ false);
         self.focus_document_request = None;
+        self.agents.pending_link = None;
         self.opening = None;
+        self.showing_file_path = false;
+        if let Some(files) = &mut self.files {
+            files.scan = None;
+        }
         self.focus = None;
     }
 
@@ -392,8 +520,10 @@ impl SidebarPane {
             self.remove_choice(id);
         }
         if self.content == SidebarContent::Chat(id) {
-            self.content = match self.selected_chat() {
-                Some(child) => SidebarContent::Chat(child),
+            self.content = match self.recent_tab(/*excluding*/ None) {
+                Some(SidebarTab::Chat(child)) => SidebarContent::Chat(child),
+                Some(SidebarTab::Subagents) => SidebarContent::Subagents,
+                Some(SidebarTab::Document(doc)) => SidebarContent::Document(doc),
                 None => {
                     self.hide();
                     self.motion = PaneMotion::default();
@@ -412,11 +542,14 @@ impl SidebarPane {
             self.opening = None;
         }
         if let Some(index) = self.chat_tabs().choice_index(id) {
+            let selection = self.input_state().choice;
             self.choices.remove(index - 1);
-            if index < self.choice {
-                self.choice -= 1;
+            if selection == ChooserSelection::Chat(id) {
+                self.choice = index.min(self.chat_tabs().choice_count() - 1);
+            } else {
+                self.restore_choice(selection);
             }
-            self.choice = self.choice.min(self.choices.len());
+            self.tabs_revision += 1;
         }
     }
 
@@ -426,6 +559,20 @@ impl SidebarPane {
 }
 
 impl App {
+    pub(super) fn chooser_area(&self, tui: &Tui) -> Option<Rect> {
+        self.chooser_focus()?;
+        let screen: Rect = tui.terminal.last_known_screen_size.into();
+        self.conversation_frame.panel_area().or_else(|| {
+            match side_pane::split_layout(self, tui, screen) {
+                Some(SidebarLayout::Panel { sidebar, .. }) => Some(sidebar),
+                _ if screen.width < 100 && self.chooser_focus() == Some(PaneFocus::Sidebar) => {
+                    Some(screen)
+                }
+                _ => None,
+            }
+        })
+    }
+
     pub(super) fn refresh_visible_side_chat_prompts(
         &mut self,
         tui: &Tui,
@@ -433,20 +580,9 @@ impl App {
         parent: ThreadId,
         request: uuid::Uuid,
     ) {
-        let area = if self.sidebar_parent() == Some(parent) && self.chooser_focus().is_some() {
-            let screen: Rect = tui.terminal.last_known_screen_size.into();
-            self.conversation_frame.panel_area().or_else(|| {
-                match side_pane::split_layout(self, tui, screen) {
-                    Some(SidebarLayout::Panel { sidebar, .. }) => Some(sidebar),
-                    _ if screen.width < 100 && self.chooser_focus() == Some(PaneFocus::Sidebar) => {
-                        Some(screen)
-                    }
-                    _ => None,
-                }
-            })
-        } else {
-            None
-        };
+        let area = (self.sidebar_parent() == Some(parent))
+            .then(|| self.chooser_area(tui))
+            .flatten();
         let Some(pane) = self.sidebars.get_mut(&Some(parent)) else {
             return;
         };
@@ -540,6 +676,11 @@ impl App {
 
     pub(super) fn sidebar_parent(&self) -> Option<ThreadId> {
         self.active_side_parent_thread_id()
+            .or_else(|| {
+                self.docked_agent()
+                    .filter(|(_, agent)| Some(*agent) == self.current_displayed_thread_id())
+                    .map(|(parent, _)| parent)
+            })
             .or_else(|| self.current_displayed_thread_id())
     }
 
@@ -559,14 +700,17 @@ impl App {
 
     pub(super) fn panel_focus(&self) -> Option<PaneFocus> {
         let pane = self.sidebar()?;
-        match pane.content {
-            SidebarContent::Chooser | SidebarContent::Document(_) => pane.focus,
-            SidebarContent::Chat(_) => None,
-        }
+        pane.focus.filter(|_| {
+            !(matches!(pane.content, SidebarContent::Chat(_))
+                || pane.content == SidebarContent::Subagents && pane.agents.detail.is_some())
+        })
     }
 
     pub(super) fn sidebar_has_focus(&self) -> bool {
         self.active_side_parent_thread_id().is_some()
+            || self
+                .docked_agent()
+                .is_some_and(|(_, agent)| self.current_displayed_thread_id() == Some(agent))
             || self.panel_focus() == Some(PaneFocus::Sidebar)
     }
 }
@@ -638,7 +782,12 @@ pub(super) fn content_layout(
     [main, sidebar]: [Rect; 2],
 ) -> Option<SidebarLayout> {
     match content {
-        SidebarContent::Chooser | SidebarContent::Document(_) => (app.sidebar_chooser_available()
+        SidebarContent::Subagents if app.docked_agent().is_some() => {
+            let (_, agent) = app.docked_agent()?;
+            side_pane::pair_layout(app, agent, [main, sidebar]).map(SidebarLayout::Chat)
+        }
+        SidebarContent::Chooser | SidebarContent::Document(_) | SidebarContent::Subagents => (app
+            .sidebar_chooser_available()
             && (focus == PaneFocus::Main || app.chat_widget.completion_can_yield_focus()))
         .then_some(SidebarLayout::Panel {
             main,
