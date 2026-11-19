@@ -40,6 +40,7 @@ def queue_controller(config_path, maintenance, state, report):
             'then commit/push the authorized final verification as achbogga. '
             'The reload supervisor waited for the previous turn to complete before restarting this same thread. '
             'Do not repeat completed updates or restart healthy sessions again. Preserve actual user pauses. '
+            'Stopped or idle sessions must remain idle: do not resume their goals or send them work. '
             'The five-million-token strategy reassessment instruction never requires manual approval.')
     with (state / 'controller-handoff.log').open('w') as output:
         handoff = subprocess.Popen([sys.executable, str(maintenance), '--config', str(config_path),

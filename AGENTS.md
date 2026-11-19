@@ -20,6 +20,10 @@ not update a process that is already running.
 - Preserve explicit user pauses, completed goals, native budgets, pending input,
   and running compaction. A request to reassess strategy periodically and then
   proceed does not require manual approval and must not become a watcher gate.
+- Restore stopped or idle sessions without starting goals or work. A saved
+  `active` goal alone is not evidence of current work; pause an idle active goal
+  through native control before reloading. Continue only work actually interrupted
+  by the update and the controller's maintenance verification.
 - Do not start a concurrent writer to a thread. Quit its old writer and launcher
   gracefully before resuming in the same Screen shell, preserving the environment.
 - Verify fresh tool results for repaired failures. Old errors in scrollback are

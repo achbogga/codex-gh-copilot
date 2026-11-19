@@ -329,14 +329,37 @@ def launch_arguments(target, config, continuation=None):
 
 
 def continuation_policy(before, interrupted, continuation):
-    if before and before['status'] in ('active', 'blocked'):
+    if before and before['status'] == 'active' and interrupted:
         return None, continuation
     if interrupted and not continuation:
         continuation = ('Continue the interrupted user task after this harness runtime upgrade. '
                         'The same native thread and files are preserved. Old PTY/process handles may no longer exist; '
                         'inspect saved tool results and current authoritative state before rerunning commands. '
-                        'Preserve the existing goal objective, explicit user pauses and native budgets.')
+                        'Preserve the existing goal objective, explicit user pauses and native budgets. '
+                        'Do not resume a stopped goal; continue only the user work interrupted by this update.')
     return continuation, None
+
+
+def pause_idle_goal(target, state, before):
+    """Use native goal control to keep an idle active goal stopped on resume."""
+    text = capture(target, state)
+    if busy(text) or pending_input(text) or not alive(target):
+        raise RuntimeError('Session stopped being idle; no goal pause or reload was attempted.')
+    current = goal(Path(target['home']), target['thread']['id'])
+    if not current or any(current.get(key) != before.get(key) for key in ('goal_id', 'status', 'token_budget')):
+        raise RuntimeError('Goal changed before the idle pause; reload deferred.')
+    enter_command(target, '/goal pause')
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        after = goal(Path(target['home']), target['thread']['id'])
+        if not after or after['goal_id'] != before['goal_id']:
+            raise RuntimeError('Goal identity changed while pausing the idle session.')
+        if after['status'] == 'paused':
+            return
+        if after['status'] != 'active':
+            raise RuntimeError('Goal status changed while pausing the idle session.')
+        time.sleep(.2)
+    raise RuntimeError('Native idle-goal pause was not confirmed; reload deferred.')
 
 
 def reload_target(target, config, state, drain_seconds=45, continuation=None):
@@ -376,15 +399,22 @@ def reload_target(target, config, state, drain_seconds=45, continuation=None):
                 break
     if busy(text) or pending_input(text) or not alive(target):
         raise RuntimeError('Native turn did not reach a safe quit point; reload deferred.')
+    # A saved active status does not prove that any work is running. Only
+    # restore a goal we actually interrupted; otherwise make the idle state
+    # explicit through native control before the old writer exits.
+    resume_goal = bool(before and before['status'] == 'active' and interrupted_for_update)
+    paused_idle_goal = bool(before and before['status'] == 'active' and not resume_goal)
+    if paused_idle_goal:
+        pause_idle_goal(target, state, before)
+    expected_goal_status = ('paused' if paused_idle_goal else (before or {}).get('status'))
     enter_command(target, '/quit')
     deadline = time.monotonic() + 60
     while alive(target) or (target.get('launcher_process') and alive(target['launcher_process'])):
         if time.monotonic() >= deadline:
             raise RuntimeError('Old writer/launcher has not exited; no concurrent resume was started.')
         time.sleep(.2)
-    # A positional prompt suppresses Codex's resume-goal dialog. Restore active
-    # goals first; otherwise the interruption's temporary pause is mistaken for
-    # a human pause. A controller continuation can be queued after restoration.
+    # A positional prompt suppresses Codex's resume-goal dialog. Restore a goal
+    # interrupted by this update before queuing a controller continuation.
     initial_continuation, deferred_continuation = continuation_policy(before, interrupted_for_update, continuation)
     enter_command(target, shlex.join(launch_arguments(target, config, initial_continuation)))
     deadline = time.monotonic() + 90
@@ -404,7 +434,7 @@ def reload_target(target, config, state, drain_seconds=45, continuation=None):
                 ownership_retry_at = time.monotonic()
             continue
         if 'Resume paused goal?' in text and not selected:
-            if not before or before['status'] != 'active':
+            if not resume_goal:
                 stuff(target, '\x1b[B')
                 time.sleep(.2)
             stuff(target, '\r')
@@ -420,10 +450,7 @@ def reload_target(target, config, state, drain_seconds=45, continuation=None):
                         replacement_seen_at = time.monotonic()
                     break
         current_goal = goal(home, current['id']) if updated else None
-        goal_ready = (not before or before['status'] in ('complete', 'usage_limited')
-                      or (current_goal and current_goal['status'] == 'active' and before['status'] == 'active')
-                      or (current_goal and current_goal['status'] == 'blocked' and before['status'] == 'blocked')
-                      or (before['status'] == 'paused' and (selected or continuation) and current_goal and current_goal['status'] == 'paused'))
+        goal_ready = (not before or (current_goal and current_goal['status'] == expected_goal_status))
         if (updated and replacement_seen_at is not None and time.monotonic() - replacement_seen_at >= 3
                 and goal_ready and 'Resume paused goal?' not in text
                 and ('Ask Codex to do anything' in text or busy(text))):
@@ -436,8 +463,12 @@ def reload_target(target, config, state, drain_seconds=45, continuation=None):
     after = goal(home, current['id'])
     if before and (not after or after['goal_id'] != before['goal_id']):
         raise RuntimeError('Goal identity changed during reload.')
-    if before and before['status'] in ('paused', 'blocked', 'complete', 'usage_limited') and after['status'] != before['status']:
-        raise RuntimeError('A paused or terminal goal changed status during reload.')
+    if before and after['status'] != expected_goal_status:
+        raise RuntimeError('Goal status did not match the preserved working or stopped state.')
+    if before and after.get('token_budget') != before.get('token_budget'):
+        raise RuntimeError('Native goal budget changed during reload.')
+    if not interrupted_for_update and not continuation and busy(text):
+        raise RuntimeError('An idle session unexpectedly started work during reload.')
     if deferred_continuation:
         text = capture(updated, state)
         if not empty_composer(text):
@@ -447,6 +478,8 @@ def reload_target(target, config, state, drain_seconds=45, continuation=None):
             'old_pid': target['pid'], 'new_pid': updated['pid'], 'model': current['model'],
             'reasoning_effort': current['reasoning_effort'], 'goal_before': before, 'goal_after': after,
             'interrupted_for_update': interrupted_for_update,
+            'paused_idle_goal': paused_idle_goal,
+            'work_policy': 'continue-interrupted-work' if interrupted_for_update or continuation else 'restore-idle',
             'status': 'reloaded-exact-thread'}
 
 

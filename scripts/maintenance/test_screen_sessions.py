@@ -26,7 +26,7 @@ class ScreenSessionTests(unittest.TestCase):
         self.assertFalse(sessions.pending_input(': Ask Codex to do anything\n GPT-6.1 Sol max\n'))
 
     def test_reload_preserves_paused_and_blocked_goals_without_starting_them(self):
-        for status in ('paused', 'blocked'):
+        for status in ('paused', 'blocked', 'usage_limited'):
             with self.subTest(status=status):
                 target = self.target()
                 replacement = {**target, 'pid': 456}
@@ -46,6 +46,82 @@ class ScreenSessionTests(unittest.TestCase):
                 self.assertEqual(result['goal_after'], goal)
                 self.assertEqual([call.args[1] for call in stuff.call_args_list], ['\x1b[B', '\r'])
                 self.assertEqual(enter.call_count, 2)
+                self.assertEqual(result['work_policy'], 'restore-idle')
+
+    def test_idle_active_goal_is_natively_paused_and_not_restarted(self):
+        target = self.target()
+        replacement = {**target, 'pid': 456}
+        original = {'goal_id': 'same-goal', 'status': 'active', 'token_budget': 12345}
+        current = dict(original)
+        idle = ': Ask Codex to do anything\n'
+        commands = []
+
+        def enter(_target, command):
+            commands.append(command)
+            if command == '/goal pause':
+                current['status'] = 'paused'
+
+        with (patch.object(sessions, 'alive', side_effect=[True, True, True, False]),
+              patch.object(sessions, 'verified_thread', return_value=target['thread']),
+              patch.object(sessions, 'goal', side_effect=lambda *_: dict(current)),
+              patch.object(sessions, 'capture', side_effect=[idle, idle, 'Resume paused goal?', idle, idle]),
+              patch.object(sessions, 'inventory', return_value=[replacement]),
+              patch.object(sessions, 'enter_command', side_effect=enter),
+              patch.object(sessions, 'stuff') as stuff,
+              patch.object(sessions.time, 'sleep'),
+              patch.object(sessions.time, 'monotonic', side_effect=range(10, 100)),
+              patch.object(sessions.os, 'readlink', return_value='/new/codex')):
+            result = sessions.reload_target(target, {'codex_bin': '/new/codex'}, Path('/private'), drain_seconds=0)
+        self.assertEqual(commands[:2], ['/goal pause', '/quit'])
+        self.assertEqual(len(commands), 3)
+        self.assertTrue(commands[-1].endswith('resume exact-thread'))
+        self.assertEqual([call.args[1] for call in stuff.call_args_list], ['\x1b[B', '\r'])
+        self.assertEqual(result['goal_before'], original)
+        self.assertEqual(result['goal_after'], {**original, 'status': 'paused'})
+        self.assertTrue(result['paused_idle_goal'])
+        self.assertFalse(result['interrupted_for_update'])
+        self.assertEqual(result['work_policy'], 'restore-idle')
+
+    def test_only_an_actually_interrupted_active_goal_is_resumed(self):
+        target = self.target()
+        replacement = {**target, 'pid': 456}
+        current = {'goal_id': 'same-goal', 'status': 'active'}
+        idle = ': Ask Codex to do anything\n'
+        working = 'Working (2s, esc to interrupt)\n' + idle
+        with (patch.object(sessions, 'alive', side_effect=[True, True, False]),
+              patch.object(sessions, 'verified_thread', return_value=target['thread']),
+              patch.object(sessions, 'goal', return_value=current),
+              patch.object(sessions, 'capture', side_effect=[working, idle, 'Resume paused goal?', idle, idle]),
+              patch.object(sessions, 'inventory', return_value=[replacement]),
+              patch.object(sessions, 'enter_command') as enter,
+              patch.object(sessions, 'stuff') as stuff,
+              patch.object(sessions.time, 'sleep'),
+              patch.object(sessions.time, 'monotonic', side_effect=range(10, 100)),
+              patch.object(sessions.os, 'readlink', return_value='/new/codex')):
+            result = sessions.reload_target(target, {'codex_bin': '/new/codex'}, Path('/private'), drain_seconds=0)
+        self.assertEqual([call.args[1] for call in stuff.call_args_list], ['\x1b', '\r'])
+        self.assertEqual(enter.call_count, 2)
+        self.assertTrue(enter.call_args_list[-1].args[1].endswith('resume exact-thread'))
+        self.assertTrue(result['interrupted_for_update'])
+        self.assertFalse(result['paused_idle_goal'])
+        self.assertEqual(result['work_policy'], 'continue-interrupted-work')
+
+    def test_idle_pause_refuses_new_input_work_or_a_replaced_goal(self):
+        target = self.target()
+        original = {'goal_id': 'same-goal', 'status': 'active'}
+        for text in (': pending draft', 'Working (2s, esc to interrupt)\n: Ask Codex to do anything\n'):
+            with (patch.object(sessions, 'capture', return_value=text),
+                  patch.object(sessions, 'enter_command') as enter):
+                with self.assertRaisesRegex(RuntimeError, 'stopped being idle'):
+                    sessions.pause_idle_goal(target, Path('/private'), original)
+                enter.assert_not_called()
+        with (patch.object(sessions, 'capture', return_value=': Ask Codex to do anything\n'),
+              patch.object(sessions, 'alive', return_value=True),
+              patch.object(sessions, 'goal', return_value={**original, 'goal_id': 'new-goal'}),
+              patch.object(sessions, 'enter_command') as enter):
+            with self.assertRaisesRegex(RuntimeError, 'Goal changed before'):
+                sessions.pause_idle_goal(target, Path('/private'), original)
+            enter.assert_not_called()
 
     def test_verified_native_editor_thread_is_a_root_but_subagents_are_not(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -301,9 +377,14 @@ class ScreenSessionTests(unittest.TestCase):
             enter.assert_not_called()
 
     def test_active_goals_restore_before_any_prompt_can_suppress_the_resume_dialog(self):
-        for status in ('active', 'blocked'):
-            self.assertEqual(sessions.continuation_policy({'status': status}, True, None), (None, None))
-            self.assertEqual(sessions.continuation_policy({'status': status}, True, 'Verify handoff.'), (None, 'Verify handoff.'))
+        self.assertEqual(sessions.continuation_policy({'status': 'active'}, True, None), (None, None))
+        self.assertEqual(sessions.continuation_policy({'status': 'active'}, True, 'Verify handoff.'), (None, 'Verify handoff.'))
+        for status in ('active', 'paused', 'blocked', 'complete', 'usage_limited'):
+            self.assertEqual(sessions.continuation_policy({'status': status}, False, None), (None, None))
+        for status in ('paused', 'blocked', 'complete', 'usage_limited'):
+            initial, deferred = sessions.continuation_policy({'status': status}, True, None)
+            self.assertIn('Do not resume a stopped goal', initial)
+            self.assertIsNone(deferred)
         initial, deferred = sessions.continuation_policy(None, True, None)
         self.assertIn('Continue the interrupted user task', initial)
         self.assertIsNone(deferred)
