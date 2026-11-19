@@ -613,7 +613,7 @@ test(
   { skip: !process.env.COPILOT_PILOT_CODEX_BIN, timeout: 60000 },
   async (t) => {
     const directory = await mkdtemp(join(tmpdir(), "copilot-smoke-"));
-    t.after(() => rm(directory, { recursive: true, force: true }));
+    t.after(() => rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
     await writeFile(join(directory, "value.txt"), "before");
     await mkdir(join(directory, "state"));
     // This synthetic model is no longer bundled by current Codex. Give it the
