@@ -86,6 +86,8 @@ def main():
         environment = {**os.environ, 'COPILOT_PILOT_CODEX_BIN': config['codex_bin'],
                        'COPILOT_PILOT_RUNTIME_BIN': config['copilot_bin'],
                        'COPILOT_PILOT_LONG_STREAM_MS': '5000'}
+        if runtime.get('native_patches'):
+            environment['COPILOT_PILOT_NATIVE_KEYBOARD_SELECTION'] = '1'
         test_files = sorted(str(path) for path in (repo / 'scripts/copilot-pilot').glob('*.test.mjs'))
         run_logged([config['node_bin'], '--test', *test_files], state / 'bridge-tests.log', environment)
         run_logged([sys.executable, '-m', 'unittest', 'discover', '-s', str(repo / 'scripts/maintenance'), '-p', 'test_*.py'],

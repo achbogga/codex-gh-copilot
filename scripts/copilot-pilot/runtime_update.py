@@ -17,6 +17,8 @@ import tarfile
 import tempfile
 import urllib.request
 
+from native_patch_runtime import install_patched
+
 
 def get(url, limit=4 * 1024**2):
     if url.startswith('https://api.github.com/') and shutil.which('gh'):
@@ -95,6 +97,23 @@ def installed_version(binary):
     return subprocess.check_output([str(binary), '--version'], text=True, timeout=20).strip()
 
 
+def replace_launcher_runtime(text, config, codex, old_node, node):
+    previous = config.get('codex_previous_bins', [])
+    if not isinstance(previous, list) or not all(isinstance(path, str) and Path(path).is_absolute() for path in previous):
+        raise ValueError('codex_previous_bins must list explicitly managed absolute runtime paths.')
+    lines = [line for line in text.splitlines() if line.startswith('exec ')]
+    if len(lines) != 1:
+        raise ValueError('Unrecognized managed runtime launcher.')
+    arguments = shlex.split(lines[0])
+    try:
+        old = arguments[arguments.index('--codex-bin') + 1]
+    except (ValueError, IndexError) as error:
+        raise ValueError('Missing managed Codex runtime argument.') from error
+    if old not in [config['codex_bin'], *previous] or str(old_node) != arguments[1]:
+        raise ValueError('A launcher differs from the managed runtime configuration.')
+    return text.replace(old, str(codex)).replace(str(old_node), str(node))
+
+
 def codex_entries(config, home):
     """Validate all explicitly managed launcher paths before changing any of them."""
     extra = config.get('codex_entries', [])
@@ -163,6 +182,7 @@ def install(config, cache):
         raise ValueError('The native Code Mode companion is missing.')
     if codex_version not in installed_version(codex) or copilot_version not in installed_version(copilot):
         raise ValueError('Installed binary version did not match its stable release.')
+    codex, native_patches = install_patched(config, codex, codex_version, runtime_root)
     node_version = re.fullmatch(r'node-v(22\.\d+\.\d+)-linux-x64.tar.xz', node_checksum[1])[1]
     old_node = node
     if node_version not in installed_version(node):
@@ -176,14 +196,12 @@ def install(config, cache):
     npm = node.parent.parent / 'lib/node_modules/npm/bin/npm-cli.js'
     if not npm.is_file():
         raise ValueError('The selected Node installation does not contain npm.')
-    old_codex = str(config['codex_bin'])
     wrappers = []
     for name in ('codex-copilot', 'codex-copilot-docker'):
         path = launcher.with_name(name)
         text = path.read_text()
-        if old_codex not in text or str(old_node) not in text:
-            raise ValueError('A launcher differs from the managed runtime configuration.')
-        wrappers.append((path, text, text.replace(old_codex, str(codex)).replace(str(old_node), str(node))))
+        updated = replace_launcher_runtime(text, config, codex, old_node, node)
+        wrappers.append((path, text, updated))
     # Preserve the installation inputs before changing pointers or SDK files.
     atomic_text(cache / 'launchers-before.json', json.dumps({str(p): old for p, old, _ in wrappers}, indent=2))
     package = repo / 'scripts/copilot-pilot/package.json'
@@ -213,6 +231,8 @@ def install(config, cache):
               'codex_entries_updated': len(entries),
               'codex_sha512_verified': True, 'copilot_sha256_verified': True,
               'old_running_executables_overwritten': False}
+    if native_patches:
+        report['native_patches'] = native_patches
     atomic_text(cache / 'runtime-install.json', json.dumps(report, indent=2) + '\n')
     return report
 

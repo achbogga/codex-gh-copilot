@@ -80,6 +80,17 @@ class NativeScrollbackTests(unittest.TestCase):
                                env=env, check=True, capture_output=True, timeout=10)
                 try:
                     self.assertTrue(wait_for(lambda: sessions.empty_composer(sessions.capture(target, root))))
+                    if os.environ.get('COPILOT_PILOT_NATIVE_KEYBOARD_SELECTION') == '1':
+                        sessions.stuff(target, 'alpha beta')
+                        self.assertTrue(wait_for(lambda: 'alpha beta' in sessions.capture(target, root)))
+                        sessions.stuff(target, '\x1b[1;2H')
+                        time.sleep(.2)
+                        sessions.stuff(target, 'X')
+                        self.assertTrue(wait_for(lambda: 'alpha beta' not in sessions.capture(target, root)
+                                                 and 'X' in sessions.capture(target, root)))
+                        sessions.stuff(target, '\x15')
+                        self.assertTrue(wait_for(lambda: sessions.empty_composer(sessions.capture(target, root))))
+                        self.assertEqual(requests, [], 'Native selection must not submit a model turn.')
                     sessions.enter_command(target, 'Show the synthetic history.')
                     self.assertTrue(wait_for(lambda: requests and sessions.empty_composer(
                         sessions.capture(target, root)) and not sessions.busy(sessions.capture(target, root))))

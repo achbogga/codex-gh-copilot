@@ -1,0 +1,160 @@
+diff --git a/codex-rs/tui/src/bottom_pane/textarea.rs b/codex-rs/tui/src/bottom_pane/textarea.rs
+index 5955f86179..de263ffed0 100644
+--- a/codex-rs/tui/src/bottom_pane/textarea.rs
++++ b/codex-rs/tui/src/bottom_pane/textarea.rs
+@@ -17,7 +17,9 @@
+ //! Visible web URLs carry their complete terminal hyperlink destination across wrapped rows;
+ //! masked rendering never exposes hyperlink destinations.
+ //! Mouse selection and wheel browsing use those same visual rows and keep graphemes and elements
+-//! atomic. Wheel browsing leaves the caret in place; moving or editing returns to caret following.
++//! atomic. Shift+Home/End extends the same editable selection to logical line boundaries.
++//! Typing, paste, and deletion replace the selection; unmodified movement clears it.
++//! Wheel browsing leaves the caret in place; moving or editing returns to caret following.
+ //! The editing module resolves replacement targets shared by insertion and paste-context inspection.
+ 
+ use crate::key_hint::KeyBindingListExt;
+@@ -674,6 +676,22 @@ impl TextArea {
+     pub fn input_with_keymap(&mut self, event: KeyEvent, keymap: &EditorKeymap) {
+         self.last_click = None;
+         self.end_mouse_drag();
++        // Shift+Home/End arrives as a normal modified key over SSH and Screen.
++        // Share the editable selection used by pointer input so typing, paste,
++        // and deletion replace the highlighted text consistently.
++        if event.modifiers == KeyModifiers::SHIFT {
++            match event.code {
++                KeyCode::Home => {
++                    self.select_line_boundary(false);
++                    return;
++                }
++                KeyCode::End => {
++                    self.select_line_boundary(true);
++                    return;
++                }
++                _ => {}
++            }
++        }
+         if keymap.insert_newline.is_pressed(event) {
+             self.insert_str("\n");
+             return;
+diff --git a/codex-rs/tui/src/bottom_pane/textarea/mouse.rs b/codex-rs/tui/src/bottom_pane/textarea/mouse.rs
+index 01fdfc7220..8b870fa2f1 100644
+--- a/codex-rs/tui/src/bottom_pane/textarea/mouse.rs
++++ b/codex-rs/tui/src/bottom_pane/textarea/mouse.rs
+@@ -19,6 +19,32 @@ pub(super) struct MouseSelection {
+ }
+ 
+ impl TextArea {
++    /// Extend an editable selection from its original anchor to a line boundary.
++    /// Keeping the anchor also makes repeated Shift+Home/End reversible.
++    pub(super) fn select_line_boundary(&mut self, to_end: bool) {
++        let anchor = self.cursor_pos;
++        let target = if to_end {
++            self.end_of_current_line()
++        } else {
++            self.beginning_of_current_line()
++        };
++        self.preferred_col = None;
++        self.clear_vim_replace_recovery();
++        self.vim_pending = VimPending::None;
++        let selection = self.mouse_selection.get_or_insert(MouseSelection {
++            pending_copy: None,
++            primary_owner: None,
++            origin: anchor..anchor,
++            unit: SelectionUnit::Character,
++            dragging: false,
++            moved: true,
++        });
++        selection.pending_copy = None;
++        selection.primary_owner = None;
++        selection.dragging = false;
++        self.cursor_pos = self.clamp_pos_to_nearest_boundary(target);
++    }
++
+     pub(in crate::bottom_pane) fn defer_copy(&mut self, id: u64) {
+         if let Some(range) = self.mouse_selection_range()
+             && let Some(selection) = &mut self.mouse_selection
+diff --git a/codex-rs/tui/src/bottom_pane/textarea/mouse_tests.rs b/codex-rs/tui/src/bottom_pane/textarea/mouse_tests.rs
+index 6f85be9acf..b3b32b8ee3 100644
+--- a/codex-rs/tui/src/bottom_pane/textarea/mouse_tests.rs
++++ b/codex-rs/tui/src/bottom_pane/textarea/mouse_tests.rs
+@@ -198,3 +198,80 @@ fn mouse_multiclick_preserves_the_initial_word_or_wrapped_line_when_reversing()
+         assert_eq!(&t.text()[t.mouse_selection_range().unwrap()], backward);
+     }
+ }
++
++#[test]
++fn shift_home_end_select_and_replace_without_changing_other_lines() {
++    for (key, cursor, selected, expected) in [
++        (KeyCode::Home, 11, 6..11, "first\nX beta\nlast"),
++        (KeyCode::End, 11, 11..16, "first\nalphaX\nlast"),
++    ] {
++        let mut t = TextArea::new();
++        t.insert_str("first\nalpha beta\nlast");
++        t.set_cursor(cursor);
++        t.input(KeyEvent::new(key, KeyModifiers::SHIFT));
++        assert_eq!(t.mouse_selection_range(), Some(selected));
++        t.insert_str("X");
++        assert_eq!(t.text(), expected);
++    }
++}
++
++#[test]
++fn shift_home_end_keep_anchor_and_plain_movement_clears_selection() {
++    let mut t = TextArea::new();
++    t.insert_str("alpha beta");
++    t.set_cursor(5);
++    t.input(KeyEvent::new(KeyCode::Home, KeyModifiers::SHIFT));
++    t.input(KeyEvent::new(KeyCode::Home, KeyModifiers::SHIFT));
++    assert_eq!(t.mouse_selection_range(), Some(0..5));
++    t.input(KeyEvent::new(KeyCode::End, KeyModifiers::SHIFT));
++    assert_eq!(t.mouse_selection_range(), Some(5..10));
++    t.input(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
++    assert_eq!(t.mouse_selection_range(), None);
++}
++
++#[test]
++fn shift_home_selection_supports_delete_unicode_and_paste() {
++    for key in [KeyCode::Backspace, KeyCode::Delete] {
++        let mut t = TextArea::new();
++        t.insert_str("héllo 👩‍💻");
++        t.input(KeyEvent::new(KeyCode::Home, KeyModifiers::SHIFT));
++        assert_eq!(t.mouse_selection_range(), Some(0..t.text().len()));
++        t.input(KeyEvent::new(key, KeyModifiers::NONE));
++        assert_eq!(t.text(), "");
++    }
++    let mut t = TextArea::new();
++    t.insert_str("héllo 👩‍💻");
++    t.input(KeyEvent::new(KeyCode::Home, KeyModifiers::SHIFT));
++    t.insert_str("pasted\ntext");
++    assert_eq!(t.text(), "pasted\ntext");
++}
++
++#[test]
++fn shift_home_selection_is_visibly_highlighted() {
++    let mut t = TextArea::new();
++    t.insert_str("alpha beta");
++    t.input(KeyEvent::new(KeyCode::Home, KeyModifiers::SHIFT));
++    let area = Rect::new(0, 0, 20, 2);
++    let buffer = render(&t, area, &mut TextAreaState::default());
++    for x in 0..10 {
++        assert!(buffer[(x, 0)].modifier.contains(Modifier::REVERSED));
++    }
++    assert!(!buffer[(10, 0)].modifier.contains(Modifier::REVERSED));
++}
++
++#[test]
++fn shift_home_selection_replaces_atomic_elements_and_ignores_key_release() {
++    let mut t = TextArea::new();
++    t.insert_str("before ");
++    t.insert_element("[Image #1]");
++    t.input(KeyEvent::new_with_kind(
++        KeyCode::Home,
++        KeyModifiers::SHIFT,
++        KeyEventKind::Release,
++    ));
++    assert_eq!(t.mouse_selection_range(), None);
++    t.input(KeyEvent::new(KeyCode::Home, KeyModifiers::SHIFT));
++    t.insert_str("replacement");
++    assert_eq!(t.text(), "replacement");
++    assert!(t.elements.is_empty());
++}
