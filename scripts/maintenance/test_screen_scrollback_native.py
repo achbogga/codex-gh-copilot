@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import sqlite3
 import subprocess
 import tempfile
 import threading
@@ -80,20 +81,43 @@ class NativeScrollbackTests(unittest.TestCase):
                                env=env, check=True, capture_output=True, timeout=10)
                 try:
                     self.assertTrue(wait_for(lambda: sessions.empty_composer(sessions.capture(target, root))))
+                    # Name the fixture before inference so automatic title
+                    # generation cannot race the no-extra-request assertions.
+                    sessions.enter_command(target, '/rename Synthetic scrollback fixture')
+
+                    def named():
+                        database = home / 'state_5.sqlite'
+                        if not database.exists():
+                            return False
+                        try:
+                            with sqlite3.connect(database.as_uri() + '?mode=ro', uri=True) as connection:
+                                return connection.execute('SELECT 1 FROM threads WHERE name=?',
+                                                          ('Synthetic scrollback fixture',)).fetchone() is not None
+                        except sqlite3.OperationalError:
+                            return False
+
+                    self.assertTrue(wait_for(named), sessions.capture(target, root))
+                    self.assertEqual(requests, [], 'Naming the fixture must not run inference.')
+                    sessions.enter_command(target, 'Show the synthetic history.')
+                    self.assertTrue(wait_for(lambda: requests and sessions.empty_composer(
+                        sessions.capture(target, root)) and not sessions.busy(sessions.capture(target, root))))
                     if os.environ.get('COPILOT_PILOT_NATIVE_KEYBOARD_SELECTION') == '1':
-                        sessions.stuff(target, 'alpha beta')
+                        # Exercise a configured native thread, matching the
+                        # saved sessions the updater resumes.
+                        baseline = len(requests)
+                        # Commit the fixture as one paste event. Rapid Screen
+                        # writes otherwise also exercise the typing-burst
+                        # classifier before the selection key is delivered.
+                        sessions.stuff(target, '\x1b[200~alpha beta\x1b[201~')
                         self.assertTrue(wait_for(lambda: 'alpha beta' in sessions.capture(target, root)))
                         sessions.stuff(target, '\x1b[1;2H')
                         time.sleep(.2)
                         sessions.stuff(target, 'X')
                         self.assertTrue(wait_for(lambda: 'alpha beta' not in sessions.capture(target, root)
-                                                 and 'X' in sessions.capture(target, root)))
+                                                 and 'X' in sessions.capture(target, root)), sessions.capture(target, root))
                         sessions.stuff(target, '\x15')
                         self.assertTrue(wait_for(lambda: sessions.empty_composer(sessions.capture(target, root))))
-                        self.assertEqual(requests, [], 'Native selection must not submit a model turn.')
-                    sessions.enter_command(target, 'Show the synthetic history.')
-                    self.assertTrue(wait_for(lambda: requests and sessions.empty_composer(
-                        sessions.capture(target, root)) and not sessions.busy(sessions.capture(target, root))))
+                        self.assertEqual(len(requests), baseline, f'Native selection must not submit a model turn: {requests!r}')
                     history = root / 'history.txt'
                     sessions.command(['screen', '-S', name, '-p', '0', '-X', 'hardcopy', '-h', str(history)])
                     self.assertTrue(wait_for(lambda: history.exists() and 'SCROLLBACK_0179' in history.read_text(errors='replace')))
