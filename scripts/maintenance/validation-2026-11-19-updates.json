@@ -1,6 +1,6 @@
 {
   "validated_at": "2026-11-19T16:52:01.640351+00:00",
-  "status": "updated-controller-pending",
+  "status": "updated",
   "upstream_head": "ab00c6d640e19d771d77859dc3eeff66f8a9168f",
   "upstream_commits_merged_since_previous_update": 225,
   "runtime": {
@@ -47,16 +47,19 @@
     "goal_ids_statuses_budgets_and_usage_preserved": true,
     "new_native_work_turns": 0,
     "goal_state_counts": {
-      "complete": 6,
+      "complete": 7,
       "blocked": 1,
       "paused": 1,
       "none": 5
     },
     "native_copilot_and_node_executables_verified": true,
     "controller_handoff_scheduled": true,
-    "controller_handoff_verified": false,
-    "total_sessions_restored": 13,
-    "original_native_histories_present_without_truncation": true
+    "controller_handoff_verified": true,
+    "total_sessions_restored": 14,
+    "original_native_histories_present_without_truncation": true,
+    "controller_model_and_reasoning_preserved": true,
+    "controller_completed_goal_and_budget_preserved": true,
+    "controller_native_execution_executable_verified": true
   },
   "seat_metadata_verification": {
     "models_available": 21,
@@ -67,5 +70,7 @@
   },
   "upstream_contained_in_fork_head": true,
   "private_reports_captures_goals_and_build_artifacts_outside_repository": true,
-  "official_sdk_release": "https://github.com/microsoft/copilot-sdk/releases/tag/v2.0.1"
+  "official_sdk_release": "https://github.com/microsoft/copilot-sdk/releases/tag/v2.0.1",
+  "controller_verified_at": "2026-11-19T17:21:35.317308+00:00",
+  "state_note": "Session states were checked at reload. Later user work is left untouched."
 }
