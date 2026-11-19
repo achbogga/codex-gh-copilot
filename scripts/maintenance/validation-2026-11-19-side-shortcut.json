@@ -1,0 +1,23 @@
+{
+  "validated_at": "2026-11-19T17:21:35.317308+00:00",
+  "scope": "GNU Screen shortcut for switching native side/main conversations",
+  "observed": "The physical Ctrl+/ key did not switch for the user; the native control byte works in the same running session.",
+  "fix": {
+    "screen_prefix_then_slash_forwards": "0x1f",
+    "persistent_screen_configuration": true,
+    "live_target_configuration_applied": true,
+    "codex_restart_required": false
+  },
+  "validation": {
+    "real_screen_input_tests_passed": 3,
+    "plain_slash_and_direct_control_input_unchanged": true,
+    "live_raw_control_byte_roundtrip": true,
+    "live_screen_prefix_roundtrip": true,
+    "original_view_restored": true,
+    "same_native_writer": true,
+    "goal_identity_status_budget_preserved": true,
+    "running_work_not_interrupted": true
+  },
+  "physical_mac_keyboard_emission_verified": false,
+  "private_captures_and_configuration_backups_outside_repository": true
+}

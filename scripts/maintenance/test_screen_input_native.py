@@ -14,6 +14,40 @@ import screen_sessions
 
 @unittest.skipUnless(shutil.which('screen'), 'GNU Screen is required.')
 class ScreenInputTests(unittest.TestCase):
+    def test_side_switch_prefix_forwards_control_byte_without_changing_normal_input(self):
+        with tempfile.TemporaryDirectory(prefix='screen-side-shortcut-') as directory:
+            root = Path(directory)
+            ready, output = root / 'ready', root / 'input'
+            reader = root / 'reader.py'
+            reader.write_text(
+                'import os,pathlib,sys,tty\n'
+                'tty.setraw(0)\n'
+                'pathlib.Path(sys.argv[1]).touch()\n'
+                'with pathlib.Path(sys.argv[2]).open("ab",buffering=0) as output:\n'
+                ' while True:\n'
+                '  data=os.read(0,1024)\n'
+                '  if not data: break\n'
+                '  output.write(data)\n')
+            name = f'screen-side-shortcut-{os.getpid()}'
+            target = {'screen': name, 'window': '0'}
+            child = subprocess.Popen(
+                ['screen', '-U', '-DmS', name, sys.executable, str(reader), str(ready), str(output)],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            try:
+                deadline = time.monotonic() + 5
+                while not ready.exists() and time.monotonic() < deadline:
+                    time.sleep(.05)
+                self.assertTrue(ready.exists())
+                snippet = Path(__file__).with_name('screen-cxf-shortcuts.conf')
+                screen_sessions.command(['screen', '-S', name, '-X', 'source', str(snippet)])
+                with screen_sessions.screen_attachment(target) as (keyboard, drain):
+                    os.write(keyboard, b'/\x1f\x01/')
+                    drain(.3)
+                self.assertEqual(output.read_bytes(), b'/\x1f\x1f')
+            finally:
+                subprocess.run(['screen', '-S', name, '-X', 'quit'], capture_output=True, timeout=5)
+                child.wait(timeout=5)
+
     def test_leaving_scrollback_search_never_sends_escape_to_the_application(self):
         with tempfile.TemporaryDirectory(prefix='screen-live-view-test-') as directory:
             root = Path(directory)
