@@ -1,0 +1,71 @@
+{
+  "validated_at": "2026-11-19T16:52:01.640351+00:00",
+  "status": "updated-controller-pending",
+  "upstream_head": "ab00c6d640e19d771d77859dc3eeff66f8a9168f",
+  "upstream_commits_merged_since_previous_update": 225,
+  "runtime": {
+    "codex": "0.170.0",
+    "copilot_cli": "1.0.114",
+    "copilot_sdk": "2.0.1",
+    "node": "22.23.5"
+  },
+  "sdk_package": "@microsoft/copilot-sdk",
+  "sdk_protocol": 4,
+  "fixes": [
+    "Idle sessions reopen without resuming goals or starting work; only actually interrupted work continues.",
+    "Native Shift+Home/End selection patch is built on the verified stable source tag and retained in future configured updates.",
+    "Use the renamed official SDK and protocol-4 startup options; report genuine SDK/CLI protocol incompatibility explicitly.",
+    "Check the published npm package used by the bridge for SDK updates.",
+    "Keep synthetic native Screen tests initialized and explicitly named; retry transient temporary plugin-clone cleanup races."
+  ],
+  "validation": {
+    "bridge_native_official_runtime_checks": 170,
+    "maintenance_checks_including_installed_native": 194,
+    "updater_checks": 23,
+    "native_selection_regressions": 5,
+    "total": 392,
+    "failed": 0,
+    "skipped": 0,
+    "real_screen_selection_copy_paste_and_full_history_export": true
+  },
+  "runtime_verification": {
+    "immutable_runtime_bundles": true,
+    "codex_sha512_verified": true,
+    "copilot_sha256_verified": true,
+    "full_codex_code_mode_host_preserved": true,
+    "patched_binary_and_companion_hashes_verified": true,
+    "managed_codex_launchers_updated": 3,
+    "old_running_executables_overwritten": false,
+    "release_notice_cache_current": true,
+    "legacy_sdk_files_pruned_after_old_launchers_exited": true
+  },
+  "session_verification": {
+    "non_controller_sessions_reloaded_and_verified": 13,
+    "all_thirteen_restored_idle": true,
+    "exact_thread_ids_preserved": true,
+    "models_and_reasoning_preserved": true,
+    "goal_ids_statuses_budgets_and_usage_preserved": true,
+    "new_native_work_turns": 0,
+    "goal_state_counts": {
+      "complete": 6,
+      "blocked": 1,
+      "paused": 1,
+      "none": 5
+    },
+    "native_copilot_and_node_executables_verified": true,
+    "controller_handoff_scheduled": true,
+    "controller_handoff_verified": false,
+    "total_sessions_restored": 13,
+    "original_native_histories_present_without_truncation": true
+  },
+  "seat_metadata_verification": {
+    "models_available": 21,
+    "official_authentication_and_policy_retained": true,
+    "ai_credit_quota_rpc_available": true,
+    "usage_and_budget_fields_reported": true,
+    "fresh_discovery_after_dependency_cleanup": true
+  },
+  "upstream_contained_in_fork_head": true,
+  "private_reports_captures_goals_and_build_artifacts_outside_repository": true,
+  "official_sdk_release": "https://github.com/microsoft/copilot-sdk/releases/tag/v2.0.1"
+}
