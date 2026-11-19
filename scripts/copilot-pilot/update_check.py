@@ -75,6 +75,23 @@ def release_status(name, repository, installed):
     }
 
 
+def sdk_release_status(installed):
+    # The SDK repository publishes several language packages. Its latest
+    # GitHub tag need not exist as the Node package used by this bridge.
+    request = urllib.request.Request(
+        'https://registry.npmjs.org/@github%2fcopilot-sdk/latest',
+        headers={'User-Agent': 'codex-copilot-update-check'},
+    )
+    with urllib.request.urlopen(request, timeout=30) as response:
+        package = json.loads(response.read(4 * 1024 * 1024))
+    latest = package['version']
+    if package.get('name') != '@github/copilot-sdk' or not re.fullmatch(r'\d+\.\d+\.\d+', latest):
+        raise ValueError('Expected the stable published Copilot Node SDK.')
+    return {'name': 'Copilot SDK', 'installed': '.'.join(map(str, version(installed))),
+            'latest': latest, 'update_available': version(latest) > version(installed),
+            'url': 'https://www.npmjs.com/package/@github/copilot-sdk/v/' + latest}
+
+
 def save_report(path, report):
     with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, delete=False) as stream:
         temporary = Path(stream.name)
@@ -257,7 +274,8 @@ def main():
                     else:
                         installed = command([config[key], "--version"])
                     pending.append(
-                        (name, pool.submit(release_status, name, repository, installed))
+                        (name, pool.submit(sdk_release_status, installed) if key == 'sdk'
+                         else pool.submit(release_status, name, repository, installed))
                     )
                 except (
                     OSError,
