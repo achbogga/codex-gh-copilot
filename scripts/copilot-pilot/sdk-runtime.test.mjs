@@ -459,6 +459,7 @@ test(
           const selected = (
             await listModels(async () => "sdk-owned", sdk.transport, {
               messages: true,
+              runtimeModelIds: sdk.models.map(entry => entry.id),
             })
           ).find((entry) => entry.id === model);
           assert.ok(
