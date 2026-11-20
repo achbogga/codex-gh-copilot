@@ -1,0 +1,97 @@
+{
+  "validated_at": "2026-11-20T22:27:41.712167+00:00",
+  "status": "updated-controller-pending",
+  "upstream_head": "4c153c26c0b5c54a22e0e775b46bcc4aa8872c79",
+  "upstream_commits_merged_since_previous_update": 74,
+  "runtime": {
+    "codex": "0.171.0",
+    "copilot_cli": "1.0.114",
+    "copilot_sdk": "2.0.1",
+    "node": "22.23.5"
+  },
+  "sdk_package": "@microsoft/copilot-sdk",
+  "sdk_protocol": 4,
+  "fixes": [
+    "Expose the complete enabled seat catalog in host, Docker and approved-token launchers.",
+    "Expand incremental native tool declarations into destination protocol tool definitions without changing saved session records.",
+    "Resolve historical tool names by their recorded namespace before considering the default functions alias.",
+    "Require actual served model evidence and one native thread/writer in same-session switching checks.",
+    "Use official runtime authorization when discovering newly available models in stream regressions."
+  ],
+  "validation": {
+    "bridge_native_official_runtime_checks": 178,
+    "maintenance_checks_including_installed_native": 195,
+    "updater_checks": 23,
+    "native_selection_regressions": 5,
+    "total": 401,
+    "failed": 0,
+    "skipped": 0,
+    "http_400_413_compaction_stream_recovery_and_no_policy_retry_regressions_passed": true
+  },
+  "runtime_verification": {
+    "immutable_runtime_bundles": true,
+    "codex_sha512_verified": true,
+    "copilot_sha256_verified": true,
+    "full_codex_code_mode_host_preserved": true,
+    "patched_binary_and_companion_hashes_verified": true,
+    "managed_codex_launchers_updated": 3,
+    "old_running_executables_overwritten": false,
+    "release_notice_cache_current": true
+  },
+  "session_verification": {
+    "non_controller_sessions_reloaded_and_verified": 13,
+    "idle_sessions_restored_without_work": 12,
+    "actually_interrupted_sessions_continued": 1,
+    "idle_session_new_work_turns": 0,
+    "exact_thread_ids_preserved": true,
+    "models_and_reasoning_preserved": true,
+    "goal_ids_statuses_budgets_and_usage_preserved": true,
+    "original_native_histories_present_without_truncation": true,
+    "native_copilot_and_node_executables_verified": true,
+    "all_copilot_catalogs_include_latest_models": true,
+    "controller_handoff_scheduled": true,
+    "controller_handoff_verified": false,
+    "total_sessions_restored": 13
+  },
+  "models": {
+    "enabled_bridge_compatible_models": 17,
+    "new_models": [
+      "gpt-6.2-sol",
+      "gpt-6.2-astra",
+      "grok-4.7"
+    ],
+    "gpt_62_advertised_context_window": 1050000,
+    "gpt_62_native_effective_context_window": 997500,
+    "gpt_62_reasoning_effort": "max",
+    "gpt_62_auto_compact_token_limit": 619900,
+    "per_model_limits_preserved": true,
+    "global_context_window_override": false,
+    "official_authentication_and_policy_retained": true,
+    "docker_and_approved_token_catalog_unit_checks_passed": true,
+    "docker_live_inference_run": false
+  },
+  "live_same_thread_switching": {
+    "native_version": "0.171.0",
+    "synthetic": false,
+    "same_native_thread_and_writer": true,
+    "sequence": [
+      "gpt-6.1-sol",
+      "gpt-6.2-sol",
+      "gpt-6.2-astra",
+      "gpt-6.1-sol",
+      "claude-opus-5.5",
+      "grok-4.7",
+      "gpt-6.2-sol"
+    ],
+    "passed_transitions": 6,
+    "failed_transitions": 0,
+    "requested_models_served_without_fallback": true,
+    "original_tool_history_retained": true,
+    "every_destination_used_shell_and_applied_patch": true,
+    "full_visible_history_without_compaction": true,
+    "unreadable_encrypted_instructions_are_never_discarded_or_decrypted": true
+  },
+  "upstream_contained_in_fork_head": true,
+  "private_reports_captures_goals_and_build_artifacts_outside_repository": true,
+  "state_note": "Session states were checked at reload. Later user work is left untouched."
+}
