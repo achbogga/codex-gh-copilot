@@ -47,13 +47,11 @@ const claudeBlocks = (input) =>
     );
 const modelProof = (requests) =>
   requests.map((request) => {
-    if (request.messages || request.model.startsWith("gpt-")) {
-      assert.ok(request.served_model, "Provider response omitted its model.");
-      assert.ok(
-        sameInferenceModel(request.model, request.served_model),
-        "A fallback model must not count as success for the requested model.",
-      );
-    }
+    assert.ok(request.served_model, "Provider response omitted its model.");
+    assert.ok(
+      sameInferenceModel(request.model, request.served_model),
+      "A fallback model must not count as success for the requested model.",
+    );
     return {
       requested_model: request.model,
       served_model: request.served_model ?? null,
