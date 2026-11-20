@@ -1,6 +1,7 @@
 import { mapResponseEvents } from "./responses-events.mjs";
 import { portableAgentMessage, plaintextAgentCall } from "./agent-messages.mjs";
 import { sealModelState } from "./model-state.mjs";
+import { expandedNativeTools, historyToolName } from "./native-tools.mjs";
 
 // Keep provenance in saved rollouts as well as in the current bridge process.
 // Grok rejects its opaque reasoning on input, even on the same model.
@@ -9,6 +10,7 @@ export const responsesThinkingPrefix = "copilot-responses-v1:";
 // Grok and MAI expose Responses but accept function tools, rather than Codex's
 // custom tools. Keep Codex's tool execution loop; adapt only the wire format.
 export function functionToolsRequest(payload) {
+  payload = expandedNativeTools(payload);
   const tools = new Map();
   const add = (tool, namespace) => {
     const name = namespace ? `${namespace}__${tool.name}` : tool.name;
@@ -50,17 +52,7 @@ export function functionToolsRequest(payload) {
         }
         if (!["custom_tool_call", "function_call"].includes(item.type))
           return item;
-        const name =
-          [...tools].find(
-            ([, tool]) =>
-              tool.name === item.name &&
-              (tool.namespace === item.namespace ||
-                (!tool.namespace &&
-                  [undefined, "functions"].includes(item.namespace))),
-          )?.[0] ??
-          (item.namespace && item.namespace !== "functions"
-            ? `${item.namespace}__${item.name}`
-            : item.name);
+        const name = historyToolName(tools, item);
         if (!/^[a-zA-Z0-9_-]{1,128}$/.test(name))
           throw new Error("Unsupported Responses history tool name.");
         // A custom call's item ID can have a provider-specific prefix (ctc_).

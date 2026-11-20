@@ -75,6 +75,8 @@ The November 20 seat catalog includes `gpt-6.2-sol`, `gpt-6.2-astra`, `grok-4.7`
 
 `model-switch-check.mjs --live --same-thread --from gpt-6.1-sol --to gpt-6.2-sol,gpt-6.2-astra,gpt-6.1-sol --out PRIVATE_DIRECTORY` checks a sequence on one native thread and one native writer. Set `COPILOT_PILOT_CODEX_BIN` and `COPILOT_PILOT_RUNTIME_BIN` to the installed executables. Every destination must recall a generated marker from earlier tool history, execute shell tools, apply its own patch, and be served by the requested model. This performs real seat inference in generated private fixtures and does not touch working user sessions. The same command with `--synthetic` verifies native control flow without calling a model backend.
 
+Native `additional_tools` records carry incremental tool declarations inside saved history. Claude and function-only Responses endpoints receive those exact declarations through their tools field, with saved call/result IDs preserved. Repeated identical declarations merge; conflicting definitions, ambiguous names, encrypted declaration content and unknown metadata fail closed. Original native records stay intact. This allows model changes within a loaded thread after deferred tools have been discovered.
+
 All launchers explicitly set `features.api_key_model_discovery=false`. Codex 0.161 enables API-key model discovery by default, but this bridge implements Responses rather than Codex's discovery endpoint. The Copilot SDK still checks the seat's enabled model catalog and context limits at every launch. This setting applies to `cxf`, `cxo`, the direct launcher, and Docker; verify it with `cxf features list`.
 
 ### Native session switching

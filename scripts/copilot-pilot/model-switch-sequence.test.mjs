@@ -5,13 +5,13 @@ import { join } from "node:path";
 import test from "node:test";
 import { checkModelSwitches } from "./model-switch-check.mjs";
 
-test("installed harness switches Sol 6.1 to Sol/Astra 6.2 and back on one native writer with shell, patches and full history", {
+test("installed harness switches GPT 6.2, Claude and Grok on one native writer with shell, patches and full history", {
   skip: !process.env.COPILOT_PILOT_CODEX_BIN || !process.env.COPILOT_PILOT_RUNTIME_BIN,
   timeout: 90000,
 }, async (t) => {
   const out = await mkdtemp(join(homedir(), ".copilot-same-thread-"));
   t.after(() => rm(out, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
-  const destinations = ["gpt-6.2-sol", "gpt-6.2-astra", "gpt-6.1-sol"];
+  const destinations = ["gpt-6.2-sol", "gpt-6.2-astra", "gpt-6.1-sol", "claude-opus-5.5", "grok-4.7", "gpt-6.2-sol"];
   const report = await checkModelSwitches({ out,
     codexBin: process.env.COPILOT_PILOT_CODEX_BIN,
     copilotBin: process.env.COPILOT_PILOT_RUNTIME_BIN,
@@ -21,7 +21,7 @@ test("installed harness switches Sol 6.1 to Sol/Astra 6.2 and back on one native
   assert.equal(report.failed_pairs, 0);
   assert.equal(report.passed_pairs, destinations.length);
   assert.deepEqual(pairs.map(r => r.target), destinations);
-  assert.deepEqual(pairs.map(r => r.source), ["gpt-6.1-sol", "gpt-6.2-sol", "gpt-6.2-astra"]);
+  assert.deepEqual(pairs.map(r => r.source), ["gpt-6.1-sol", ...destinations.slice(0, -1)]);
   for (const row of pairs) {
     assert.equal(row.thread_id, source.thread_id);
     assert.equal(row.native_pid, source.native_pid);

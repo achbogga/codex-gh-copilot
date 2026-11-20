@@ -1,4 +1,5 @@
 import { portableAgentMessage } from "./agent-messages.mjs";
+import { expandedNativeTools, historyToolName } from "./native-tools.mjs";
 
 // The seat catalog owns protocol selection, rather than a fixed model name.
 export const usesMessages = (model) =>
@@ -40,6 +41,7 @@ function content(value) {
 }
 
 export function messagesRequest(payload, model) {
+  payload = expandedNativeTools(payload);
   if (
     payload.previous_response_id ||
     (payload.text?.format?.type && payload.text.format.type !== "text")
@@ -156,7 +158,7 @@ export function messagesRequest(payload, model) {
         {
           type: "tool_use",
           id: item.call_id,
-          name: toolName(item.name, item.namespace),
+          name: toolName(historyToolName(tools, item)),
           input:
             item.type === "custom_tool_call"
               ? { input: item.input }

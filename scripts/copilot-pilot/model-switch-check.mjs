@@ -249,7 +249,18 @@ export async function checkModelSwitches({
               bytes: Buffer.byteLength(init.body),
               input: p.input,
             });
-            const response = await sdk.transport(url, init);
+            let response;
+            try {
+              response = await sdk.transport(url, init);
+            } catch (error) {
+              // This opt-in canary owns its generated prompts and history. Keep
+              // converter evidence private; public reports contain no payloads.
+              await appendFile(join(root, "conversion-errors.private.jsonl"),
+                JSON.stringify({ request: p, errors: [error, error.cause].filter(Boolean)
+                  .map(e => ({ code: e.code, message: e.message, stack: e.stack })) }) + "\n",
+                { mode: 0o600 });
+              throw error;
+            }
             if (!simulateUsage || !seeding || !response.ok) return response;
             // Native control-flow fixture only. The SDK has already observed
             // the genuine stream and retains real token/billing accounting.
