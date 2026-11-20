@@ -110,11 +110,24 @@ pub(crate) async fn spawn(
         input: AgentInput::Message {
             message,
             mode: MessageDeliveryMode::TriggerTurn,
+            source_tool_call_id: session
+                .services
+                .rollout_thread_trace
+                .is_enabled()
+                .then(|| call_id.to_owned()),
         },
         source: settings.source,
         options: settings.options,
     };
     let (agent, config) = session.services.agent_control.spawn(request).await?;
+    step_context
+        .turn
+        .session_telemetry
+        .record_multi_agent_spawned(
+            session.session_id(),
+            &step_context.turn.sub_id,
+            agent.thread_id,
+        );
     Ok(ThreadSpawnResult {
         agent,
         config,

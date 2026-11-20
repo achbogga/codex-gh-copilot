@@ -90,6 +90,7 @@ fn validate_response_item_image_urls(items: &[ResponseItem]) -> Result<(), JSONR
 #[derive(Clone)]
 pub(crate) struct TurnRequestProcessor {
     thread_manager: Arc<ThreadManager>,
+    thread_store: Arc<dyn ThreadStore>,
     outgoing: Arc<OutgoingMessageSender>,
     analytics_events_client: AnalyticsEventsClient,
     config: Arc<Config>,
@@ -102,10 +103,9 @@ pub(crate) struct TurnRequestProcessor {
 }
 
 fn map_additional_context(
-    additional_context: Option<HashMap<String, AdditionalContextEntry>>,
+    additional_context: HashMap<String, AdditionalContextEntry>,
 ) -> BTreeMap<String, CoreAdditionalContextEntry> {
     additional_context
-        .unwrap_or_default()
         .into_iter()
         .map(|(key, entry)| {
             let entry = CoreAdditionalContextEntry {
@@ -148,6 +148,7 @@ impl TurnRequestProcessor {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         thread_manager: Arc<ThreadManager>,
+        thread_store: Arc<dyn ThreadStore>,
         outgoing: Arc<OutgoingMessageSender>,
         analytics_events_client: AnalyticsEventsClient,
         config: Arc<Config>,
@@ -160,6 +161,7 @@ impl TurnRequestProcessor {
     ) -> Self {
         Self {
             thread_manager,
+            thread_store,
             outgoing,
             analytics_events_client,
             config,
@@ -225,14 +227,12 @@ impl TurnRequestProcessor {
         Ok(Some(
             ThreadGuardianReviewResponse {
                 call_id: result.call_id,
-                assessment: result
-                    .assessment
-                    .map(|assessment| ThreadGuardianAssessment {
-                        outcome: assessment.outcome,
-                        risk_level: assessment.risk_level.into(),
-                        user_authorization: assessment.user_authorization.into(),
-                        rationale: assessment.rationale,
-                    }),
+                assessment: ThreadGuardianAssessment {
+                    outcome: result.assessment.outcome,
+                    risk_level: result.assessment.risk_level.into(),
+                    user_authorization: result.assessment.user_authorization.into(),
+                    rationale: result.assessment.rationale,
+                },
             }
             .into(),
         ))
@@ -638,9 +638,10 @@ impl TurnRequestProcessor {
             return Err(error);
         }
         // Validate before changing the thread's live MCP policy.
-        let additional_context = map_additional_context(params.additional_context);
+        let additional_context = params.additional_context.map(map_additional_context);
         additional_context
-            .values()
+            .iter()
+            .flat_map(BTreeMap::values)
             .try_for_each(CoreAdditionalContextEntry::validate)
             .map_err(invalid_request)
             .inspect_err(|error| {
@@ -1185,7 +1186,7 @@ impl TurnRequestProcessor {
             .into_iter()
             .map(V2UserInput::into_core)
             .collect();
-        let additional_context = map_additional_context(params.additional_context);
+        let additional_context = params.additional_context.map(map_additional_context);
 
         let submission = thread
             .steer_turn(
@@ -1666,6 +1667,7 @@ impl TurnRequestProcessor {
     fn listener_task_context(&self) -> ListenerTaskContext {
         ListenerTaskContext {
             thread_manager: Arc::clone(&self.thread_manager),
+            thread_store: Arc::clone(&self.thread_store),
             thread_state_manager: self.thread_state_manager.clone(),
             outgoing: Arc::clone(&self.outgoing),
             pending_thread_unloads: Arc::clone(&self.pending_thread_unloads),

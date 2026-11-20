@@ -5165,7 +5165,7 @@ try {
 #[derive(Default)]
 struct ResponseIdObserver {
     response_ids: Mutex<Vec<(String, Option<String>)>>,
-    serving_assessments: Mutex<Vec<Option<bool>>>,
+    guardian_probes: Mutex<Vec<Option<bool>>>,
     originating_items: Mutex<Vec<(String, Option<codex_protocol::ResponseItemId>)>>,
     wait_started: tokio::sync::Notify,
 }
@@ -5180,10 +5180,10 @@ impl ToolLifecycleContributor for ResponseIdObserver {
                     .as_str()
                     .is_some_and(|cmd| cmd.starts_with("printf 'phase "))
             {
-                self.serving_assessments
+                self.guardian_probes
                     .lock()
                     .unwrap()
-                    .push(input.serving_assessment);
+                    .push(input.guardian_probe);
             }
             if matches!(input.tool_name.name.as_str(), "exec" | "exec_command") {
                 self.originating_items.lock().unwrap().push((
@@ -5208,9 +5208,9 @@ impl ToolLifecycleContributor for ResponseIdObserver {
 }
 
 #[cfg_attr(windows, ignore = "no exec_command on Windows")]
-#[test_case::test_case(None; "without_assessment")]
-#[test_case::test_case(Some(false); "low_risk_assessment")]
-#[test_case::test_case(Some(true); "review_required_assessment")]
+#[test_case::test_case(None; "without_probe")]
+#[test_case::test_case(Some(false); "low_risk_probe")]
+#[test_case::test_case(Some(true); "review_required_probe")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn code_mode_can_yield_and_resume_with_wait(requires_review: Option<bool>) -> Result<()> {
     skip_if_no_network!(Ok(()));
@@ -5220,10 +5220,11 @@ async fn code_mode_can_yield_and_resume_with_wait(requires_review: Option<bool>)
         .and(wiremock::matchers::body_partial_json(
             serde_json::json!({"model": "gpt-5.6-luna"}),
         ))
-        .respond_with(responses::sse_response(sse(vec![ev_completed(
-            "unexpected-score",
-        )])))
-        .expect(0)
+        .respond_with(responses::sse_response(sse(vec![
+            ev_assistant_message("score", "low"),
+            ev_completed("score"),
+        ])))
+        .with_priority(/*p*/ 1)
         .mount(&server)
         .await;
     let observer = Arc::new(ResponseIdObserver::default());
@@ -5406,7 +5407,7 @@ text((await tools.exec_command({{cmd: "printf 'phase 3'"}})).output);
     );
 
     assert_eq!(
-        *observer.serving_assessments.lock().unwrap(),
+        *observer.guardian_probes.lock().unwrap(),
         vec![requires_review; 3]
     );
     let observed = observer.response_ids.lock().unwrap();
@@ -7429,7 +7430,7 @@ async fn code_mode_records_mcp_completion_even_when_result_is_not_printed() -> R
     skip_if_no_network!(Ok(()));
 
     let server = responses::start_mock_server().await;
-    let (test, second_mock) = run_code_mode_turn_with_rmcp(
+    let (_, second_mock) = run_code_mode_turn_with_rmcp(
         &server,
         "call the rmcp echo tool without printing its result",
         r#"await tools.mcp__rmcp__echo({ message: "discarded" }); text("done");"#,
@@ -7441,21 +7442,6 @@ async fn code_mode_records_mcp_completion_even_when_result_is_not_printed() -> R
         "done"
     );
 
-    let first_turn_id = request.body_json()["client_metadata"]["turn_id"].clone();
-    assert!(first_turn_id.is_string());
-    assert_eq!(
-        serde_json::to_value(codex_core::test_support::mcp_attribution_snapshot(
-            &test.codex
-        ))?,
-        serde_json::json!({
-            "status": "complete",
-            "sources": [{
-                "server_name": "rmcp",
-                "tool_name": "echo",
-                "first_turn_id": first_turn_id,
-            }],
-        })
-    );
     Ok(())
 }
 
@@ -7739,6 +7725,13 @@ async fn code_mode_node_repl_text_evidence_is_visible_only_to_guardian(
                 .features
                 .set_enabled(Feature::GuardianNodeReplTranscriptImages, transcript_images)
                 .expect("configure Guardian transcript images");
+            if check_detail {
+                // The invalid image and its valid successor exceed the modern stdio frame limit.
+                config
+                    .features
+                    .disable(Feature::McpConnectionSharing)
+                    .expect("use legacy stdio for the oversized image response");
+            }
             let mcp: McpServerConfig = serde_json::from_value(serde_json::json!({
                 "command": mcp_server_bin,
                 "environment_id": remote_aware_environment_id(),

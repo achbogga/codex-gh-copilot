@@ -5,14 +5,12 @@ mod regular;
 mod review;
 mod user_shell;
 
-use crate::McpRefreshReason;
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 
 use codex_diagnostics::Gauge;
-use codex_exec_server::ExecutorCapabilityDiscoveryV2Cache;
 use codex_extension_api::ThreadIdleCause;
 use futures::future::BoxFuture;
 use tokio::sync::Mutex;
@@ -34,11 +32,13 @@ use crate::codex_thread::BackgroundTerminalInfo;
 use crate::config::Config;
 use crate::context::ContextualUserFragment;
 use crate::hook_runtime::run_turn_interrupt_hooks;
+use crate::session::InputQueueEntry;
 use crate::session::SamplingInterrupt;
 use crate::session::TurnInput;
 use crate::session::session::Session;
 use crate::session::turn::McpStartupRequirements;
-use crate::session::turn::run_hooks_and_record_inputs;
+use crate::session::turn::merge_submitted_context;
+use crate::session::turn::run_hooks_and_record_input_entries;
 use crate::session::turn_context::NewTurnContextOptions;
 use crate::session::turn_context::TurnContext;
 use crate::state::ActiveTurn;
@@ -319,18 +319,6 @@ impl Session {
         input: Vec<TurnInput>,
         task: T,
     ) -> TurnInputSubmission {
-        // Replace the cache; in-flight acquisitions retain their previous Arc.
-        self.services
-            .thread_extension_data
-            .insert(ExecutorCapabilityDiscoveryV2Cache::default());
-        if turn_context
-            .config
-            .features
-            .enabled(Feature::ExecutorCapabilityDiscoveryV2)
-        {
-            // MCP contributors must project the new inventory even if their other inputs match.
-            self.request_mcp_runtime_reprojection(McpRefreshReason::TaskStartedExecutorDiscovery);
-        }
         self.activate_plugin_selection(&turn_context).await;
         // Inherited or recovered roots are applied before task start. Otherwise this
         // task owns its turn, including background work. Later mail cannot change it.
@@ -366,8 +354,13 @@ impl Session {
                 };
             }
             let turn = active.get_or_insert_with(ActiveTurn::default);
-            debug_assert!(turn.task.is_none());
+            if turn.turn_id.is_some() || turn.task.is_some() || turn.finishing.is_some() {
+                return TurnInputSubmission::NotSubmitted {
+                    reason: NotSubmittedReason::Superseded,
+                };
+            }
             turn.turn_id = Some(turn_context.sub_id.clone());
+            turn.admitted = false;
             turn.finishing = None;
             Arc::clone(&turn.turn_state)
         };
@@ -430,6 +423,8 @@ impl Session {
                 None,
             ),
         };
+        // Native admission is synchronous, including unrestricted turns that have no guard.
+        turn.admitted = host_admission.is_none();
         let done_clone = Arc::clone(&done);
         let session = Arc::clone(self);
         let ctx = Arc::clone(&turn_context);
@@ -526,6 +521,12 @@ impl Session {
             done_clone.notify_waiters();
         }
         .instrument(task_span);
+        if task_kind == TaskKind::Regular {
+            crate::agent::turn_metrics::record_start(
+                &self.services.thread_extension_data,
+                &turn_context,
+            );
+        }
         let handle = tokio::spawn(storage_originator.scope(task_future));
         let timer = turn_context
             .session_telemetry
@@ -604,23 +605,8 @@ impl Session {
             .models_manager
             .refresh_after_auth_change(self.get_config().await.http_client_factory())
             .await;
-        let session_configuration = if self.enabled(Feature::WakeOnAgentMessages) {
-            let Some(configuration) = self.pending_work_turn_configuration(&turn_state).await
-            else {
-                return;
-            };
-            Some(configuration)
-        } else {
-            if self
-                .active_turn
-                .lock()
-                .await
-                .as_ref()
-                .is_none_or(|turn| !Arc::ptr_eq(&turn.turn_state, &turn_state))
-            {
-                return;
-            }
-            None
+        let Some(configuration) = self.pending_work_turn_configuration(&turn_state).await else {
+            return;
         };
         // Read the routing options now and leave the mail queued until task registration.
         let wake_options = self.input_queue.pending_wake_options().await;
@@ -633,13 +619,9 @@ impl Session {
             cyber_access_program: start_options.cyber_access_program,
             helper_admission: triggered.then_some(helper_admission).flatten(),
         };
-        let turn_context = match session_configuration {
-            Some(configuration) => {
-                self.new_turn_with_configuration(sub_id, configuration, options)
-                    .await
-            }
-            None => self.new_turn_with_default_settings(sub_id, options).await,
-        };
+        let turn_context = self
+            .new_turn_with_configuration(sub_id, configuration, options)
+            .await;
         if let Some(trigger) = start_options.turn_trigger {
             turn_context.turn_metadata_state.set_turn_trigger(trigger);
         }
@@ -818,7 +800,7 @@ impl Session {
             && !self.work_budget().is_exhausted();
         let finishing = CancellationToken::new();
         let finish_recording = finishing.clone().drop_guard();
-        let (turn_state, unadmitted_task, mut pending_input, outcome_handoff, sampling_interrupted) = {
+        let (turn_state, unadmitted_task, initial_input, outcome_handoff, sampling_interrupted) = {
             let mut active = self.active_turn.lock().await;
             let active_turn = active.as_mut()?;
             if !Arc::ptr_eq(&active_turn.task.as_ref()?.turn_context, &turn_context) {
@@ -843,7 +825,7 @@ impl Session {
                 Arc::clone(&active_turn.turn_state),
                 (task._agent_execution_guard.is_none() && task.pending_initial_input.is_some())
                     .then_some(task.task),
-                task.pending_initial_input.unwrap_or_default(),
+                task.pending_initial_input,
                 task.outcome_handoff,
                 sampling_interrupted,
             )
@@ -852,11 +834,10 @@ impl Session {
             .turn_metadata_state
             .cancel_git_enrichment_task();
         let last_agent_message = regular_output.and_then(|output| output.last_agent_message);
-        pending_input.extend(
-            self.input_queue
-                .take_pending_input_for_turn_state(turn_state.as_ref())
-                .await,
-        );
+        let pending_input = self
+            .input_queue
+            .take_pending_input_for_turn_state(turn_state.as_ref())
+            .await;
         let (
             turn_had_memory_citation,
             turn_tool_calls,
@@ -871,11 +852,11 @@ impl Session {
                 std::mem::take(&mut ts.token_usage_by_model),
             )
         };
-        let model_info = turn_context.capture_current_model_info();
-        let record_result = run_hooks_and_record_inputs(
+        let record_result = run_hooks_and_record_input_entries(
             self,
             &turn_context,
-            &model_info,
+            &turn_context.capture_current_model_info(),
+            initial_input.as_deref(),
             &pending_input,
             PersistContext::Standard,
         )
@@ -1296,9 +1277,15 @@ impl Session {
                 .await
             {
                 match input {
-                    TurnInput::ResponseItem(item)
-                        if matches!(item.item, ResponseItem::AgentMessage { .. }) =>
-                    {
+                    InputQueueEntry {
+                        input: TurnInput::ResponseItem(item),
+                        additional_context,
+                    } if matches!(item.item, ResponseItem::AgentMessage { .. }) => {
+                        if let Some(context) = additional_context {
+                            pending_mail.extend(
+                                merge_submitted_context(self, &task.turn_context, &context).await,
+                            );
+                        }
                         pending_mail.push(item);
                     }
                     input => remaining_input.push(input),

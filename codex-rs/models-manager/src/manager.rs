@@ -68,6 +68,11 @@ pub trait ModelsEndpointClient: fmt::Debug + Send + Sync {
     /// Return `None` when identity is unavailable; cached catalog reuse is then disabled.
     fn identity(&self) -> Option<String>;
 
+    /// Whether auth must be resolved before checking catalog identity.
+    fn auth_requires_resolution(&self) -> bool {
+        true
+    }
+
     /// Returns whether this provider can authenticate command-scoped requests.
     fn has_command_auth(&self) -> bool;
 
@@ -163,6 +168,12 @@ pub struct RefreshedModelCatalog {
 
 /// Coordinates model discovery plus cached metadata on disk.
 pub trait ModelsManager: fmt::Debug + Send + Sync {
+    /// Whether to schedule initialization, without waiting on the catalog lock or auth.
+    /// Return true when readiness is unknown or credentials must be resolved first.
+    fn needs_initialization(&self) -> bool {
+        true
+    }
+
     /// Initialize a newly selected catalog without replacing an already-loaded snapshot.
     /// Stateful managers must check readiness for their current provider and credentials;
     /// a successful empty catalog is initialized too. Static catalogs need no work.
@@ -378,6 +389,7 @@ impl CatalogSource {
 pub struct ModelCatalogSettings {
     cache: Option<Arc<dyn ModelsCache>>,
     pub api_key_model_discovery_default: bool,
+    pub skip_bundled_seed: bool,
     // Before the host publishes a live change, each thread uses its configured default.
     live_discovery: Arc<std::sync::Mutex<Option<bool>>>,
 }
@@ -487,7 +499,11 @@ impl OpenAiModelsManager {
                 etag: None,
                 client_version: Some(crate::client_version_to_whole()),
                 identity: endpoint_client.identity(),
-                models: BUNDLED_MODELS.to_vec(),
+                models: if settings.skip_bundled_seed {
+                    Vec::new()
+                } else {
+                    BUNDLED_MODELS.to_vec()
+                },
             })),
             settings,
             endpoint_client,
@@ -521,6 +537,19 @@ impl StaticModelsManager {
 }
 
 impl ModelsManager for OpenAiModelsManager {
+    fn needs_initialization(&self) -> bool {
+        if self.endpoint_client.auth_requires_resolution() {
+            return true;
+        }
+        if self.api_key_discovery_disabled() {
+            return false;
+        }
+        !self
+            .remote_models
+            .try_read()
+            .is_ok_and(|catalog| self.catalog_is_initialized(&catalog))
+    }
+
     fn ensure_initialized(
         &self,
         http_client_factory: HttpClientFactory,
@@ -1066,6 +1095,10 @@ impl OpenAiModelsManager {
 }
 
 impl ModelsManager for StaticModelsManager {
+    fn needs_initialization(&self) -> bool {
+        false
+    }
+
     fn ensure_initialized(
         &self,
         _http_client_factory: HttpClientFactory,

@@ -246,7 +246,7 @@ pub use windows_sandbox_config::windows_mxc_allowed_by_config;
 
 const DEFAULT_IGNORE_LARGE_UNTRACKED_DIRS: i64 = 200;
 const DEFAULT_IGNORE_LARGE_UNTRACKED_FILES: i64 = 10 * 1024 * 1024;
-const DEFAULT_ASYNC_COMPACTION_THRESHOLD_PERCENT: u8 = 65;
+pub(crate) const DEFAULT_ASYNC_COMPACTION_THRESHOLD_PERCENT: u8 = 65;
 
 /// Signals that a public config selected the retired `untrusted` approval policy.
 #[derive(Debug, thiserror::Error)]
@@ -638,6 +638,13 @@ pub enum ThreadStoreConfig {
     InMemory { id: String },
 }
 
+/// Provider resolved by the host for Guardian inference on this thread.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GuardianInferenceProvider {
+    pub id: String,
+    pub info: ModelProviderInfo,
+}
+
 /// Application configuration loaded from disk and merged with overrides.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
@@ -690,6 +697,11 @@ pub struct Config {
 
     /// Info needed to make an API request to the model.
     pub model_provider: ModelProviderInfo,
+
+    /// Host-selected inference provider for Guardian. When set, Guardian keeps review
+    /// history independent of actor compaction and never reuses actor checkpoints.
+    /// When unset, Guardian inherits the actor's provider and existing history policy.
+    pub guardian_model_provider: Option<Arc<GuardianInferenceProvider>>,
 
     /// Deprecated: `friendly` and `pragmatic` no longer select a style.
     pub personality: Option<Personality>,
@@ -1701,12 +1713,7 @@ async fn config_toml_from_layers(layers: &ConfigLayerStack) -> std::io::Result<C
     match ConfigToml::try_from(layers.effective_config()) {
         Ok(config_toml) => Ok(config_toml),
         Err(err) => {
-            if let Some(config_error) = codex_config::first_layer_config_error::<ConfigToml>(
-                layers,
-                codex_config::CONFIG_TOML_FILE,
-            )
-            .await
-            {
+            if let Some(config_error) = codex_config::first_layer_config_error(layers).await {
                 return Err(codex_config::io_error_from_config_error(
                     std::io::ErrorKind::InvalidData,
                     config_error,
@@ -1734,6 +1741,14 @@ impl Config {
         }
     }
 
+    /// A host-selected Guardian provider cannot reuse the actor's opaque checkpoints.
+    pub(crate) fn guardian_reuses_parent_compaction(&self) -> bool {
+        self.guardian_model_provider.is_none()
+            && self
+                .features
+                .enabled(Feature::GuardianReuseParentCompaction)
+    }
+
     /// Capture storage and sync preparation use one session-static rollout choice.
     pub(crate) fn guardian_context_budgeting(&self) -> codex_guardian_context::ContextBudgeting {
         if self.guardian_sync_elastic_budget.is_some() {
@@ -1741,6 +1756,22 @@ impl Config {
         } else {
             codex_guardian_context::ContextBudgeting::Fixed
         }
+    }
+
+    /// Resolves recorder limits from the Sync Elastic retained-instruction entry budget.
+    pub(crate) fn guardian_retention_policy(
+        &self,
+    ) -> Option<codex_protocol::protocol::GuardianRetentionPolicy> {
+        let entry_tokens = self
+            .guardian_sync_elastic_budget
+            .as_ref()?
+            .section_limits(codex_guardian_context::ElasticSection::RetainedUserInstructions)
+            .max_section_entry_tokens();
+        let record_bytes = codex_utils_output_truncation::approx_bytes_for_tokens(entry_tokens);
+        Some(codex_protocol::protocol::GuardianRetentionPolicy {
+            assistant_record_bytes: Some(record_bytes),
+            user_record_bytes: Some(record_bytes),
+        })
     }
 
     pub fn sqlite_config(&self) -> &codex_state::SqliteConfig {
@@ -1767,9 +1798,21 @@ impl Config {
         &'a self,
         model_messages: ResolvedModelMessages<'a>,
     ) -> &'a str {
-        self.guardian_policy_config
+        let configured_policy = if self.guardian_model_provider.is_some() {
+            self.managed_guardian_policy()
+        } else {
+            self.guardian_policy_config.as_deref()
+        };
+        configured_policy.unwrap_or(model_messages.auto_review().policy)
+    }
+
+    pub(crate) fn managed_guardian_policy(&self) -> Option<&str> {
+        self.config_layer_stack
+            .requirements_toml()
+            .guardian_policy_config
             .as_deref()
-            .unwrap_or(model_messages.auto_review().policy)
+            .map(str::trim)
+            .filter(|policy| !policy.is_empty())
     }
 
     /// Native Guardian agent history requires the reviewed thread's OpenAI provider.
@@ -1883,6 +1926,14 @@ impl Config {
 
     /// Creates the HTTP client factory resolved from the effective feature configuration.
     pub fn http_client_factory(&self) -> HttpClientFactory {
+        self.http_client_factory_for_provider(&self.model_provider)
+    }
+
+    /// Applies the thread's network settings and the selected provider's header policy.
+    pub(crate) fn http_client_factory_for_provider(
+        &self,
+        provider: &ModelProviderInfo,
+    ) -> HttpClientFactory {
         let outbound_proxy_policy = if self.respect_system_proxy {
             OutboundProxyPolicy::RespectSystemProxy
         } else {
@@ -1890,8 +1941,7 @@ impl Config {
         };
         let mut factory = HttpClientFactory::new(outbound_proxy_policy)
             .with_network_policy(self.application_network_policy.clone());
-        if self
-            .model_provider
+        if provider
             .gateway_oauth
             .as_ref()
             .is_some_and(GatewayOAuthConfig::uses_credential_export)
@@ -2045,6 +2095,7 @@ impl Config {
         }
 
         McpConfig {
+            executor_discovery_v2: None,
             client: McpClientConfig {
                 chatgpt_base_url: self.chatgpt_base_url.clone(),
                 requires_read_only_mcp_tools: false,
@@ -4750,6 +4801,7 @@ impl Config {
             async_compaction_threshold_percent,
             model_provider_id,
             model_provider,
+            guardian_model_provider: None,
             cwd: resolved_cwd,
             workspace_roots: workspace_roots.clone(),
             workspace_roots_explicit,

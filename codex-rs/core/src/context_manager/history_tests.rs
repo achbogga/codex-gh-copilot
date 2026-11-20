@@ -43,6 +43,7 @@ use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::PLUGINS_INSTRUCTIONS_OPEN_TAG;
 use codex_protocol::protocol::TurnContextItem;
 use codex_protocol_test_support::ContentItemTestExt;
+use codex_thread_context_ids_test_support::thread_context_ids;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_output_truncation::TruncationPolicy;
 use codex_utils_output_truncation::truncate_text;
@@ -158,8 +159,10 @@ fn root_history() -> ContextManager {
     ContextManager::for_session(
         /*root_capabilities_restricted*/ false,
         &ManagedFeatures::from(codex_features::Features::with_defaults()),
+        /*reuse_parent_compaction*/ true,
         codex_guardian_context::ContextBudgeting::Fixed,
-        codex_protocol_test_support::uuid_v7_item_id_generator_for_test(),
+        thread_context_ids(),
+        /*retention*/ None,
     )
 }
 
@@ -591,8 +594,10 @@ fn guardian_checkpoint_applies_additional_context_policy_after_resume(include: b
     let mut history = ContextManager::for_session(
         /*root_capabilities_restricted*/ false,
         &features,
+        features.enabled(Feature::GuardianReuseParentCompaction),
         codex_guardian_context::ContextBudgeting::Fixed,
-        codex_protocol_test_support::uuid_v7_item_id_generator_for_test(),
+        thread_context_ids(),
+        /*retention*/ None,
     );
     let additional_context: ResponseItem = crate::context::AdditionalContextToolOutput::new(
         "browser_info",
@@ -634,8 +639,10 @@ fn guardian_checkpoint_applies_additional_context_policy_after_resume(include: b
     let mut resumed = ContextManager::for_session(
         /*root_capabilities_restricted*/ false,
         &features,
+        features.enabled(Feature::GuardianReuseParentCompaction),
         codex_guardian_context::ContextBudgeting::Fixed,
-        codex_protocol_test_support::uuid_v7_item_id_generator_for_test(),
+        thread_context_ids(),
+        /*retention*/ None,
     );
     resumed.replace_annotated(compacted);
     resumed.restore_review_context(
@@ -2198,6 +2205,90 @@ fn session_end_input_does_not_consume_a_rollback_turn() {
             history.drop_last_n_user_turns(/*num_turns*/ 1);
             assert_eq!(raw_items(&history), expected);
         }
+    }
+}
+
+#[test]
+fn oversized_direct_delivery_retains_its_incomplete_marker_across_replay() {
+    let call_id = "question";
+    let mut call: ResponseItem = serde_json::from_value(serde_json::json!({
+        "type": "function_call", "call_id": call_id,
+        "namespace": "mcp__codex_apps", "name": "user_messaging_send_message",
+        "arguments": "{}",
+    }))
+    .unwrap();
+    call.set_id(Some(ResponseItemId::with_suffix("call", "question")));
+    call.set_turn_id_if_missing("turn");
+    const RECORD_BYTES: usize = 512;
+    let original = "x".repeat(RECORD_BYTES);
+    let expected = codex_history::RetainedUserMessage {
+        turn_id: "turn".to_owned(),
+        message_id: call.id().map(|id| id.as_str().to_owned()),
+        text: String::new(),
+        complete: false,
+        origin: codex_history::UserInputOrigin::User,
+        phase: None,
+    };
+    let retention = Some(MessageRetention {
+        thread_id: codex_protocol::ThreadId::new(),
+        policy: serde_json::from_value(serde_json::json!({"assistant_record_bytes": RECORD_BYTES}))
+            .unwrap(),
+    });
+    let new_history = || ContextManager::new(thread_context_ids(), retention);
+    let mut live = new_history();
+    let mut items = [
+        ResponseItemEnvelope {
+            item: call,
+            metadata: Some(CodexHarnessMetadata {
+                user_input_order: Some(0),
+                ..Default::default()
+            }),
+        },
+        ResponseItemEnvelope {
+            item: serde_json::from_value(serde_json::json!({
+                "type": "function_call_output", "call_id": call_id, "output": "Sent.",
+            }))
+            .unwrap(),
+            metadata: Some(CodexHarnessMetadata {
+                delivered_assistant_message: Some(original),
+                ..Default::default()
+            }),
+        },
+    ];
+    const TEST_HISTORY_TOKENS: usize = 10_000;
+    live.record_annotated_items(&mut items, TruncationPolicy::Tokens(TEST_HISTORY_TOKENS));
+    let saved = serde_json::to_vec(&items.map(codex_history::RolloutItem::ResponseItem)).unwrap();
+    let mut replayed = new_history();
+    let replay_items = serde_json::from_slice::<Vec<codex_history::RolloutItem>>(&saved)
+        .unwrap()
+        .into_iter()
+        .map(|item| match item {
+            codex_history::RolloutItem::ResponseItem(envelope) => envelope,
+            _ => panic!("expected a saved response item"),
+        })
+        .collect();
+    replayed.replace_annotated(replay_items);
+    replayed.restore_retained_context(/*checkpoint*/ None);
+    for history in [live, replayed] {
+        let metadata = history.annotated_items()[1].metadata.as_ref().unwrap();
+        assert_eq!(
+            (
+                metadata.delivered_assistant_message.as_deref(),
+                metadata.delivered_assistant_message_incomplete
+            ),
+            (None, true)
+        );
+        assert!(history.retained_context().has_omitted_assistant_messages());
+        let mut entries = history.retained_context().ordered_entries();
+        let Some((order, codex_history::RetainedContextEntry::AssistantMessage(message))) =
+            entries.next()
+        else {
+            panic!("missing confirmed delivery");
+        };
+        assert_eq!(
+            (order, message),
+            (codex_history::RetainedContextOrder::Local(0), &expected)
+        );
     }
 }
 

@@ -205,8 +205,6 @@ pub enum Feature {
     WebSearchCached,
     /// Expose the extension-backed standalone web search tool.
     StandaloneWebSearch,
-    /// Let the host authorize MCP search independently of native search through per-turn policy.
-    HostedSearchPolicy,
     /// Request the legacy Landlock mode of the Linux sandbox.
     UseLegacyLandlock,
     /// Experimental shell snapshotting.
@@ -383,6 +381,10 @@ pub enum Feature {
     ///
     /// Requirements-only gate: this should be set from requirements, not user config.
     InAppUpdates,
+    /// Allow automatic and explicit daemon updates.
+    ///
+    /// Requirements-only gate: this should be set from requirements, not user config.
+    DaemonUpdates,
     /// Allow Browser Use agent integration in desktop apps.
     ///
     /// Requirements-only gate: this should be set from requirements, not user config.
@@ -1039,6 +1041,7 @@ impl Features {
 impl FeaturesToml {
     pub fn entries(&self) -> BTreeMap<String, bool> {
         let mut entries = self.entries.clone();
+        entries.remove(Feature::DaemonUpdates.key());
         if let Some(enabled) = self
             .async_compaction
             .as_ref()
@@ -1467,12 +1470,6 @@ pub const FEATURES: &[FeatureSpec] = &[
         default_enabled: false,
     },
     FeatureSpec {
-        id: Feature::HostedSearchPolicy,
-        key: "hosted_search_policy",
-        stage: Stage::UnderDevelopment,
-        default_enabled: false,
-    },
-    FeatureSpec {
         id: Feature::SearchTool,
         key: "search_tool",
         stage: Stage::Removed,
@@ -1819,8 +1816,8 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::McpConnectionSharing,
         key: "mcp_connection_sharing",
-        stage: Stage::UnderDevelopment,
-        default_enabled: false,
+        stage: Stage::Stable,
+        default_enabled: true,
     },
     FeatureSpec {
         id: Feature::McpSharedReplCwd,
@@ -2029,6 +2026,12 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::InAppUpdates,
         key: "in_app_updates",
+        stage: Stage::Stable,
+        default_enabled: true,
+    },
+    FeatureSpec {
+        id: Feature::DaemonUpdates,
+        key: "daemon_updates",
         stage: Stage::Stable,
         default_enabled: true,
     },

@@ -3,12 +3,28 @@
 #[path = "scenarios_bundled_app_hooks.rs"]
 mod bundled_app_hooks;
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn executor_discovery_v2_refreshes_inventory_and_reuses_it_across_turns() -> anyhow::Result<()>
+{
+    super::executor_discovery_v2::check_acquisition(/*enabled*/ true, "0.164.0").await
+}
+
+#[test_case::test_case(DiscoveryFailure::None; "success")]
+#[test_case::test_case(DiscoveryFailure::Server; "server_failure")]
+#[tokio::test]
+async fn executor_discovery_v2_prepares_inventory_while_sampling(
+    failure: DiscoveryFailure,
+) -> anyhow::Result<()> {
+    super::executor_discovery_v2::check_discovery_readiness(failure).await
+}
+
 #[path = "scenarios_turn_input_agent_message.rs"]
 mod turn_input_agent_message;
 
 #[path = "scenarios_multi_environment_mcp.rs"]
 mod multi_environment_mcp;
 
+use super::executor_discovery_v2::DiscoveryFailure;
 use super::image_rollout::RecordingFileAttachmentStore;
 use super::permissions_messages::PermissionPathScenario;
 use codex_attachment_store::AttachmentStoreErrorKind;
@@ -204,10 +220,10 @@ mod guardian_async_elastic;
 mod guardian_sender_context;
 
 #[path = "scenarios_guardian_direct_review.rs"]
-mod guardian_direct_review;
+pub(super) mod guardian_direct_review;
 
 #[path = "scenarios_guardian_direct_mcp.rs"]
-mod guardian_direct_mcp;
+pub(super) mod guardian_direct_mcp;
 
 #[path = "scenarios_guardian_extra_policy.rs"]
 mod guardian_extra_policy;
@@ -705,6 +721,95 @@ async fn additional_context_tool_outputs(tool_outputs: bool) -> Result<()> {
         context_snapshot::format_request_history_snapshot(
             "Named context changes are appended before the user; unchanged values are deduplicated.",
             &requests,
+            &ContextSnapshotOptions::default().rewrite_known_segments(),
+        )
+    );
+    Ok(())
+}
+
+// The shared MCP scenario is compiled only on non-Windows hosts.
+#[cfg(not(target_os = "windows"))]
+#[test_case::test_case("PreToolUse"; "pre_tool_use")]
+#[test_case::test_case("PostToolUse"; "post_tool_use")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hook_failure_blocks_tool_execution(event: &'static str) -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    skip_if_wine_exec!(
+        Ok(()),
+        "requires a Windows test_stdio_server in the Wine-exec environment"
+    );
+    let requests =
+        super::hooks_mcp::failed_mcp_hook_scenario(event, "block", "unavailable-scanner").await?;
+    let (name, description) = if event == "PreToolUse" {
+        (
+            "hook_failure_blocks_tool_execution",
+            "A required PreToolUse check fails; onFailure:block rejects the tool call and reports the failure to the model.",
+        )
+    } else {
+        (
+            "hook_failure_blocks_tool_result",
+            "A required PostToolUse check fails; onFailure:block withholds the completed tool's result and reports the failure to the model.",
+        )
+    };
+    insta::assert_snapshot!(
+        name,
+        context_snapshot::format_request_history_snapshot(
+            description,
+            &requests,
+            &ContextSnapshotOptions::default().rewrite_known_segments(),
+        )
+    );
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+#[tokio::test]
+async fn hook_failure_blocks_completion_until_recovery() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    let server = start_mock_server().await;
+    let responses = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_assistant_message("draft", "initial draft"),
+                ev_completed("resp-1"),
+            ]),
+            sse(vec![
+                ev_assistant_message("final", "reviewed draft"),
+                ev_completed("resp-2"),
+            ]),
+        ],
+    )
+    .await;
+    let test = test_codex()
+        .with_pre_build_hook(|home| {
+            super::hooks::write_stop_hook(home, &["failed check"], Some("block"))
+                .expect("write failing stop hook");
+        })
+        .with_config(core_test_support::hooks::trust_discovered_hooks)
+        // Command hooks execute on the host and need a host-native working directory.
+        .build(&server)
+        .await?;
+    test.submit_turn("write a draft").await?;
+    let requests = responses.requests();
+    assert_eq!(requests.len(), 2);
+    let mut bodies = requests
+        .iter()
+        .map(core_test_support::responses::ResponsesRequest::body_json)
+        .collect::<Vec<_>>();
+    for body in &mut bodies {
+        // Normalize the hook run's temporary path before snapshot truncation and hashing.
+        body["input"] = serde_json::from_str(&body["input"].to_string().replace(
+            test.codex_home_path().to_string_lossy().as_ref(),
+            "<CODEX_HOME>",
+        ))?;
+    }
+    let entries = bodies.iter().map(SnapshotEntry::body).collect::<Vec<_>>();
+    insta::assert_snapshot!(
+        "hook_failure_blocks_completion_until_recovery",
+        context_snapshot::format_context_snapshot(
+            "A Stop hook fails once with onFailure:block; completion resumes only after a subsequent hook run succeeds.",
+            &entries,
             &ContextSnapshotOptions::default().rewrite_known_segments(),
         )
     );
@@ -3386,8 +3491,8 @@ async fn subagent_waits_for_its_inherited_environment_configuration() -> Result<
             "<ENVIRONMENTS_INSTRUCTIONS>",
         ),
         (
-            r"(?ms)(^\d+:message/developer:\n    You are (?:`/root`, the primary agent|an agent) in a team of agents[^\n]+)\n.*?(\n^\d+:message/developer:)",
-            "${1}\n    <STANDARD_MULTI_AGENT_INSTRUCTIONS>${2}",
+            r"(?s)<multi_agent_role>([^\n]+)\n.*?</multi_agent_role>[^\n]*",
+            "${1}\n    <STANDARD_MULTI_AGENT_INSTRUCTIONS>",
         ),
         (
             r#"(environment_id"\s*:\s*"|<environment id=")(?:local|remote)"#,
@@ -3552,7 +3657,11 @@ async fn attached_side_chat_preserves_model_context_on_cold_resume() -> Result<(
     resume_options.environments = options.environments.clone();
     let child = test
         .thread_manager
-        .fork_prepared_thread(options, prepared)
+        .fork_prepared_thread(
+            options,
+            prepared,
+            codex_thread_store::InheritedHistoryVisibility::Full,
+        )
         .await?;
     child
         .thread

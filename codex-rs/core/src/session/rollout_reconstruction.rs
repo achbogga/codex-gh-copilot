@@ -193,17 +193,29 @@ impl Session {
         turn_context: &TurnContext,
         rollout_items: &[RolloutItem],
     ) -> RolloutReconstruction {
+        let policy = self
+            .state
+            .lock()
+            .await
+            .session_configuration
+            .guardian_retention;
+        let retention = policy.map(|policy| codex_history::MessageRetention {
+            thread_id: self.thread_id(),
+            policy,
+        });
         ContextManager::reconstruct_rollout(
             rollout_items,
             turn_context.history_mode,
-            ContextManager::for_session(
-                turn_context.root_capabilities_restricted,
-                &turn_context.config.features,
-                turn_context.config.guardian_context_budgeting(),
-                // Reconstructing retained evidence may mint temporary revisions before restoring
-                // the durable originals. Replay must not consume the live thread's item sequence.
-                Self::new_item_id_generator(),
-            ),
+            |ids| {
+                ContextManager::for_session(
+                    turn_context.root_capabilities_restricted,
+                    &turn_context.config.features,
+                    turn_context.config.guardian_reuses_parent_compaction(),
+                    turn_context.config.guardian_context_budgeting(),
+                    ids,
+                    retention,
+                )
+            },
             turn_context.model_info().truncation_policy.into(),
         )
     }
@@ -214,9 +226,13 @@ impl ContextManager {
     pub(crate) fn reconstruct_rollout(
         rollout_items: &[RolloutItem],
         history_mode: ThreadHistoryMode,
-        mut history: Self,
+        create_history: impl FnOnce(codex_thread_context_ids::ThreadContextIds) -> Self,
         truncation_policy: TruncationPolicy,
     ) -> RolloutReconstruction {
+        // Reconstruction may mint temporary revisions before restoring durable ones.
+        // Use an independent allocator for replay.
+        let ids = codex_history::context_ids_from_rollout(rollout_items);
+        let mut history = create_history(ids);
         // Rejection facts are durable across compaction boundaries. File IDs are immutable,
         // so retaining a fact after rollback is conservative and cannot suppress a different
         // future upload.

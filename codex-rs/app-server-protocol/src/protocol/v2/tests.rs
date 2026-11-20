@@ -1271,6 +1271,7 @@ fn fs_get_metadata_response_round_trips_minimal_fields() {
         is_symlink: false,
         created_at_ms: 123,
         modified_at_ms: 456,
+        size_bytes: Some(5),
     };
 
     let value = serde_json::to_value(&response).expect("serialize fs/getMetadata response");
@@ -1282,12 +1283,28 @@ fn fs_get_metadata_response_round_trips_minimal_fields() {
             "isSymlink": false,
             "createdAtMs": 123,
             "modifiedAtMs": 456,
+            "sizeBytes": 5,
         })
     );
 
-    let decoded = serde_json::from_value::<FsGetMetadataResponse>(value)
+    let decoded = serde_json::from_value::<FsGetMetadataResponse>(value.clone())
         .expect("deserialize fs/getMetadata response");
     assert_eq!(decoded, response);
+
+    let mut legacy_value = value;
+    legacy_value
+        .as_object_mut()
+        .expect("metadata object")
+        .remove("sizeBytes");
+    let legacy = serde_json::from_value::<FsGetMetadataResponse>(legacy_value)
+        .expect("deserialize fs/getMetadata response from an older server");
+    assert_eq!(
+        legacy,
+        FsGetMetadataResponse {
+            size_bytes: None,
+            ..response
+        }
+    );
 }
 
 #[test]
@@ -2134,7 +2151,6 @@ fn config_granular_approval_policy_is_marked_experimental() {
         forced_chatgpt_workspace_id: None,
         forced_login_method: None,
         web_search: None,
-        client_search_provider: None,
         tools: None,
         instructions: None,
         developer_instructions: None,
@@ -2170,7 +2186,6 @@ fn config_approvals_reviewer_is_marked_experimental() {
         forced_chatgpt_workspace_id: None,
         forced_login_method: None,
         web_search: None,
-        client_search_provider: None,
         tools: None,
         instructions: None,
         developer_instructions: None,

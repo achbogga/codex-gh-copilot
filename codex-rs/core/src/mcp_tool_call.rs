@@ -506,40 +506,9 @@ async fn handle_approved_mcp_tool_call(
     let mut tool_input = arguments_value
         .clone()
         .unwrap_or_else(|| JsonValue::Object(serde_json::Map::new()));
-    let is_search = prepared_call.is_host_owned_apps()
-        && codex_mcp::is_model_search_tool(prepared_call.tool_info());
-    let search = if is_search {
-        step_context
-            .extension_data
-            .get::<crate::model_search::ModelSearch>()
-    } else {
-        None
-    };
-    // Every Search MCP call can create provider-specific references. Claim Search MCP before the
-    // peer runs so a stale Code Mode call cannot mix them with native search references.
-    if is_search
-        && !crate::model_search::SearchOwner::admit(
-            &sess.services.thread_extension_data,
-            codex_protocol::openai_models::WebSearchProvider::SearchMcp,
-        )
-    {
-        let result = notify_mcp_tool_call_skip(
-            sess,
-            turn_context,
-            call_id,
-            invocation,
-            item_metadata,
-            "This thread is using native search".to_string(),
-            /*already_started*/ true,
-        )
-        .await;
-        return Ok(CompletedMcpToolCall {
-            result: CallToolResult::from_result(result),
-            tool_input,
-        });
-    }
     let mut elicitation_type = None;
     let mut request_error_code = None;
+    let mut request_rpc_error_code = None;
     let mut admission_error = None;
     let admit = || {
         let reason = sess
@@ -557,6 +526,19 @@ async fn handle_approved_mcp_tool_call(
         &prepared_call,
         turn_context.config.mcp_servers.get().get(&server),
     );
+    let span = mcp_tool_call_span(
+        sess,
+        turn_context,
+        McpToolCallSpanFields {
+            server_name: &server,
+            tool_name: &tool_name,
+            call_id,
+            server_origin: server_origin.as_deref(),
+            connector_id,
+            connector_name,
+        },
+    );
+    let outcome_guard = McpCallSpanOutcomeGuard::new(span.clone());
     let result = async {
         let result = async {
             let result = prepared_call
@@ -638,32 +620,6 @@ async fn handle_approved_mcp_tool_call(
                             serde_json::json!(turn_context.cyber_access_program),
                         );
                     }
-                    let request_meta = if let Some(crate::model_search::ModelSearch::Hosted {
-                        binding,
-                        context,
-                    }) = search.as_deref()
-                    {
-                        let mut meta = request_meta.unwrap_or_else(|| serde_json::json!({}));
-                        let turn_meta = meta
-                            .as_object_mut()
-                            .ok_or_else(|| anyhow::anyhow!("invalid MCP metadata"))?
-                            .entry(crate::X_CODEX_TURN_METADATA_HEADER)
-                            .or_insert_with(|| serde_json::json!({}));
-                        crate::model_search::with_search_context(turn_meta, context)?;
-                        let pin = binding
-                            .search_invocation_context(&prepared_call)
-                            .ok_or_else(|| {
-                                anyhow::anyhow!("Search MCP connection changed after discovery")
-                            })?;
-                        let apps = meta
-                            .get_mut(MCP_TOOL_CODEX_APPS_META_KEY)
-                            .and_then(serde_json::Value::as_object_mut)
-                            .ok_or_else(|| anyhow::anyhow!("missing hosted Apps call metadata"))?;
-                        apps.insert("invocation_context".to_string(), pin.clone());
-                        Some(meta)
-                    } else {
-                        request_meta
-                    };
                     let request_meta = with_mcp_tool_call_ids_meta(
                         request_meta,
                         &sess.thread_id.to_string(),
@@ -676,17 +632,6 @@ async fn handle_approved_mcp_tool_call(
                         request_meta,
                     )
                     .await?;
-                    if is_search
-                        && let Some(usage) = step_context
-                            .turn
-                            .extension_data
-                            .get::<crate::model_search::SearchTurnUsage>()
-                    {
-                        usage.record(
-                            &step_context.turn,
-                            codex_protocol::openai_models::WebSearchProvider::SearchMcp,
-                        );
-                    }
                     let mcp_call_trace = sess
                         .services
                         .rollout_thread_trace
@@ -736,6 +681,10 @@ async fn handle_approved_mcp_tool_call(
                     }
                     Err(error) => {
                         request_error_code = codex_rmcp_client::request_error_code(&error);
+                        // Preserve only the numeric protocol code, never the server's
+                        // message or arbitrary data (which may contain user content).
+                        request_rpc_error_code =
+                            codex_rmcp_client::mcp_error(&error).map(|error| error.code.0);
                         format!("tool call error: {error:?}")
                     }
                 });
@@ -783,21 +732,13 @@ async fn handle_approved_mcp_tool_call(
             .await)
         }
         .await;
-        record_mcp_result_span_telemetry(&Span::current(), &result, request_error_code);
+        outcome_guard.complete(&result, request_error_code);
+        if let Some(code) = request_rpc_error_code {
+            Span::current().record("rpc.jsonrpc.error_code", i64::from(code));
+        }
         result
     }
-    .instrument(mcp_tool_call_span(
-        sess,
-        turn_context,
-        McpToolCallSpanFields {
-            server_name: &server,
-            tool_name: &tool_name,
-            call_id,
-            server_origin: server_origin.as_deref(),
-            connector_id,
-            connector_name,
-        },
-    ))
+    .instrument(span)
     .await;
     if let Some(error) = admission_error {
         notify_mcp_tool_call_completed(
@@ -819,21 +760,6 @@ async fn handle_approved_mcp_tool_call(
     if let Some(elicitation_type) = elicitation_type {
         track_mcp_tool_call_elicitation(sess, turn_context, call_id, elicitation_type);
     }
-    // Direct and Code Mode calls share this boundary. Once an approved call enters
-    // it, conservatively attribute returned errors too: they may contain peer data.
-    let source_connector_id = prepared_call
-        .is_host_owned_apps()
-        .then(|| prepared_call.tool_info().connector_id.clone())
-        .flatten();
-    sess.services.executed_tool_calls.record_mcp_source(
-        codex_protocol::mcp::McpAttributionSource {
-            connector_id: source_connector_id,
-            plugin_id: prepared_call.plugin_id().map(str::to_string),
-            server_name: prepared_call.server_name().to_string(),
-            tool_name: prepared_call.tool_info().tool.name.to_string(),
-            first_turn_id: turn_context.sub_id.clone(),
-        },
-    );
     notify_mcp_tool_call_completed(
         sess,
         turn_context,
@@ -895,6 +821,9 @@ fn mcp_tool_call_span(
         codex.mcp.server_user_flow.triggered = Empty,
         error.type = Empty,
         codex.mcp.error.code = Empty,
+        codex.mcp.call.outcome = Empty,
+        rpc.jsonrpc.error_code = Empty,
+        otel.status_code = Empty,
     );
     record_server_fields(&span, fields.server_origin);
     span
@@ -921,6 +850,35 @@ fn record_server_fields(span: &Span, url: Option<&str>) {
     }
     if let Some(port) = parsed.port_or_known_default() {
         span.record("server.port", port as i64);
+    }
+}
+
+/// Records one outcome, including when the instrumented call is dropped before its first poll.
+struct McpCallSpanOutcomeGuard {
+    span: Option<Span>,
+}
+
+impl McpCallSpanOutcomeGuard {
+    fn new(span: Span) -> Self {
+        Self { span: Some(span) }
+    }
+
+    fn complete(
+        mut self,
+        result: &Result<CallToolResult, String>,
+        request_error_code: Option<&str>,
+    ) {
+        if let Some(span) = self.span.take() {
+            record_mcp_result_span_telemetry(&span, result, request_error_code);
+        }
+    }
+}
+
+impl Drop for McpCallSpanOutcomeGuard {
+    fn drop(&mut self) {
+        if let Some(span) = &self.span {
+            span.record("codex.mcp.call.outcome", "interrupted");
+        }
     }
 }
 
@@ -2128,6 +2086,7 @@ pub(crate) fn build_guardian_mcp_tool_review_request(
     call_id: &str,
     invocation: &McpInvocation,
     metadata: Option<&McpToolApprovalMetadata>,
+    prompt_permissions: Option<(String, Arc<FileSystemSandboxContext>)>,
 ) -> GuardianApprovalRequest {
     GuardianApprovalRequest::McpToolCall {
         id: call_id.to_string(),
@@ -2149,7 +2108,7 @@ pub(crate) fn build_guardian_mcp_tool_review_request(
                 open_world_hint: annotations.open_world_hint,
                 read_only_hint: annotations.read_only_hint,
             }),
-        prompt_permissions: None,
+        prompt_permissions,
     }
 }
 

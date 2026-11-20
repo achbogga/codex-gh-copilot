@@ -498,6 +498,7 @@ impl App {
                 crate::status::remote_connection::pending_server_version_notice(
                     &local_settings.tui,
                     &app_server_target,
+                    config.features.enabled(Feature::DaemonUpdates),
                     app_server.server_codex_home(),
                     CODEX_CLI_VERSION,
                     app_server.server_version(),
@@ -1506,7 +1507,7 @@ See the Codex keymap documentation for supported actions and examples."
                         app.app_server_target.clone(),
                         app.config.clone(),
                         app.local_settings.clone(),
-                        app.current_displayed_thread_id(),
+                        app.reconnect_thread_id(),
                         backends
                             .session_at(displayed_session)
                             .remote_cwd_override()

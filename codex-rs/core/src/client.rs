@@ -84,7 +84,6 @@ use codex_otel::SessionTelemetry;
 use codex_otel::WEBSOCKET_CONTINUATION_COUNT_METRIC;
 use codex_otel::current_span_w3c_trace_context;
 use codex_otel::inject_span_w3c_trace_headers;
-use codex_protocol::ItemIdGenerator;
 use codex_protocol::ResponseItemId;
 use codex_protocol::auth::AuthMode;
 
@@ -123,7 +122,6 @@ use tokio_util::sync::CancellationToken;
 use tracing::instrument;
 use tracing::trace;
 use tracing::warn;
-use uuid::Uuid;
 
 use crate::attestation::AttestationContext;
 use crate::attestation::AttestationProvider;
@@ -165,6 +163,7 @@ use codex_response_debug_context::extract_response_debug_context;
 use codex_response_debug_context::extract_response_debug_context_from_api_error;
 use codex_response_debug_context::telemetry_api_error_message;
 use codex_response_debug_context::telemetry_transport_error_message;
+use codex_thread_context_ids::ThreadContextIds;
 
 pub const OPENAI_BETA_HEADER: &str = "OpenAI-Beta";
 pub const X_CODEX_INSTALLATION_ID_HEADER: &str = "x-codex-installation-id";
@@ -209,7 +208,7 @@ fn session_telemetry_for_request(
 /// configuration is per turn and is passed explicitly to streaming/unary methods.
 struct ModelClientState {
     thread_id: ThreadId,
-    item_id_generator: ItemIdGenerator,
+    context_ids: ThreadContextIds,
     provider: SharedModelProvider,
     workspace_routing: WorkspaceRoutingContext,
     auth_env_telemetry: AuthEnvTelemetry,
@@ -648,7 +647,7 @@ impl ModelClient {
         model_provider: SharedModelProvider,
         agent_identity_policy: AgentIdentityAuthPolicy,
         thread_id: ThreadId,
-        item_id_generator: ItemIdGenerator,
+        context_ids: ThreadContextIds,
         session_source: SessionSource,
         originator: String,
         model_verbosity: Option<VerbosityConfig>,
@@ -684,7 +683,7 @@ impl ModelClient {
         Self {
             state: Arc::new(ModelClientState {
                 thread_id,
-                item_id_generator,
+                context_ids,
                 provider: model_provider,
                 workspace_routing,
                 auth_env_telemetry,
@@ -1266,21 +1265,13 @@ impl ModelClient {
             });
         }
         let is_openai = self.state.provider.info().is_openai();
-        // These prompt-only items are rebuilt on every request. Hash their visible payloads
-        // within the thread so retries and resumed sessions preserve their identity.
-        let prefix_namespace = Uuid::new_v5(
-            &Uuid::NAMESPACE_OID,
-            self.state.thread_id.to_string().as_bytes(),
-        );
+        let request_ids = self.state.context_ids.request_ids(self.state.thread_id);
         let mut prefix = Vec::new();
         let tools = if model_info.use_responses_lite {
             if !prompt.tools.is_empty() {
                 let tools = create_tools_json_for_responses_lite(&prompt.tools)?;
                 prefix.push(ResponseItem::AdditionalTools {
-                    id: Some(ResponseItemId::with_suffix(
-                        "at",
-                        Uuid::new_v5(&prefix_namespace, &serde_json::to_vec(&tools)?),
-                    )),
+                    id: Some(request_ids.id_by_content("at", &serde_json::to_vec(&tools)?)),
                     role: "developer".to_string(),
                     tools: Arc::from(tools),
                 });
@@ -1293,10 +1284,9 @@ impl ModelClient {
             let mut instructions = ContextualUserFragment::into(BaseInstructionsFragment(
                 prompt.base_instructions.text.clone(),
             ));
-            instructions.set_id(Some(ResponseItemId::with_suffix(
-                "msg",
-                Uuid::new_v5(&prefix_namespace, prompt.base_instructions.text.as_bytes()),
-            )));
+            instructions.set_id(Some(
+                request_ids.id_by_content("msg", prompt.base_instructions.text.as_bytes()),
+            ));
             prefix.push(instructions);
         }
         input.splice(0..0, prefix);
@@ -3070,7 +3060,7 @@ where
     let consumer_dropped_for_stream = consumer_dropped.clone();
     let settlement_started = Arc::clone(&delivery.settlement_started);
     let provider = Arc::clone(&client.provider);
-    let item_id_generator = Arc::clone(&client.item_id_generator);
+    let context_ids = client.context_ids.clone();
 
     tokio::spawn(async move {
         let mut logged_error = false;
@@ -3115,9 +3105,9 @@ where
                     // Reuse the added event's ID so tracing and the harness agree.
                     if item.id().is_none_or(|id| id.is_empty()) {
                         item.set_id(
-                            active_item_id
-                                .take()
-                                .or_else(|| item.id_prefix().map(item_id_generator.as_ref())),
+                            active_item_id.take().or_else(|| {
+                                item.id_prefix().map(|kind| context_ids.next_item(kind))
+                            }),
                         );
                     }
                     active_item_id = None;
@@ -3161,7 +3151,7 @@ where
                 Ok(mut event) => {
                     if let ResponseEvent::OutputItemAdded(item) = &mut event {
                         if item.id().is_none_or(|id| id.is_empty()) {
-                            item.set_id(item.id_prefix().map(item_id_generator.as_ref()));
+                            item.set_id(item.id_prefix().map(|kind| context_ids.next_item(kind)));
                         }
                         active_item_id = item.id().cloned();
                     }

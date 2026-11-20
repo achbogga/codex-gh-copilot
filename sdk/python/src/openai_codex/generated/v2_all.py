@@ -1032,6 +1032,11 @@ class ConfigReadParams(BaseModel):
     include_layers: Annotated[bool | None, Field(alias="includeLayers")] = None
 
 
+class ConfiguredHookFailurePolicy(Enum):
+    continue_ = "continue"
+    block = "block"
+
+
 class CommandConfiguredHookHandler(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -1047,6 +1052,7 @@ class CommandConfiguredHookHandler(BaseModel):
     async_: Annotated[bool, Field(alias="async")]
     command: str
     command_windows: Annotated[str | None, Field(alias="commandWindows")] = None
+    on_failure: Annotated[ConfiguredHookFailurePolicy | None, Field(alias="onFailure")] = None
     status_message: Annotated[str | None, Field(alias="statusMessage")] = None
     timeout_sec: Annotated[int | None, Field(alias="timeoutSec", ge=0)] = None
     type: Annotated[Literal["command"], Field(title="CommandConfiguredHookHandlerType")]
@@ -1057,6 +1063,7 @@ class McpToolConfiguredHookHandler(BaseModel):
         populate_by_name=True,
     )
     input: dict[str, Any]
+    on_failure: Annotated[ConfiguredHookFailurePolicy | None, Field(alias="onFailure")] = None
     server: str
     status_message: Annotated[str | None, Field(alias="statusMessage")] = None
     timeout_sec: Annotated[int | None, Field(alias="timeoutSec", ge=0)] = None
@@ -1671,6 +1678,14 @@ class FsGetMetadataResponse(BaseModel):
             description="File modification time in Unix milliseconds when available, otherwise `0`.",
         ),
     ]
+    size_bytes: Annotated[
+        int | None,
+        Field(
+            alias="sizeBytes",
+            description="Size in bytes if the path resolves to a regular file, otherwise null. Older servers omit this field.",
+            ge=0,
+        ),
+    ] = None
 
 
 class FsReadDirectoryEntry(BaseModel):
@@ -7362,11 +7377,6 @@ class WebSearchMode(Enum):
     live = "live"
 
 
-class WebSearchProvider(Enum):
-    standalone = "standalone"
-    search_mcp = "search_mcp"
-
-
 class WebSearchToolConfig(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
@@ -12098,12 +12108,6 @@ class Config(BaseModel):
         ),
     ] = None
     browser_use: BrowserUseConfig | None = None
-    client_search_provider: Annotated[
-        WebSearchProvider | None,
-        Field(
-            description="Effective tools.client_search_provider hint. Model-selected providers take precedence."
-        ),
-    ] = None
     compact_prompt: str | None = None
     computer_use: ComputerUseConfig | None = None
     desktop: dict[str, Any] | None = None

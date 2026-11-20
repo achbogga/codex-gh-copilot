@@ -15,6 +15,7 @@ use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
 use crate::tools::context::AbortedToolOutput;
 use crate::tools::context::FunctionToolOutput;
+use crate::tools::context::ToolCallSource;
 use crate::tools::context::ToolCallState;
 use crate::tools::context::ToolEnvironments;
 use crate::tools::context::ToolInvocation;
@@ -956,6 +957,31 @@ impl ToolRegistry {
                 Some(Arc::new(assessment));
         }
 
+        {
+            let conversation_history = invocation.session.conversation_history_snapshot().await;
+            tracing::event!(
+                target: "codex_otel.log_only",
+                tracing::Level::INFO,
+                event.name = "codex.guardian_probe_comparison",
+                stage = "tool",
+                thread_id = %invocation.session.thread_id,
+                turn_id = %invocation.turn.sub_id,
+                call_id = %invocation.call_id,
+                model = %invocation.step_context.settings.model_info.slug,
+                guardian_context_mode = crate::context::GuardianContextMode::from_history(conversation_history.as_ref()).as_str(),
+                scope = match invocation.source {
+                    ToolCallSource::Direct | ToolCallSource::DirectPlaintextMessage => "tool_item",
+                    ToolCallSource::CodeMode { .. } => "enclosing_item",
+                },
+                probe_review = match invocation.step_context.guardian_probe {
+                    Some(true) => "required",
+                    Some(false) => "not_required",
+                    None => "not_reported",
+                },
+                "Guardian probe comparison"
+            );
+        }
+
         if registered_tool.native_review == NativeReview::Required
             && let Err(err) = super::review_native_tool_call(&invocation).await
         {
@@ -1175,7 +1201,11 @@ async fn handle_any_tool(
         result: output,
         post_tool_use_payload,
     };
-    super::user_messaging::capture_delivery(&result, call_state);
+    super::user_messaging::capture_delivery(
+        &result,
+        call_state,
+        invocation.turn.config.guardian_context_budgeting(),
+    );
     if result.result.contains_external_context()
         && invocation.turn.config.memories.disable_on_external_context
     {
@@ -1232,6 +1262,7 @@ pub(crate) async fn apply_pre_tool_use(
                 .map_err(PreToolUseError::Failed)?;
             if updated.payload != invocation.payload {
                 Arc::make_mut(&mut updated.step_context).serving_assessment = None;
+                Arc::make_mut(&mut updated.step_context).guardian_probe = None;
             }
             *invocation = updated;
             Ok(())

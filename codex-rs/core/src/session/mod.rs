@@ -181,7 +181,6 @@ use codex_protocol::request_permissions::RequestPermissionsResponse;
 use codex_protocol::request_user_input::RequestUserInputArgs;
 use codex_protocol::request_user_input::RequestUserInputResponse;
 use codex_rmcp_client::ElicitationResponse;
-use codex_rollout::should_persist_response_item;
 use codex_rollout::state_db;
 use codex_rollout_trace::CompactionTraceContext;
 use codex_rollout_trace::ThreadStartedTraceMetadata;
@@ -192,6 +191,7 @@ use codex_sandboxing::policy_transforms::intersect_permission_profiles_with_cont
 use codex_shell_command::parse_command::parse_command;
 use codex_terminal_detection::user_agent;
 use codex_thread_store::CreateThreadParams;
+use codex_thread_store::InheritedHistoryVisibility;
 use codex_thread_store::LiveThread;
 use codex_thread_store::LiveThreadInitGuard;
 use codex_thread_store::LocalThreadStore;
@@ -260,6 +260,8 @@ mod config_refresh;
 pub(crate) mod context_window;
 mod daemon_recovery;
 mod environment;
+mod executor_discovery;
+pub(crate) use executor_discovery::ExecutorDiscovery;
 mod extension_interruption;
 pub(crate) mod extension_metrics;
 mod guardian_checkpoint;
@@ -277,7 +279,6 @@ mod mcp_prewarm;
 mod mcp_refresh;
 mod mcp_runtime;
 mod model_catalog_settings;
-mod model_ids;
 pub(crate) mod multi_agents;
 mod plugin_selection;
 mod realtime_handoff;
@@ -310,6 +311,8 @@ pub(crate) use self::environment::ThreadEnvironmentDefaults;
 use self::handlers::submission_dispatch_span;
 use self::handlers::submission_loop;
 pub(crate) use self::input_queue::InputQueueActivity;
+pub(crate) use self::input_queue::InputQueueEntry;
+pub(crate) use self::input_queue::SubmittedAdditionalContext;
 pub(crate) use self::input_queue::TurnInput;
 pub(crate) use self::input_queue::TurnInputQueue;
 pub(crate) use self::input_queue::UserInputMetadata;
@@ -496,6 +499,7 @@ pub(crate) enum ForkPersistence {
     Referenced {
         history_base: Option<HistoryPosition>,
         inherited_item_count: usize,
+        inherited_history_visibility: InheritedHistoryVisibility,
     },
 }
 
@@ -604,12 +608,12 @@ const CYBER_SAFETY_URL: &str = "https://developers.openai.com/codex/concepts/cyb
 
 pub(crate) fn assign_missing_item_id(
     item: &mut ResponseItem,
-    item_id_generator: &codex_protocol::ItemIdGenerator,
+    context_ids: &codex_thread_context_ids::ThreadContextIds,
 ) {
     if item.id().is_none_or(|id| id.is_empty())
         && let Some(prefix) = item.id_prefix()
     {
-        item.set_id(Some(item_id_generator(prefix)));
+        item.set_id(Some(context_ids.next_item(prefix)));
     }
 }
 
@@ -1036,12 +1040,27 @@ impl Session {
         let enable_full_access_form_input = !root_capabilities_restricted
             && matches!(thread_source.as_ref(), Some(ThreadSource::User))
             && client_mcp_extensions.contains(OPENAI_STANDARD_FORM_INPUT_EXTENSION_ID);
-        let provider_auth = codex_model_provider::ProviderAuthContext {
-            credentials: Arc::clone(&auth_manager),
-            runtime_auth: configured_runtime.map(|runtime| (runtime, config.runtime_auth_mode)),
-        };
+        let provider_auth = thread_extension_init
+            .get::<crate::guardian::GuardianReviewerInference>()
+            .map_or_else(
+                || codex_model_provider::ProviderAuthContext {
+                    credentials: Arc::clone(&auth_manager),
+                    runtime_auth: configured_runtime
+                        .map(|runtime| (runtime, config.runtime_auth_mode)),
+                },
+                |inference| inference.0.auth.clone(),
+            );
         // Replace any inherited context before startup hooks see this thread's effective auth.
         thread_extension_init.insert(provider_auth.clone());
+        if config.guardian_model_provider.is_some()
+            && thread_extension_init
+                .get::<crate::guardian::GuardianInferenceContext>()
+                .is_none()
+        {
+            return Err(CodexErr::InvalidRequest(
+                "host-selected Guardian inference context is not initialized".to_string(),
+            ));
+        }
         let session_configuration = SessionConfiguration {
             turn_extension_init,
             provider: provider_auth.model_provider(config.model_provider.clone()),
@@ -1069,6 +1088,7 @@ impl Session {
             codex_home: config.codex_home.clone(),
             thread_name: None,
             disabled_plugin_ids,
+            guardian_retention: config.guardian_retention_policy(),
             original_config_do_not_use: Arc::clone(&config),
             metrics_service_name,
             app_server_client_name: None,
@@ -2049,14 +2069,13 @@ impl Session {
         // checkpoint can make reconstruction depend on reviewer compatibility.
         let reviewer_compaction_hash = if codex_history::CompactionCheckpoint::latest(&history)
             .is_some_and(codex_history::CompactionCheckpoint::is_usable)
-            && turn_context
-                .config
-                .features
-                .enabled(Feature::GuardianReuseParentCompaction)
+            && turn_context.config.guardian_reuses_parent_compaction()
         {
             let context = crate::guardian::GuardianReviewContext::from(turn_context);
-            let (_, reviewer) = crate::guardian::resolve_review_model(self, &context).await;
-            reviewer.comp_hash.clone()
+            crate::guardian::resolve_review_model(self, &context)
+                .await
+                .ok()
+                .and_then(|(_, reviewer)| reviewer.comp_hash.clone())
         } else {
             None
         };
@@ -2424,12 +2443,15 @@ impl Session {
         app_server_client_name: Option<String>,
         app_server_client_version: Option<String>,
     ) -> ConstraintResult<()> {
-        self.update_settings(SessionSettingsUpdate {
-            app_server_client_name,
-            app_server_client_version,
-            ..Default::default()
-        })
-        .await?;
+        // A new turn may supply a valid replacement for a model blocked by policy.
+        // Recording its client identity must not validate the old model first.
+        let configuration = &mut self.state.lock().await.session_configuration;
+        if let Some(name) = app_server_client_name {
+            configuration.app_server_client_name = Some(name);
+        }
+        if let Some(version) = app_server_client_version {
+            configuration.app_server_client_version = Some(version);
+        }
         Ok(())
     }
 
@@ -2742,6 +2764,7 @@ impl Session {
 
     /// Persist the event to rollout and send it to clients.
     pub(crate) async fn send_event(&self, turn_context: &TurnContext, mut msg: EventMsg) {
+        crate::agent::turn_metrics::record_terminal_event(turn_context, &msg);
         if let Some((item_id, started_at_ms)) = msg.command_approval_start() {
             // The client can see the command before execution. Keep its first start
             // for the canonical lifecycle events that will be saved in history.
@@ -3081,24 +3104,6 @@ impl Session {
     }
 
     pub(crate) async fn emit_turn_item_started(&self, turn_context: &TurnContext, item: &TurnItem) {
-        if matches!(
-            item,
-            TurnItem::WebSearch(_)
-                | TurnItem::Extension(codex_extension_items::ExtensionItem::WebSearch(_))
-        ) && let Some(usage) = turn_context
-            .extension_data
-            .get::<crate::model_search::SearchTurnUsage>()
-        {
-            // This turn selected Search MCP. Pin native only when a fallback call starts.
-            crate::model_search::SearchOwner::admit(
-                &self.services.thread_extension_data,
-                codex_protocol::openai_models::WebSearchProvider::Standalone,
-            );
-            usage.record(
-                turn_context,
-                codex_protocol::openai_models::WebSearchProvider::Standalone,
-            );
-        }
         let started_at_ms = turn_context
             .turn_timing_state
             .record_item_started(item.id(), now_unix_timestamp_ms())
@@ -4017,7 +4022,7 @@ impl Session {
     }
 
     pub(crate) fn assign_missing_response_item_id(&self, item: &mut ResponseItem) {
-        assign_missing_item_id(item, &self.item_id_generator);
+        assign_missing_item_id(item, &self.context_ids);
     }
 
     pub(crate) fn response_item_from_user_input(
@@ -4119,10 +4124,6 @@ impl Session {
         // Preserve any existing tool-specific override.
         let policy: codex_utils_output_truncation::TruncationPolicy =
             model_info.truncation_policy.into();
-        crate::model_search::SearchOwner::checkpoint(
-            &self.services.thread_extension_data,
-            &mut items,
-        );
         for envelope in &mut items {
             if matches!(
                 envelope.item,
@@ -4135,40 +4136,13 @@ impl Session {
                     .get_or_insert_with(|| with_serialization_allowance(policy).token_budget());
             }
         }
-        // Last-N-turn forks retain a suffix starting at a user turn boundary. Repeat the
-        // cumulative checkpoint there so the suffix remains self-contained even when the fork
-        // happens mid-turn; dirty checkpoints preserve new sources between boundaries.
-        let force_mcp_checkpoint = items
+        let has_user_turn_boundary = items
             .iter()
             .any(|envelope| crate::context_manager::is_user_turn_boundary(&envelope.item));
-        let cached_retry = matches!(&realtime, Some(RealtimeRecord::Handoff(input)) if input.cached_envelope.is_some());
-        let mcp_revision = (!cached_retry)
-            .then(|| {
-                self.services
-                    .executed_tool_calls
-                    .mcp_attribution_checkpoint(force_mcp_checkpoint)
-            })
-            .flatten()
-            .and_then(|(attribution, revision)| {
-                let first_persisted = items
-                    .iter()
-                    .position(|envelope| should_persist_response_item(&envelope.item))?;
-                for (index, envelope) in items.iter_mut().enumerate() {
-                    // Rollout batches may be partially written. Checkpoint the first persisted
-                    // item, and repeat the checkpoint at turn boundaries retained by forks.
-                    if index == first_persisted
-                        || crate::context_manager::is_user_turn_boundary(&envelope.item)
-                    {
-                        envelope.metadata.get_or_insert_default().mcp_attribution =
-                            Some(attribution.clone());
-                    }
-                }
-                Some(revision)
-            });
         // Thread settings precede the first accepted input. Keep the persistence lock
         // through its seal, and clear the pending flag only after the seal succeeds.
         let realtime_settings_guard = if realtime.is_some()
-            && force_mcp_checkpoint
+            && has_user_turn_boundary
             && self.reference_context_item().await.is_none()
         {
             Some(thread_settings::acquire_persistence_lock(self).await)
@@ -4284,14 +4258,11 @@ impl Session {
                     metadata: image,
                 });
         }
-        let persisted = if let Some(RealtimeRecord::Handoff(prepared)) = &realtime {
+        if let Some(RealtimeRecord::Handoff(prepared)) = &realtime {
             self.finish_realtime_handoff(prepared, &items[0]).await;
-            true
-        } else if matches!(&realtime, Some(RealtimeRecord::Chunk)) {
-            true
-        } else {
+        } else if !matches!(&realtime, Some(RealtimeRecord::Chunk)) {
             let settings_guard =
-                if force_mcp_checkpoint && self.reference_context_item().await.is_none() {
+                if has_user_turn_boundary && self.reference_context_item().await.is_none() {
                     Some(thread_settings::acquire_persistence_lock(self).await)
                 } else {
                     None
@@ -4309,14 +4280,10 @@ impl Session {
                 .map(RolloutItem::EventMsg)
                 .chain(items.into_iter().map(RolloutItem::ResponseItem))
                 .collect::<Vec<_>>();
-            self.persist_rollout_items(&rollout_items).await
-        };
-        drop(realtime_settings_guard);
-        if persisted && let Some(revision) = mcp_revision {
-            self.services
-                .executed_tool_calls
-                .mark_mcp_attribution_persisted(revision);
+            self.persist_rollout_items(&rollout_items).await;
+            drop(settings_guard);
         }
+        drop(realtime_settings_guard);
         if turn_context.config.memories.disable_on_external_context
             && let Some(item) = response_items
                 .iter()
@@ -4555,12 +4522,14 @@ impl Session {
                 session_telemetry.clone(),
             ));
             extension_data.insert_arc(Arc::clone(&settings.model_info.model));
+            // Standalone and hosted search must use the same turn-scoped permission mode.
+            extension_data.insert(turn_context.config.web_search_mode.value());
             extension_data.insert_arc(
                 self.host_skills_for_step(&turn_context, &environments)
                     .await,
             );
             // Only skill discovery may use a turn's temporary file access. Plugin servers and
-            // hooks use the session inventory above because they can outlive the step.
+            // hooks use the session inventory because they can outlive the step.
             let turn_skill_discovery =
                 if let Some(grants) = turn_context.turn_skill_filesystem_grants(&environments) {
                     if turn_context
@@ -4606,27 +4575,15 @@ impl Session {
             if let Some(messages) = model_messages.notes() {
                 extension_data.insert(messages.clone());
             }
-            let mut required_servers = required_servers.to_vec();
-            if settings.model_info.web_search_provider
-                == Some(codex_protocol::openai_models::WebSearchProvider::SearchMcp)
-                && turn_context.apps_enabled()
-                && !turn_context.config.requires_native_search()
-                && (turn_context.config.web_search_mode.value()
-                    != codex_protocol::config_types::WebSearchMode::Disabled
-                    || turn_context
-                        .config
-                        .features
-                        .enabled(codex_features::Feature::HostedSearchPolicy))
-            {
-                required_servers.push(codex_mcp::CODEX_APPS_MCP_SERVER_NAME.to_owned());
-            }
+            let captured_executor_discovery_v2 = executor_capability_discovery_v2.as_deref();
             let catalogs = self.lock_cloud_catalogs().await;
             let (mcp, prepared_recommendations) = tokio::join!(
                 // MCP refresh can be large; keep it off the sampling request's stack.
                 Box::pin(self.mcp_runtime_for_step(
                     turn_context.as_ref(),
                     &selected_capability_roots,
-                    &required_servers,
+                    captured_executor_discovery_v2,
+                    required_servers,
                     required_plugins,
                 )),
                 async {
@@ -4637,33 +4594,17 @@ impl Session {
                     }
                 },
             );
-            let search = crate::model_search::resolve(
-                turn_context.as_ref(),
-                &settings,
-                &mcp,
-                &self.services,
-            )
-            .await;
-            extension_data.insert(match &search {
-                Some(crate::model_search::ModelSearch::Native { mode, .. }) => *mode,
-                _ => turn_context.config.web_search_mode.value(),
-            });
-            let mcp = if let Some(search) = search {
-                let binding = match &search {
-                    crate::model_search::ModelSearch::Hosted { binding, .. } => Arc::clone(binding),
-                    _ => mcp,
-                };
-                extension_data.insert(search);
-                binding
-            } else {
-                mcp
-            };
+            let mcp = mcp?;
+            // Skill and hook admission must use the policy published with this binding.
+            let mut plugin_config = turn_context.config.as_ref().clone();
+            plugin_config.plugins = mcp.config().plugins.clone();
+            plugin_config.config_layer_stack = mcp.config().config_layer_stack.clone();
             extension_data.insert(selected_capability_roots);
             let selected_environments = environments.all_selections();
             let select_plugins = |discovery, discovery_v2| {
                 self.services.mcp_manager.selected_plugins_for_step(
                     codex_extension_api::McpServerContributionContext::for_step(
-                        turn_context.config.as_ref(),
+                        &plugin_config,
                         &self.services.mcp_thread_init,
                         &self.services.thread_extension_data,
                         &turn_context.originator,
@@ -4767,6 +4708,7 @@ impl Session {
         Ok(Arc::new(StepContext {
             sampled_through_sequence: None,
             serving_assessment: None,
+            guardian_probe: None,
             turn_cancellation: cancellation_token.clone(),
             preempt: turn_context
                 .config
@@ -4870,6 +4812,17 @@ impl Session {
                 std::slice::from_mut(&mut response_item),
                 model_info.truncation_policy.into(),
             );
+            // Record the item and its sender at the history write, before shutdown can cancel persistence.
+            self.services
+                .rollout_thread_trace
+                .record_history_item_accepted(
+                    &turn_context.sub_id,
+                    &response_item.item,
+                    communication
+                        .delivery
+                        .as_ref()
+                        .and_then(|d| d.source_tool_call_id.as_deref()),
+                );
         }
         if let Some(delivery) = delivery.take() {
             result_write = delivery.consumed(self.thread_id);
@@ -4889,7 +4842,12 @@ impl Session {
             write.confirm();
         }
         drop(boundary);
-        self.send_raw_response_items(turn_context, &items).await;
+        let [item] = items;
+        self.send_event(
+            turn_context,
+            EventMsg::RawResponseItem(RawResponseItemEvent { item }),
+        )
+        .await;
     }
 
     async fn maybe_warn_on_server_model_mismatch(
@@ -4978,20 +4936,6 @@ impl Session {
             }
             CompactedHistoryInstallation::Prefix(prefix) => (&prefix.model_info.comp_hash, None),
         };
-        crate::model_search::SearchOwner::checkpoint(
-            &self.services.thread_extension_data,
-            &mut items,
-        );
-        let mcp_revision = self
-            .services
-            .executed_tool_calls
-            .mcp_attribution_checkpoint(/*force*/ true)
-            .and_then(|(attribution, revision)| {
-                items.last_mut().map(|envelope| {
-                    envelope.metadata.get_or_insert_default().mcp_attribution = Some(attribution);
-                    revision
-                })
-            });
         if let Some(checkpoint) = items.iter_mut().rev().find(|envelope| {
             matches!(
                 envelope.item,
@@ -5049,6 +4993,17 @@ impl Session {
                 metadata,
                 started_item,
             } = replacement;
+            // History assigns sequences on append and on legacy replay. Only newly
+            // rendered context in this replacement should receive a prefix ID.
+            let fresh = items.iter_mut().filter(|entry| {
+                entry
+                    .metadata
+                    .as_ref()
+                    .and_then(|m| m.history_sequence)
+                    .is_none()
+            });
+            self.context_ids
+                .assign_prefix_ids(fresh.map(|entry| &mut entry.item));
             for envelope in &mut items {
                 self.assign_missing_response_item_id(&mut envelope.item);
             }
@@ -5133,13 +5088,7 @@ impl Session {
             // The frozen turn context must not override current settings in persisted metadata.
             RolloutItem::EventMsg(thread_settings::applied_event(self).await),
         ];
-        if self.persist_rollout_items(&rollout_items).await
-            && let Some(revision) = mcp_revision
-        {
-            self.services
-                .executed_tool_calls
-                .mark_mcp_attribution_persisted(revision);
-        }
+        self.persist_rollout_items(&rollout_items).await;
         {
             let mut state = self.state.lock().await;
             state.queue_pending_session_start_source(codex_hooks::SessionStartSource::Compact);
@@ -5202,6 +5151,13 @@ impl Session {
     #[tracing::instrument(level = "trace", skip_all, fields(item_count = items.len()))]
     async fn send_raw_response_items(&self, turn_context: &TurnContext, items: &[ResponseItem]) {
         for item in items {
+            self.services
+                .rollout_thread_trace
+                .record_history_item_accepted(
+                    &turn_context.sub_id,
+                    item,
+                    /*source_tool_call_id*/ None,
+                );
             self.send_event(
                 turn_context,
                 EventMsg::RawResponseItem(RawResponseItemEvent { item: item.clone() }),
@@ -5625,12 +5581,8 @@ impl Session {
         let retained_client_items = crate::compact_remote_v2::retained_client_items(
             history.annotated_items(),
             &history.file_audio_durations,
-            |item| {
-                crate::compact_remote_v2::should_retain_client_item(
-                    item,
-                    &turn_context.config.features,
-                )
-            },
+            ResponseItemEnvelope::is_always_retained,
+            Some(&turn_context.config.features),
         );
         // Resolve the roster before allocating a new context window.
         let rendered = world_state.render_full_with_host_roster().await;
@@ -5739,12 +5691,15 @@ impl Session {
         if self.reference_context_item().await.is_some() {
             return Ok(None);
         }
-        let items = crate::context_manager::updates::merge_world_state_updates(updates);
-        self.state
-            .lock()
-            .await
-            .history
-            .set_world_state_baseline(snapshot.clone());
+        let mut items = crate::context_manager::updates::merge_world_state_updates(updates);
+        {
+            let mut state = self.state.lock().await;
+            // Recovery may need to append full instructions after a surviving prefix.
+            if state.history.annotated_items().is_empty() {
+                self.context_ids.assign_prefix_ids(items.iter_mut());
+            }
+            state.history.set_world_state_baseline(snapshot.clone());
+        }
         self.publish_step_context(
             step_context,
             items,
@@ -6090,8 +6045,9 @@ impl Session {
         &self,
         turn_context: &TurnContext,
         model_info: &ModelInfo,
-        response_item: ResponseItem,
+        mut response_item: ResponseItem,
     ) {
+        self.assign_missing_response_item_id(&mut response_item);
         // Add to conversation history and persist response item to rollout.
         self.record_conversation_items(
             turn_context,
