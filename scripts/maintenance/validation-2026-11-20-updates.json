@@ -1,6 +1,6 @@
 {
   "validated_at": "2026-11-20T22:27:41.712167+00:00",
-  "status": "updated-controller-pending",
+  "status": "updated",
   "upstream_head": "4c153c26c0b5c54a22e0e775b46bcc4aa8872c79",
   "upstream_commits_merged_since_previous_update": 74,
   "runtime": {
@@ -50,8 +50,11 @@
     "native_copilot_and_node_executables_verified": true,
     "all_copilot_catalogs_include_latest_models": true,
     "controller_handoff_scheduled": true,
-    "controller_handoff_verified": false,
-    "total_sessions_restored": 13
+    "controller_handoff_verified": true,
+    "total_sessions_restored": 14,
+    "controller_model_and_reasoning_preserved": true,
+    "controller_completed_goal_and_budget_preserved": true,
+    "controller_native_execution_executable_verified": true
   },
   "models": {
     "enabled_bridge_compatible_models": 17,
@@ -93,5 +96,6 @@
   },
   "upstream_contained_in_fork_head": true,
   "private_reports_captures_goals_and_build_artifacts_outside_repository": true,
-  "state_note": "Session states were checked at reload. Later user work is left untouched."
+  "state_note": "Session states were checked at reload. Later user work is left untouched.",
+  "controller_verified_at": "2026-11-20T22:29:29.273278+00:00"
 }
