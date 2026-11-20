@@ -8,7 +8,7 @@ import { parseArgs } from "node:util";
 import { listModels, startBridge } from "./bridge.mjs";
 import { codexInvocation } from "./run.mjs";
 import { createSdkTransport } from "./sdk-transport.mjs";
-import { modelArguments } from "./model-config.mjs";
+import { catalogArguments, reasoningForModel } from "./model-config.mjs";
 import { efficiencyArguments, enabled } from "./efficiency/config.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -96,24 +96,22 @@ async function main() {
       directory: transportDir,
       diagnosticFile: join(state, "stream-diagnostics.jsonl"),
     });
-    const model = (
-      await listModels(async () => "sdk-owned", sdk.transport, {
-        messages: true,
-      })
-    ).find((m) => m.id === values.model);
+    const models = await listModels(async () => "sdk-owned", sdk.transport, {
+      messages: true,
+      runtimeModelIds: sdk.models.map((entry) => entry.id),
+    });
+    const model = models.find((m) => m.id === values.model);
     if (!model)
       throw new Error(
         "The selected Copilot model is not enabled for a supported streaming tool protocol.",
       );
-    if (
-      !model.capabilities.supports.reasoning_effort?.includes(values.reasoning)
-    )
-      throw new Error("Unsupported reasoning effort for this model.");
+    reasoningForModel(model, values.reasoning);
     const token = randomBytes(32).toString("hex");
     bridge = await startBridge({
       getToken: async () => "sdk-owned",
       localToken: token,
       model: values.model,
+      models,
       transport: sdk.transport,
       socketPath: join(transportDir, "bridge.sock"),
     });
@@ -125,7 +123,8 @@ async function main() {
       localToken: token,
       stateDir: "/codex-home",
       args: [
-        ...(await modelArguments(
+        ...(await catalogArguments(
+          models,
           model,
           values.reasoning,
           join(transportDir, "models.json"),

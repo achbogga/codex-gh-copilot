@@ -67,14 +67,18 @@ export function switchFixture(models, { nearLimit = false } = {}) {
     const target = /Use shell to read (\S+\.txt) and (\S+\.txt)\./.exec(
       visible,
     );
-    let code;
-    if (!isCompact && !afterTool && source) {
-      const patch = /replace PATCH_BEFORE in (\S+) with (\S+)\./.exec(visible);
+    const patch = /replace PATCH_BEFORE in (\S+) with (\S+)\./.exec(visible);
+    const patchCode = () => {
       assert.ok(patch);
       const diff = `*** Begin Patch\n*** Update File: ${patch[1]}\n@@\n-PATCH_BEFORE\n+${patch[2]}\n*** End Patch`;
-      code = `text(await tools.exec_command({cmd:${JSON.stringify("cat " + quote(source[1]))}})); text(await tools.apply_patch(${JSON.stringify(diff)}));`;
+      return `text(await tools.apply_patch(${JSON.stringify(diff)}));`;
+    };
+    let code;
+    if (!isCompact && !afterTool && source) {
+      code = `text(await tools.exec_command({cmd:${JSON.stringify("cat " + quote(source[1]))}})); ` + patchCode();
     } else if (!isCompact && !afterTool && target) {
       code = `text(await tools.exec_command({cmd:${JSON.stringify("cat " + quote(target[1]) + " " + quote(target[2]))}}));`;
+      if (patch) code += " " + patchCode();
     }
     const declarations = [
       ...(body.tools ?? []),

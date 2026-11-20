@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
-import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { pathToFileURL } from "node:url";
@@ -94,6 +94,7 @@ export async function checkModelSwitches({
   to,
   synthetic = false,
   simulateUsage = false,
+  sameThread = false,
 }) {
   assert.ok(
     Number.isInteger(jobs) && jobs >= 1 && jobs <= 4,
@@ -117,9 +118,11 @@ export async function checkModelSwitches({
     mode: 0o600,
   });
   const sources = models.filter((m) => !from || from.includes(m.id));
-  const destinations = models.filter((m) => !to || to.includes(m.id));
+  const destinations = sameThread && to
+    ? to.map((id) => models.find((m) => m.id === id))
+    : models.filter((m) => !to || to.includes(m.id));
   const backend = synthetic
-    ? switchFixture(models, { nearLimit: true })
+    ? switchFixture(models, { nearLimit: !sameThread })
     : fetch;
   assert.ok(
     sources.length && destinations.length,
@@ -130,6 +133,8 @@ export async function checkModelSwitches({
       models.some((m) => m.id === id),
       `Not advertised: ${id}`,
     );
+  assert.ok(!sameThread || sources.length === 1,
+    "Same-thread checks require exactly one explicitly selected source model.");
   const report = {
     started: new Date().toISOString(),
     models: models.map((m) => ({
@@ -139,6 +144,8 @@ export async function checkModelSwitches({
     })),
     expected_pairs: sources.length * destinations.length,
     results: [],
+    same_thread: sameThread,
+    synthetic,
   };
   const record = async (row) => {
     report.results.push(row);
@@ -371,6 +378,7 @@ export async function checkModelSwitches({
                 patch: true,
                 history: true,
                 thread_id: parent.thread.id,
+                native_pid: native.pid,
                 inference,
               });
             } catch (error) {
@@ -394,7 +402,20 @@ export async function checkModelSwitches({
                 });
               continue;
             }
+            // A destination must retrieve the marker from native tool history;
+            // the original seed cannot be reopened after the switch.
+            if (sameThread) await unlink(seed);
+            let previousModel = source.id;
+            let chainFailed = false;
+            let step = 0;
             for (const target of destinations) {
+              const stepIndex = step++;
+              if (sameThread && chainFailed) {
+                await record({ kind: "pair", source: previousModel, target: target.id,
+                  passed: false, stage: "prior-step-failed", same_thread: true,
+                  thread_id: parent.thread.id, native_pid: native.pid });
+                continue;
+              }
               const start = Date.now(),
                 offset = calls.length,
                 wireOffset = wireModels.length;
@@ -402,11 +423,14 @@ export async function checkModelSwitches({
               const proofMarker = token("MATRIX_TARGET_"),
                 proof = join(
                   project,
-                  `proof-${sourceId}-${safeId(target.id)}.txt`,
+                  `proof-${sourceId}-${safeId(target.id)}-${stepIndex}.txt`,
                 );
               await writeFile(proof, proofMarker + "\n");
+              const stepArtifact = join(project, `step-${sourceId}-${stepIndex}.txt`);
+              const stepPatch = `PATCH_AFTER_${safeId(target.id)}_${stepIndex}`;
+              if (sameThread) await writeFile(stepArtifact, "PATCH_BEFORE\n");
               try {
-                branch = await native.rpc("thread/fork", {
+                branch = sameThread ? parent : await native.rpc("thread/fork", {
                   threadId: parent.thread.id,
                   cwd: project,
                   approvalPolicy: "never",
@@ -415,7 +439,10 @@ export async function checkModelSwitches({
                 const result = await native.turn(
                   branch.thread.id,
                   target.id,
-                  `Continue this native session. Use shell to read ${proof} and ${artifact}. Reply with the exact MATRIX_HISTORY_ token you remember from the earlier turn, the MATRIX_TARGET_ token just read, and the PATCH_AFTER_ value from the artifact. Do not read any seed files. Do not spawn agents or change files.`,
+                  `Continue this native session. Use shell to read ${proof} and ${artifact}. ` +
+                    (sameThread ? `Use apply_patch to replace PATCH_BEFORE in ${stepArtifact} with ${stepPatch}. ` : "") +
+                    `Reply with the exact MATRIX_HISTORY_ token you remember from the earlier turn, the MATRIX_TARGET_ token just read, and the PATCH_AFTER_ value from the artifact. ` +
+                    (sameThread ? `Also include ${stepPatch}. Do not read any seed files or spawn agents.` : "Do not read any seed files. Do not spawn agents or change files."),
                   reasoningForModel(target),
                 );
                 completed(result);
@@ -446,6 +473,13 @@ export async function checkModelSwitches({
                   ),
                   "Target completed without native shell tools.",
                 );
+                if (sameThread) {
+                  assert.equal(branch.thread.id, parent.thread.id);
+                  assert.ok((await readFile(stepArtifact, "utf8")).includes(stepPatch),
+                    "Switched model did not apply its own patch.");
+                  assert.ok(items.some((item) => item.type === "fileChange"),
+                    "Switched model did not use native apply_patch.");
+                }
                 const first = calls
                   .slice(offset)
                   .find((call) => call.model === target.id);
@@ -504,10 +538,10 @@ export async function checkModelSwitches({
                       "Native structured tool history changed during the model switch.",
                     );
                   }
-                if (compacted && source.id !== target.id)
+                if (compacted && (sameThread ? previousModel : source.id) !== target.id)
                   assert.equal(
                     wireModels[wireOffset],
-                    source.id,
+                    sameThread ? previousModel : source.id,
                     "Compaction must use the source model before switching.",
                   );
                 const usage = result.events
@@ -515,11 +549,15 @@ export async function checkModelSwitches({
                   .at(-1)?.params?.tokenUsage;
                 await record({
                   kind: "pair",
-                  source: source.id,
+                  source: sameThread ? previousModel : source.id,
                   target: target.id,
                   passed: true,
                   history: true,
                   tools: true,
+                  patch: sameThread,
+                  same_thread: sameThread,
+                  thread_id: branch.thread.id,
+                  native_pid: native.pid,
                   patched_files: true,
                   inference,
                   native_claude_thinking_blocks_forwarded: signedBlocks,
@@ -534,20 +572,25 @@ export async function checkModelSwitches({
                   ...(simulateUsage ? { native_usage_simulated: true } : {}),
                   elapsed_ms: Date.now() - start,
                 });
+                previousModel = target.id;
               } catch (error) {
                 await record({
                   kind: "pair",
-                  source: source.id,
+                  source: sameThread ? previousModel : source.id,
                   target: target.id,
                   passed: false,
+                  same_thread: sameThread,
+                  thread_id: branch?.thread.id ?? null,
+                  native_pid: native.pid,
                   error: error.message.slice(0, 1400),
                   ...(error.code === "PROVIDER_REFUSAL"
                     ? { classification: "provider_refusal" }
                     : {}),
                   elapsed_ms: Date.now() - start,
                 });
+                chainFailed = sameThread;
               } finally {
-                if (branch)
+                if (branch && !sameThread)
                   await native
                     .rpc("thread/unload", { threadId: branch.thread.id })
                     .catch(() => {});
@@ -592,6 +635,7 @@ async function main() {
       "live": { type: "boolean" },
       "synthetic": { type: "boolean" },
       "near-limit": { type: "boolean" },
+      "same-thread": { type: "boolean" },
       "out": { type: "string" },
       "jobs": { type: "string", default: "4" },
       "from": { type: "string" },
@@ -616,6 +660,7 @@ async function main() {
     copilotBin: process.env.COPILOT_PILOT_RUNTIME_BIN,
     synthetic: values.synthetic,
     simulateUsage: values["near-limit"],
+    sameThread: values["same-thread"],
   });
   console.log(
     JSON.stringify({

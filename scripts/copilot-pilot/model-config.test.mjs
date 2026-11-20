@@ -11,6 +11,32 @@ import {
   modelCompactLimit,
 } from "./model-config.mjs";
 
+test("newly advertised Sol and Astra 6.2 remain selectable with full per-model limits and native history", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "copilot-model-62-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const models = ["gpt-6.1-sol", "gpt-6.2-sol", "gpt-6.2-astra"].map(id => ({
+    id, name: id, policy: { state: "enabled" }, supported_endpoints: ["/responses"],
+    capabilities: { supports: { tool_calls: true, streaming: true, vision: true, reasoning_effort: ["high", "max"] },
+      limits: { max_context_window_tokens: 1050000, max_prompt_tokens: 922000, max_output_tokens: 128000 } },
+  }));
+  const args = await catalogArguments(models, models[0], "max", join(dir, "catalog.json"));
+  const catalog = JSON.parse(await readFile(join(dir, "catalog.json"), "utf8"));
+  assert.deepEqual(catalog.models.map(m => m.slug), models.map(m => m.id));
+  for (const entry of catalog.models) {
+    assert.equal(entry.context_window, 1050000);
+    assert.equal(entry.max_context_window, 1050000);
+    assert.equal(entry.default_reasoning_level, "max");
+    assert.equal(entry.visibility, "list");
+    assert.equal(entry.auto_compact_token_limit, 619900);
+    assert.equal(entry.comp_hash, catalog.models[0].comp_hash);
+  }
+  assert.ok(!args.some(arg => arg.startsWith("model_context_window=")));
+  const containerArgs = await catalogArguments(models, models[2], "max",
+    join(dir, "container-catalog.json"), "/transport/models.json");
+  assert.ok(containerArgs.includes('model_catalog_json="/transport/models.json"'));
+  assert.equal(JSON.parse(await readFile(join(dir, "container-catalog.json"), "utf8")).models.length, 3);
+});
+
 test("switchable catalogs keep context and reasoning limits per model without global overrides", async (t) => {
   const dir = await mkdtemp(join(tmpdir(), "copilot-switchable-catalog-"));
   t.after(() => rm(dir, { recursive: true, force: true }));

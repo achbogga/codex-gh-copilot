@@ -41,6 +41,7 @@ export async function catalogArguments(
   selected,
   reasoning,
   catalogPath,
+  visibleCatalogPath = catalogPath,
 ) {
   const bundled = JSON.parse(
     await readFile(
@@ -104,7 +105,7 @@ export async function catalogArguments(
   });
   return [
     "-c",
-    `model_catalog_json=${JSON.stringify(catalogPath)}`,
+    `model_catalog_json=${JSON.stringify(visibleCatalogPath)}`,
     "-c",
     `model_reasoning_effort=${JSON.stringify(reasoningForModel(selected, reasoning) ?? "none")}`,
     "-c",

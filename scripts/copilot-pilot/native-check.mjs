@@ -78,6 +78,7 @@ export async function nativeCheck({ binary, invocation, cwd, stderrFile }) {
   });
   child.stdin.write('{"jsonrpc":"2.0","method":"initialized"}\n');
   return {
+    pid: child.pid,
     rpc,
     turn: async (threadId, model, text, effort, timeout = 180000) => {
       if (turns.has(threadId))

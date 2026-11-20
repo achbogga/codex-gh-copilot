@@ -17,7 +17,7 @@ const duration = Number(process.env.COPILOT_PILOT_LONG_STREAM_MS ?? 660000);
 const cliPath = process.env.COPILOT_PILOT_RUNTIME_BIN;
 const codexBin = process.env.COPILOT_PILOT_CODEX_BIN;
 const models = (
-  process.env.COPILOT_PILOT_STREAM_MODELS ?? "gpt-6.1-sol,claude-opus-5.5"
+  process.env.COPILOT_PILOT_STREAM_MODELS ?? "gpt-6.1-sol,gpt-6.2-sol,gpt-6.2-astra,claude-opus-5.5"
 ).split(",");
 const encode = (event) => Buffer.from(`data: ${JSON.stringify(event)}\n\n`);
 

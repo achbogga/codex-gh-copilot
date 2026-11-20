@@ -6,6 +6,7 @@ import { isAbsolute, join, resolve } from "node:path";
 import { parseArgs, promisify } from "node:util";
 import { pathToFileURL } from "node:url";
 import { listModels, startBridge } from "./bridge.mjs";
+import { catalogArguments } from "./model-config.mjs";
 
 export function tokenSource({ command, environment = process.env }) {
   const token = environment.COPILOT_PILOT_TOKEN?.trim();
@@ -188,6 +189,7 @@ async function main() {
     getToken,
     localToken,
     model: values.model,
+    models,
   });
   try {
     const invocation = codexInvocation({
@@ -195,7 +197,11 @@ async function main() {
       url: bridge.url,
       localToken,
       stateDir,
-      args: separator < 0 ? [] : process.argv.slice(separator + 1),
+      args: [
+        ...(await catalogArguments(models, models.find(m => m.id === values.model), "max",
+          join(stateDir, "copilot-models.json"))),
+        ...(separator < 0 ? [] : process.argv.slice(separator + 1)),
+      ],
     });
     const child = spawn(values["codex-bin"], invocation.args, {
       env: invocation.env,

@@ -72,6 +72,26 @@ function send(url, body = payload, options = {}) {
   });
 }
 
+test("one bridge routes newly advertised Sol/Astra 6.2 and keeps unregistered models denied", async (t) => {
+  const seen = [];
+  const models = ["gpt-6.1-sol", "gpt-6.2-sol", "gpt-6.2-astra"];
+  const bridge = await fixture(t, async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    seen.push(JSON.parse(Buffer.concat(chunks)).model);
+    res.writeHead(200, { "content-type": "text/event-stream" });
+    res.end(sse([completed]));
+  }, { models });
+  for (const model of models) {
+    const response = await send(bridge.url, { ...payload, model });
+    assert.equal(response.status, 200);
+    await response.text();
+  }
+  const denied = await send(bridge.url, { ...payload, model: "unregistered-model" });
+  assert.equal(denied.status, 400);
+  assert.deepEqual(seen, models);
+});
+
 test(
   "active streams outlive the idle deadline without changing response bytes",
   { timeout: 5000 },
